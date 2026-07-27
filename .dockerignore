@@ -1,5 +1,7 @@
 .git
 .gradle
+**/.gradle
+**/.kotlin
 .idea
 build
 buildSrc/build
