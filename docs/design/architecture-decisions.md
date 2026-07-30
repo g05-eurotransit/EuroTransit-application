@@ -286,3 +286,20 @@ ADR-005.
 - **Propagate the end-user token (token exchange / on-behalf-of):** carries the real user context, but
   needs Keycloak token-exchange and a broader contract; heavier than needed now. Kept as the direction
   for the user-context follow-up.
+
+## ADR-013: Inventory Concurrency and Idempotency Conflicts
+
+**Decision:** Resolve inventory overselling and late-idempotency conflicts by moving the consistency checks directly into the PostgreSQL database using atomic operations and real-time state checks.
+
+### Selected Option: Atomic Database Updates and State Verification
+
+- The cleanup job for expired reservations (`HELD` -> `EXPIRED`) now uses a single atomic `UPDATE ... RETURNING` query instead of fetching, checking, and saving in separate steps.
+- The `IdempotencyRecordRepository` uses a similar atomic approach with `@Modifying` queries.
+- When an idempotency hit occurs (a retry for the same idempotency key), the system now checks the *real-time* state of the reservation in the database. If the cached idempotency record says the seats are `HELD`, but the database says they are `EXPIRED` or `CANCELLED`, the system rejects the retry with a `409 Conflict`.
+- Metrics are incremented solely at the end of the `TransactionalOperator` flow (using `.doOnSuccess`), ensuring that rollbacks (e.g. outbox failures) do not result in false metric increments.
+
+### Why This Is Better
+
+- It completely eliminates the "overselling" race condition where two concurrent instances of the cleanup job could double-release the seats.
+- It prevents the "late retry" vulnerability where a slow network retry from Orders could successfully claim an idempotency cache hit for a reservation that the cleanup job already expired.
+- It keeps the metrics strictly aligned with the actual committed state of the database.

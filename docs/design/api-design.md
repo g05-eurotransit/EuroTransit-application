@@ -50,8 +50,8 @@ Idempotency keys are generated at the caller boundary for the operation they pro
 - Orders consumes the public checkout key and stores it with `principalId`, operation, request fingerprint, and result.
 - Orders generates separate downstream keys for internal operations, derived from the immutable order id. The implemented scheme (ADR-011) is `inv-{orderId}` for the seat reservation, `pay-{orderId}` for the payment authorization, and `rel-{orderId}` for the compensating release.
 - Inventory and Payments store their received keys scoped by operation, service caller/user context where applicable, request fingerprint, and result.
-- Reusing the same key with the same logical payload returns the original logical result.
-- Reusing the same key with a different logical payload returns `409 Conflict`.
+- Reusing the same key with the same logical payload returns the original logical result, **unless the underlying reservation has expired or been cancelled, in which case it returns `409 Conflict` (`RESERVATION_EXPIRED` or `RESERVATION_CANCELLED`)**.
+- Reusing the same key with a different logical payload returns `409 Conflict` (`IDEMPOTENCY_CONFLICT`).
 
 Idempotency retention is service-specific:
 
