@@ -226,6 +226,60 @@ class ReservationService(
     }
 
     /**
+     * Atomically confirms a held reservation and its seats after a successful payment.
+     * Uses natural idempotency and row-level locking to prevent expiration conflicts.
+     */
+    @Transactional
+    suspend fun confirmReservation(reservationId: String, orderId: UUID): ReservationResponse {
+        val reservation = reservationRepository.findByReservationIdForUpdate(reservationId)
+            ?: throw ApiException(HttpStatus.NOT_FOUND, "RESERVATION_NOT_FOUND", "Reservation not found")
+
+        if (reservation.orderId != orderId) {
+            throw ApiException(HttpStatus.CONFLICT, "RESERVATION_ORDER_CONFLICT", "Reservation belongs to another order")
+        }
+
+        if (reservation.status == ReservationStatus.CONFIRMED.name) {
+            return ReservationResponse(
+                reservationId,
+                ReservationStatus.CONFIRMED,
+                reservation.expiresAt.toLocalDateTime()
+            )
+        }
+
+        if (reservation.status == ReservationStatus.EXPIRED.name) {
+            throw ApiException(HttpStatus.CONFLICT, "RESERVATION_EXPIRED", "Reservation has expired")
+        }
+
+        if (reservation.status == ReservationStatus.CANCELLED.name) {
+            throw ApiException(HttpStatus.CONFLICT, "RESERVATION_CANCELLED", "Reservation was cancelled")
+        }
+
+        // It is HELD. Verify expiration in real-time with the clock
+        if (!reservation.expiresAt.isAfter(OffsetDateTime.now(clock))) {
+            val expiredReservation = reservation.copy(status = "EXPIRED", isNewRecord = false)
+            reservationRepository.save(expiredReservation)
+            seatRepository.releaseSeats(reservationId)
+            throw ApiException(HttpStatus.CONFLICT, "RESERVATION_EXPIRED", "Reservation has expired")
+        }
+
+        val expectedSeats = seatRepository.countByReservationId(reservationId)
+        val updatedSeats = seatRepository.confirmSeats(reservationId)
+
+        if (updatedSeats.toLong() != expectedSeats) {
+            throw ApiException(HttpStatus.CONFLICT, "RESERVATION_SEAT_CONFLICT", "Seat count mismatch during confirmation")
+        }
+
+        val confirmedReservation = reservation.copy(status = "CONFIRMED", isNewRecord = false)
+        reservationRepository.save(confirmedReservation)
+
+        return ReservationResponse(
+            reservationId,
+            ReservationStatus.CONFIRMED,
+            reservation.expiresAt.toLocalDateTime()
+        )
+    }
+
+    /**
      * Releases a reservation and frees up the associated seats.
      * This operation is naturally idempotent.
      */

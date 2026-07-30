@@ -19,9 +19,19 @@ interface SeatRepository : CoroutineCrudRepository<Seat, String> {
     suspend fun holdSeats(routeId: String, seatIds: List<String>, reservationId: String): Int
 
     /**
-     * Releases seats when a hold expires or is canceled.
+     * Releases seats when a hold expires or is canceled. Only operates on HELD seats.
      */
     @Modifying
-    @Query("UPDATE seats SET status = 'AVAILABLE', reservation_id = NULL WHERE reservation_id = :reservationId")
+    @Query("UPDATE seats SET status = 'AVAILABLE', reservation_id = NULL WHERE reservation_id = :reservationId AND status = 'HELD'")
     suspend fun releaseSeats(reservationId: String): Int
+    
+    /**
+     * Confirms seats by transitioning them to SOLD. Only operates on HELD seats.
+     */
+    @Modifying
+    @Query("UPDATE seats SET status = 'SOLD' WHERE reservation_id = :reservationId AND status = 'HELD'")
+    suspend fun confirmSeats(reservationId: String): Int
+    
+    @Query("SELECT COUNT(*) FROM seats WHERE reservation_id = :reservationId")
+    suspend fun countByReservationId(reservationId: String): Long
 }

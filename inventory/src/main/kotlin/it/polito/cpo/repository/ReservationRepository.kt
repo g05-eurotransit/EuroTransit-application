@@ -1,14 +1,20 @@
 package it.polito.cpo.repository
 
 import it.polito.cpo.model.Reservation
+import kotlinx.coroutines.flow.Flow
+import org.springframework.data.r2dbc.repository.Query
 import org.springframework.data.repository.kotlin.CoroutineCrudRepository
 import org.springframework.stereotype.Repository
+import java.time.OffsetDateTime
 
 @Repository
 interface ReservationRepository : CoroutineCrudRepository<Reservation, String> {
     suspend fun findByReservationId(reservationId: String): Reservation?
     
     // Atomically expires reservations and returns the affected rows
-    @org.springframework.data.r2dbc.repository.Query("UPDATE reservations SET status = 'EXPIRED' WHERE status = 'HELD' AND expires_at < :now RETURNING *")
-    fun expireAndReturn(now: java.time.OffsetDateTime): kotlinx.coroutines.flow.Flow<Reservation>
+    @Query("UPDATE reservations SET status = 'EXPIRED' WHERE status = 'HELD' AND expires_at < :now RETURNING *")
+    fun expireAndReturn(now: OffsetDateTime): Flow<Reservation>
+
+    @Query("SELECT * FROM reservations WHERE reservation_id = :reservationId FOR UPDATE")
+    suspend fun findByReservationIdForUpdate(reservationId: String): Reservation?
 }

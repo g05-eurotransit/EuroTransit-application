@@ -122,6 +122,10 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
 - `DELETE /api/inventory/reservations/{reservationId}`
   - Releases a hold when payment fails, the order is cancelled, or the 10-minute hold expires.
   - Is idempotent by reservation state and does not require an `Idempotency-Key`.
+- `PUT /api/inventory/reservations/{reservationId}/confirmation`
+  - Confirms a held reservation after successful payment, permanently changing the reservation to `CONFIRMED` and its seats to `SOLD`.
+  - Internal API; callers must be trusted services such as Orders.
+  - Uses natural idempotency based on the resource identity and the required `orderId` in the body. Does not require an `Idempotency-Key` header.
 
 ### Payments
 

@@ -1,5 +1,6 @@
 package it.polito.cpo.controller
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import it.polito.cpo.contracts.inventory.ReservationRequest
 import it.polito.cpo.contracts.inventory.ReservationResponse
 import it.polito.cpo.contracts.inventory.ReservationStatus
@@ -32,6 +33,7 @@ import org.springframework.security.test.web.reactive.server.SecurityMockServerC
 import org.springframework.test.web.reactive.server.WebTestClient
 import org.springframework.transaction.reactive.TransactionalOperator
 import tools.jackson.databind.ObjectMapper
+import java.time.Clock
 import java.time.LocalDateTime
 import java.util.UUID
 
@@ -74,8 +76,8 @@ class InventoryControllerTest {
         Mockito.mock(OutboxEventRepository::class.java),
         Mockito.mock(ObjectMapper::class.java),
         Mockito.mock(TransactionalOperator::class.java),
-        io.micrometer.core.instrument.simple.SimpleMeterRegistry(),
-        java.time.Clock.systemUTC()
+        SimpleMeterRegistry(),
+        Clock.systemUTC()
     ) {
         var lastReserveRequest: ReservationRequest? = null
         var lastIdempotencyKey: String? = null

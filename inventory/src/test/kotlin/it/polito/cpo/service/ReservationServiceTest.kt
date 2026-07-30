@@ -1,8 +1,11 @@
 package it.polito.cpo.service
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import io.r2dbc.postgresql.codec.Json
 import it.polito.cpo.contracts.events.InventoryFailedEvent
 import it.polito.cpo.contracts.events.InventoryReservedEvent
 import it.polito.cpo.contracts.inventory.ReservationRequest
+import it.polito.cpo.contracts.inventory.ReservationResponse
 import it.polito.cpo.contracts.inventory.ReservationStatus
 import it.polito.cpo.model.OutboxEvent
 import it.polito.cpo.repository.OutboxEventRepository
@@ -18,6 +21,8 @@ import org.junit.jupiter.api.assertThrows
 import org.mockito.Mockito
 import org.springframework.http.HttpStatus
 import it.polito.cpo.observability.ApiException
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 import org.springframework.transaction.ReactiveTransaction
 import org.springframework.transaction.reactive.TransactionCallback
 import org.springframework.transaction.reactive.TransactionalOperator
@@ -26,6 +31,10 @@ import reactor.core.publisher.Mono
 import tools.jackson.databind.ObjectMapper
 import tools.jackson.databind.json.JsonMapper
 import tools.jackson.module.kotlin.kotlinModule
+import java.time.Clock
+import java.time.Instant
+import java.time.LocalDateTime
+import java.time.OffsetDateTime
 import java.util.UUID
 
 class ReservationServiceTest {
@@ -58,6 +67,14 @@ class ReservationServiceTest {
             releaseCalledWith = reservationId
             return 1
         }
+        var confirmCalledWith: String? = null
+        override suspend fun confirmSeats(reservationId: String): Int {
+            confirmCalledWith = reservationId
+            return 2
+        }
+        override suspend fun countByReservationId(reservationId: String): Long {
+            return 2L
+        }
     }
 
     private class FakeReservationRepository(
@@ -67,15 +84,18 @@ class ReservationServiceTest {
         override suspend fun findByReservationId(reservationId: String): Reservation? {
             return store[reservationId]
         }
+        override suspend fun findByReservationIdForUpdate(reservationId: String): Reservation? {
+            return store[reservationId]
+        }
         override suspend fun <S : Reservation> save(entity: S): S {
             store[entity.reservationId] = entity
             return entity
         }
-        override fun expireAndReturn(now: java.time.OffsetDateTime): kotlinx.coroutines.flow.Flow<Reservation> {
+        override fun expireAndReturn(now: OffsetDateTime): Flow<Reservation> {
             val expired = store.values.filter { it.status == "HELD" && it.expiresAt.isBefore(now) }
             val updated = expired.map { it.copy(status = "EXPIRED") }
             updated.forEach { store[it.reservationId] = it }
-            return kotlinx.coroutines.flow.flowOf(*updated.toTypedArray())
+            return flowOf(*updated.toTypedArray())
         }
     }
 
@@ -117,8 +137,8 @@ class ReservationServiceTest {
         objectMapper = mapper,
         outboxEventRepository = outboxRepo,
         transactionalOperator = fakeTransactionalOperator,
-        meterRegistry = io.micrometer.core.instrument.simple.SimpleMeterRegistry(),
-        clock = java.time.Clock.systemUTC()
+        meterRegistry = SimpleMeterRegistry(),
+        clock = Clock.systemUTC()
     )
 
     @Test
@@ -226,7 +246,7 @@ class ReservationServiceTest {
             operation = "RESERVE",
             requestFingerprint = fingerprint,
             responseStatusCode = 201,
-            responseBody = io.r2dbc.postgresql.codec.Json.of(mapper.writeValueAsString(cachedResponse))
+            responseBody = Json.of(mapper.writeValueAsString(cachedResponse))
         ))
 
         val response = service.reserveSeats(idempotencyKey, principalId, correlationId, request)
@@ -257,10 +277,10 @@ class ReservationServiceTest {
             .invoke(service, request) as String
 
         val reservationId = "res-expired"
-        val cachedResponse = it.polito.cpo.contracts.inventory.ReservationResponse(
-            reservationId, 
-            ReservationStatus.HELD, 
-            java.time.LocalDateTime.now().plusMinutes(10)
+        val cachedResponse = ReservationResponse(
+            reservationId,
+            ReservationStatus.HELD,
+            LocalDateTime.now().plusMinutes(10)
         )
         
         idemRepo.save(IdempotencyRecord(
@@ -269,7 +289,7 @@ class ReservationServiceTest {
             operation = "RESERVE",
             requestFingerprint = fingerprint,
             responseStatusCode = 201,
-            responseBody = io.r2dbc.postgresql.codec.Json.of(mapper.writeValueAsString(cachedResponse))
+            responseBody = Json.of(mapper.writeValueAsString(cachedResponse))
         ))
 
         // Put EXPIRED reservation in DB
@@ -278,7 +298,7 @@ class ReservationServiceTest {
             orderId = UUID.randomUUID(),
             routeId = "route-1",
             status = "EXPIRED",
-            expiresAt = java.time.OffsetDateTime.now().minusMinutes(5)
+            expiresAt = OffsetDateTime.now().minusMinutes(5)
         ))
 
         val exception = assertThrows<ApiException> {
@@ -307,10 +327,10 @@ class ReservationServiceTest {
             .invoke(service, request) as String
 
         val reservationId = "res-cancelled"
-        val cachedResponse = it.polito.cpo.contracts.inventory.ReservationResponse(
+        val cachedResponse = ReservationResponse(
             reservationId, 
             ReservationStatus.HELD, 
-            java.time.LocalDateTime.now().plusMinutes(10)
+            LocalDateTime.now().plusMinutes(10)
         )
         
         idemRepo.save(IdempotencyRecord(
@@ -319,7 +339,7 @@ class ReservationServiceTest {
             operation = "RESERVE",
             requestFingerprint = fingerprint,
             responseStatusCode = 201,
-            responseBody = io.r2dbc.postgresql.codec.Json.of(mapper.writeValueAsString(cachedResponse))
+            responseBody = Json.of(mapper.writeValueAsString(cachedResponse))
         ))
 
         // Put CANCELLED reservation in DB
@@ -328,7 +348,7 @@ class ReservationServiceTest {
             orderId = UUID.randomUUID(),
             routeId = "route-1",
             status = "CANCELLED",
-            expiresAt = java.time.OffsetDateTime.now().minusMinutes(5)
+            expiresAt = OffsetDateTime.now().minusMinutes(5)
         ))
 
         val exception = assertThrows<ApiException> {
@@ -360,7 +380,7 @@ class ReservationServiceTest {
             operation = "RESERVE",
             requestFingerprint = "a-completely-different-hash",
             responseStatusCode = 201,
-            responseBody = io.r2dbc.postgresql.codec.Json.of("{}")
+            responseBody = Json.of("{}")
         ))
 
         val exception = assertThrows<ApiException> {
@@ -388,7 +408,7 @@ class ReservationServiceTest {
             orderId = UUID.randomUUID(),
             routeId = "route-1",
             status = ReservationStatus.HELD.name,
-            expiresAt = java.time.OffsetDateTime.now().plusMinutes(10)
+            expiresAt = OffsetDateTime.now().plusMinutes(10)
         ))
 
         service.releaseReservation(reservationId)
@@ -403,12 +423,12 @@ class ReservationServiceTest {
         val resRepo = FakeReservationRepository()
         
         // Fixed time for the clock
-        val fixedInstant = java.time.Instant.parse("2026-07-30T12:00:00Z")
-        val fixedClock = java.time.Clock.fixed(fixedInstant, java.time.ZoneOffset.UTC)
+        val fixedInstant = Instant.parse("2026-07-30T12:00:00Z")
+        val fixedClock = Clock.fixed(fixedInstant, java.time.ZoneOffset.UTC)
         
         val service = ReservationService(
             seatRepo, resRepo, FakeIdempotencyRecordRepository(), FakeOutboxEventRepository(),
-            mapper, fakeTransactionalOperator, io.micrometer.core.instrument.simple.SimpleMeterRegistry(),
+            mapper, fakeTransactionalOperator, SimpleMeterRegistry(),
             fixedClock
         )
 
@@ -418,7 +438,7 @@ class ReservationServiceTest {
             orderId = UUID.randomUUID(),
             routeId = "route-1",
             status = "HELD",
-            expiresAt = java.time.OffsetDateTime.parse("2026-07-30T11:55:00Z")
+            expiresAt = OffsetDateTime.parse("2026-07-30T11:55:00Z")
         ))
         
         // Reservation that expires in the future (12:05) -> SHOULD NOT be expired
@@ -427,10 +447,10 @@ class ReservationServiceTest {
             orderId = UUID.randomUUID(),
             routeId = "route-1",
             status = "HELD",
-            expiresAt = java.time.OffsetDateTime.parse("2026-07-30T12:05:00Z")
+            expiresAt = OffsetDateTime.parse("2026-07-30T12:05:00Z")
         ))
 
-        val now = java.time.OffsetDateTime.now(fixedClock)
+        val now = OffsetDateTime.now(fixedClock)
         val count = service.sweepExpiredReservations(now)
 
         assertEquals(1, count, "Only one reservation should have expired")
@@ -461,11 +481,11 @@ class ReservationServiceTest {
         val idemRepo = FakeIdempotencyRecordRepository()
         
         val failingOutboxRepo = FakeOutboxEventRepository(shouldThrow = true)
-        val meterRegistry = io.micrometer.core.instrument.simple.SimpleMeterRegistry()
+        val meterRegistry = SimpleMeterRegistry()
         val service = ReservationService(
             seatRepo, resRepo, idemRepo, failingOutboxRepo,
             mapper, fakeTransactionalOperator, meterRegistry,
-            java.time.Clock.systemUTC()
+            Clock.systemUTC()
         )
 
         val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1")
@@ -481,5 +501,88 @@ class ReservationServiceTest {
         
         assertEquals(0.0, successCount, "Successful metric should not be incremented on rollback")
         assertEquals(0.0, failedCount, "Failed metric should not be incremented here either")
+    }
+    @Test
+    fun `confirmReservation successfully confirms a valid held reservation and updates seats`() = runTest {
+        val seatRepo = FakeSeatRepository()
+        val resRepo = FakeReservationRepository()
+        val service = buildService(seatRepo, resRepo, FakeIdempotencyRecordRepository(), FakeOutboxEventRepository())
+
+        val orderId = UUID.randomUUID()
+        val reservationId = "res-confirm-1"
+        resRepo.save(Reservation(
+            reservationId = reservationId,
+            orderId = orderId,
+            routeId = "route-1",
+            status = ReservationStatus.HELD.name,
+            expiresAt = OffsetDateTime.now().plusMinutes(10)
+        ))
+
+        val response = service.confirmReservation(reservationId, orderId)
+
+        assertEquals(ReservationStatus.CONFIRMED, response.status)
+        assertEquals("CONFIRMED", resRepo.store[reservationId]?.status)
+        assertEquals(reservationId, seatRepo.confirmCalledWith)
+    }
+
+    @Test
+    fun `confirmReservation throws 409 if orderId mismatches`() = runTest {
+        val seatRepo = FakeSeatRepository()
+        val resRepo = FakeReservationRepository()
+        val service = buildService(seatRepo, resRepo, FakeIdempotencyRecordRepository(), FakeOutboxEventRepository())
+
+        val reservationId = "res-confirm-2"
+        resRepo.save(Reservation(
+            reservationId = reservationId,
+            orderId = UUID.randomUUID(), // Different order ID
+            routeId = "route-1",
+            status = ReservationStatus.HELD.name,
+            expiresAt = OffsetDateTime.now().plusMinutes(10)
+        ))
+
+        val exception = assertThrows<ApiException> {
+            service.confirmReservation(reservationId, UUID.randomUUID()) // Requested order ID
+        }
+
+        assertEquals(HttpStatus.CONFLICT, exception.status)
+        assertEquals("RESERVATION_ORDER_CONFLICT", exception.code)
+    }
+
+    @Test
+    fun `confirmReservation throws 409 if real-time clock says it is expired, sets it to EXPIRED and releases seats`() = runTest {
+        val seatRepo = FakeSeatRepository()
+        val resRepo = FakeReservationRepository()
+        
+        // Fixed time for the clock
+        val fixedInstant = Instant.parse("2026-07-30T12:00:00Z")
+        val fixedClock = Clock.fixed(fixedInstant, java.time.ZoneOffset.UTC)
+        
+        val service = ReservationService(
+            seatRepo, resRepo, FakeIdempotencyRecordRepository(), FakeOutboxEventRepository(),
+            mapper, fakeTransactionalOperator, SimpleMeterRegistry(),
+            fixedClock
+        )
+
+        val orderId = UUID.randomUUID()
+        val reservationId = "res-confirm-expired"
+        resRepo.save(Reservation(
+            reservationId = reservationId,
+            orderId = orderId,
+            routeId = "route-1",
+            status = ReservationStatus.HELD.name,
+            // Expired 5 minutes ago!
+            expiresAt = OffsetDateTime.parse("2026-07-30T11:55:00Z")
+        ))
+
+        val exception = assertThrows<ApiException> {
+            service.confirmReservation(reservationId, orderId)
+        }
+
+        assertEquals(HttpStatus.CONFLICT, exception.status)
+        assertEquals("RESERVATION_EXPIRED", exception.code)
+        
+        // Ensure it transitioned to EXPIRED and seats released
+        assertEquals("EXPIRED", resRepo.store[reservationId]?.status)
+        assertEquals(reservationId, seatRepo.releaseCalledWith)
     }
 }

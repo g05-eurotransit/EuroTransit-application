@@ -1,5 +1,6 @@
 package it.polito.cpo.controller
 
+import it.polito.cpo.contracts.inventory.ReservationConfirmationRequest
 import it.polito.cpo.contracts.inventory.ReservationRequest
 import it.polito.cpo.contracts.inventory.ReservationResponse
 import it.polito.cpo.contracts.inventory.ReservationStatus
@@ -34,5 +35,14 @@ class InventoryController(
     ): ResponseEntity<Void> {
         reservationService.releaseReservation(reservationId)
         return ResponseEntity.noContent().build()
+    }
+
+    @PutMapping("/{reservationId}/confirmation")
+    suspend fun confirmReservation(
+        @PathVariable reservationId: String,
+        @RequestBody request: ReservationConfirmationRequest
+    ): ResponseEntity<ReservationResponse> {
+        val response = reservationService.confirmReservation(reservationId, request.orderId)
+        return ResponseEntity.ok(response)
     }
 }
