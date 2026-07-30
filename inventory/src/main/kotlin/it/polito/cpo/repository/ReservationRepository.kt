@@ -8,6 +8,7 @@ import org.springframework.stereotype.Repository
 interface ReservationRepository : CoroutineCrudRepository<Reservation, String> {
     suspend fun findByReservationId(reservationId: String): Reservation?
     
-    // Finds reservations matching a status (e.g. "HELD") that have expired
-    fun findByStatusAndExpiresAtBefore(status: String, expiresAt: java.time.OffsetDateTime): kotlinx.coroutines.flow.Flow<Reservation>
+    // Atomically expires reservations and returns the affected rows
+    @org.springframework.data.r2dbc.repository.Query("UPDATE reservations SET status = 'EXPIRED' WHERE status = 'HELD' AND expires_at < :now RETURNING *")
+    fun expireAndReturn(now: java.time.OffsetDateTime): kotlinx.coroutines.flow.Flow<Reservation>
 }

@@ -28,6 +28,7 @@ import org.springframework.transaction.reactive.TransactionalOperator
 import org.springframework.transaction.reactive.executeAndAwait
 import org.slf4j.LoggerFactory
 import org.springframework.dao.DuplicateKeyException
+import kotlinx.coroutines.flow.toList
 
 @Service
 class ReservationService(
@@ -230,23 +231,18 @@ class ReservationService(
      */
     suspend fun sweepExpiredReservations(now: OffsetDateTime): Int {
         var count = 0
-        val expiredReservations = reservationRepository.findByStatusAndExpiresAtBefore(ReservationStatus.HELD.name, now)
-        
-        expiredReservations.collect { reservation ->
-            try {
-                transactionalOperator.executeAndAwait {
-                    val currentRes = reservationRepository.findByReservationId(reservation.reservationId)
-                    if (currentRes != null && currentRes.status == ReservationStatus.HELD.name) {
-                        logger.info("Reservation {} expired. Releasing seats.", reservation.reservationId)
-                        seatRepository.releaseSeats(reservation.reservationId)
-                        reservationRepository.save(currentRes.copy(status = "EXPIRED", isNewRecord = false))
-                        meterRegistry.counter("inventory.holds.expired").increment()
-                        count++
-                    }
+        try {
+            transactionalOperator.executeAndAwait {
+                val expiredReservations = reservationRepository.expireAndReturn(now).toList()
+                for ((reservationId) in expiredReservations) {
+                    logger.info("Reservation {} atomically expired. Releasing seats.", reservationId)
+                    seatRepository.releaseSeats(reservationId)
+                    meterRegistry.counter("inventory.holds.expired").increment()
+                    count++
                 }
-            } catch (e: Exception) {
-                logger.error("Failed to expire reservation: {}", reservation.reservationId, e)
             }
+        } catch (e: Exception) {
+            logger.error("Failed during atomic sweepExpiredReservations", e)
         }
         return count
     }
