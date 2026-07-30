@@ -64,7 +64,6 @@ class ReservationService(
         correlationId: String,
         request: ReservationRequest
     ): ReservationResponse {
-        meterRegistry.counter("inventory.holds.attempted").increment()
         
         val fingerprint = generateFingerprint(request)
         
@@ -73,6 +72,9 @@ class ReservationService(
         if (existingRecord != null) {
             return processExistingRecord(existingRecord, fingerprint, idempotencyKey)
         }
+
+        // Increment only for logical attempts, not cached retries
+        meterRegistry.counter("inventory.holds.attempted").increment()
 
         val reservationId = UUID.randomUUID().toString()
         val expiresAt = OffsetDateTime.now(clock).plusMinutes(10)
@@ -112,7 +114,6 @@ class ReservationService(
 
                 // 2. Save Outbox Event inside the transaction
                 if (success) {
-                    meterRegistry.counter("inventory.holds.successful").increment()
                     logger.info("Successfully reserved seats for order: {} by principal: {}", request.orderId, principalId)
                     val event = InventoryReservedEvent(
                         correlationId = correlationId,
@@ -132,7 +133,6 @@ class ReservationService(
                     )
                     outboxEventRepository.save(outboxEvent)
                 } else {
-                    meterRegistry.counter("inventory.holds.rejected").increment()
                     logger.info("Failed to reserve seats for order: {} by principal: {}", request.orderId, principalId)
                     val event = InventoryFailedEvent(
                         correlationId = correlationId,
@@ -152,6 +152,12 @@ class ReservationService(
                 }
 
                 success
+            }
+
+            if (isSuccess) {
+                meterRegistry.counter("inventory.holds.successful").increment()
+            } else {
+                meterRegistry.counter("inventory.holds.rejected").increment()
             }
 
             val finalStatus = if (isSuccess) ReservationStatus.HELD else ReservationStatus.FAILED
@@ -237,9 +243,11 @@ class ReservationService(
                 for ((reservationId) in expiredReservations) {
                     logger.info("Reservation {} atomically expired. Releasing seats.", reservationId)
                     seatRepository.releaseSeats(reservationId)
-                    meterRegistry.counter("inventory.holds.expired").increment()
                     count++
                 }
+            }
+            if (count > 0) {
+                meterRegistry.counter("inventory.holds.expired").increment(count.toDouble())
             }
         } catch (e: Exception) {
             logger.error("Failed during atomic sweepExpiredReservations", e)
