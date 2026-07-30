@@ -60,6 +60,23 @@ tasks.withType<Test> {
     useJUnitPlatform()
 }
 
+val productionDependencyConfigurations = listOf(
+    "compileClasspath",
+    "runtimeClasspath",
+    "kotlinCompilerClasspath",
+    "annotationProcessor",
+).mapNotNull(configurations::findByName)
+    .filter { it.isCanBeResolved }
+
+tasks.register("resolveProductionDependencies") {
+    group = "build setup"
+    description = "Resolves production dependencies so container builds can cache them before copying sources."
+
+    doLast {
+        productionDependencyConfigurations.forEach { it.resolve() }
+    }
+}
+
 tasks.named<BootJar>("bootJar") {
     archiveFileName.set("${project.name}.jar")
 }

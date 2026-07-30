@@ -1,0 +1,114 @@
+name: CI - Build Debezium Kafka Connect image
+
+on:
+  pull_request:
+    paths:
+      - "connect/**"
+      - ".github/workflows/connect-gitops.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "connect/**"
+      - ".github/workflows/connect-gitops.yml"
+  workflow_dispatch:
+
+env:
+  REGISTRY: eurotransitregistry.azurecr.io
+  IMAGE_NAMESPACE: eurotransit
+  GITOPS_CONNECT_KUSTOMIZATION: platform/connectors/environments/aks/kustomization.yaml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Debezium Kafka Connect
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      short_sha: ${{ steps.sha.outputs.short }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Compute short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Azure Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and optionally push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: connect/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/debezium-connect:${{ steps.sha.outputs.short }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/debezium-connect:strimzi-0.46.1-kafka-3.9.0-debezium-2.7.0
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/debezium-connect:latest
+          cache-from: type=gha,scope=debezium-connect
+          cache-to: type=gha,mode=max,scope=debezium-connect
+
+  update-gitops:
+    name: Update GitOps connector image
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v7.0.0
+        with:
+          repository: ${{ vars.GITOPS_REPO }}
+          token: ${{ secrets.CONFIG_REPO_PAT }}
+          path: gitops
+
+      - name: Check Kafka Connect GitOps target
+        id: connect-target
+        working-directory: gitops
+        run: |
+          if [[ -f "${{ env.GITOPS_CONNECT_KUSTOMIZATION }}" ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Kafka Connect image pushed with digest ${{ needs.build.outputs.digest }}; the GitOps target does not exist yet."
+          fi
+
+      - name: Update Kafka Connect image
+        if: steps.connect-target.outputs.exists == 'true'
+        uses: mikefarah/yq@v4.47.2
+        with:
+          cmd: >-
+            yq e '(.images[] | select(.name == "eurotransit/debezium-connect")).newName = "${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/debezium-connect" |
+            (.images[] | select(.name == "eurotransit/debezium-connect")).digest = "${{ needs.build.outputs.digest }}" |
+            del((.images[] | select(.name == "eurotransit/debezium-connect")).newTag)'
+            -i gitops/${{ env.GITOPS_CONNECT_KUSTOMIZATION }}
+
+      - name: Commit and push
+        working-directory: gitops
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [[ -f "${{ env.GITOPS_CONNECT_KUSTOMIZATION }}" ]]; then
+            git add "${{ env.GITOPS_CONNECT_KUSTOMIZATION }}"
+          fi
+          git diff --cached --quiet && exit 0
+          git commit -m "ci: bump Debezium Connect image to ${{ needs.build.outputs.short_sha }}"
+          git push

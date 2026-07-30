@@ -20,6 +20,81 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  detect-images:
+    name: Detect images to validate
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.matrix.outputs.services }}
+      has_services: ${{ steps.matrix.outputs.has_services }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Filter changed paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            catalog:
+              - 'catalog/**'
+            orders:
+              - 'orders/**'
+            inventory:
+              - 'inventory/**'
+            payments:
+              - 'payments/**'
+            notifications:
+              - 'notifications/**'
+            shared:
+              - 'Dockerfile'
+              - 'build.gradle.kts'
+              - 'settings.gradle.kts'
+              - 'gradlew'
+              - 'gradle/**'
+              - 'buildSrc/**'
+              - 'observability/**'
+              - 'security-support/**'
+              - 'money-path-contracts/**'
+
+      - name: Build service matrix
+        id: matrix
+        env:
+          CATALOG_CHANGED: ${{ steps.filter.outputs.catalog }}
+          ORDERS_CHANGED: ${{ steps.filter.outputs.orders }}
+          INVENTORY_CHANGED: ${{ steps.filter.outputs.inventory }}
+          PAYMENTS_CHANGED: ${{ steps.filter.outputs.payments }}
+          NOTIFICATIONS_CHANGED: ${{ steps.filter.outputs.notifications }}
+          SHARED_CHANGED: ${{ steps.filter.outputs.shared }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          services=()
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" || "$SHARED_CHANGED" == "true" ]]; then
+            services=(catalog orders inventory payments notifications)
+          else
+            [[ "$CATALOG_CHANGED" == "true" ]] && services+=(catalog)
+            [[ "$ORDERS_CHANGED" == "true" ]] && services+=(orders)
+            [[ "$INVENTORY_CHANGED" == "true" ]] && services+=(inventory)
+            [[ "$PAYMENTS_CHANGED" == "true" ]] && services+=(payments)
+            [[ "$NOTIFICATIONS_CHANGED" == "true" ]] && services+=(notifications)
+          fi
+
+          services_json="["
+          separator=""
+          for service in "${services[@]}"; do
+            services_json+="${separator}\"${service}\""
+            separator=","
+          done
+          services_json+="]"
+          echo "services=$services_json" >> "$GITHUB_OUTPUT"
+          if (( ${#services[@]} > 0 )); then
+            echo "has_services=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_services=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -38,3 +113,31 @@ jobs:
       - name: Build
         run: ./gradlew --no-daemon build
 
+  validate-images:
+    name: Validate ${{ matrix.service }} image
+    needs: detect-images
+    if: needs.detect-images.outputs.has_services == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.detect-images.outputs.services) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          build-args: SERVICE=${{ matrix.service }}
+          push: false
+          cache-from: |
+            type=gha,scope=${{ matrix.service }}
+            type=gha,scope=pr-${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=pr-${{ matrix.service }}
