@@ -179,7 +179,7 @@ class ReservationService(
         }
     }
 
-    private fun processExistingRecord(
+    private suspend fun processExistingRecord(
         existingRecord: IdempotencyRecord,
         fingerprint: String,
         idempotencyKey: String
@@ -195,10 +195,32 @@ class ReservationService(
         }
         if (existingRecord.responseBody != null) {
             logger.info("Returning cached reservation response for idempotency key: {}", idempotencyKey)
-            return objectMapper.readValue(
+            val response = objectMapper.readValue(
                 existingRecord.responseBody.asString(),
                 ReservationResponse::class.java
             )
+
+            if (response.status == ReservationStatus.HELD) {
+                val currentReservation = reservationRepository.findByReservationId(response.reservationId)
+                if (currentReservation != null && currentReservation.status == "EXPIRED") {
+                    logger.warn("Idempotency hit for reservation {} but it has expired in DB.", response.reservationId)
+                    throw ApiException(
+                        status = HttpStatus.CONFLICT,
+                        code = "RESERVATION_EXPIRED",
+                        message = "The reservation hold has expired"
+                    )
+                }
+                if (currentReservation != null && currentReservation.status == "CANCELLED") {
+                    logger.warn("Idempotency hit for reservation {} but it was cancelled in DB.", response.reservationId)
+                    throw ApiException(
+                        status = HttpStatus.CONFLICT,
+                        code = "RESERVATION_CANCELLED",
+                        message = "The reservation hold was cancelled"
+                    )
+                }
+            }
+            
+            return response
         }
         throw ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Idempotency record in invalid state")
     }
