@@ -37,7 +37,8 @@ class ReservationService(
     private val outboxEventRepository: OutboxEventRepository,
     private val objectMapper: ObjectMapper,
     private val transactionalOperator: TransactionalOperator,
-    private val meterRegistry: MeterRegistry
+    private val meterRegistry: MeterRegistry,
+    private val clock: java.time.Clock
 ) {
     private val logger = LoggerFactory.getLogger(ReservationService::class.java)
 
@@ -73,7 +74,7 @@ class ReservationService(
         }
 
         val reservationId = UUID.randomUUID().toString()
-        val expiresAt = OffsetDateTime.now().plusMinutes(10)
+        val expiresAt = OffsetDateTime.now(clock).plusMinutes(10)
 
         try {
             val isSuccess = transactionalOperator.executeAndAwait {

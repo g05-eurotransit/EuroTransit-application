@@ -14,6 +14,7 @@ import java.time.OffsetDateTime
 @Component
 class InventoryCleanupJob(
     private val reservationService: ReservationService,
+    private val clock: java.time.Clock,
 ) {
     private val log = LoggerFactory.getLogger(InventoryCleanupJob::class.java)
 
@@ -27,7 +28,7 @@ class InventoryCleanupJob(
         fixedDelayString = "\${inventory.reservations.cleanup-interval-ms:30000}",
     )
     fun sweepExpiredReservations() = runBlocking {
-        val now = OffsetDateTime.now()
+        val now = OffsetDateTime.now(clock)
         val expired = reservationService.sweepExpiredReservations(now)
         if (expired > 0) {
             log.info("Swept {} expired reservations", expired)
@@ -44,7 +45,7 @@ class InventoryCleanupJob(
     )
     fun purgeExpiredIdempotency() = runBlocking {
         // Idempotency for inventory is 30 minutes
-        val cutoff = OffsetDateTime.now().minusMinutes(30)
+        val cutoff = OffsetDateTime.now(clock).minusMinutes(30)
         val deleted = reservationService.purgeExpiredIdempotency(cutoff)
         if (deleted > 0) {
             log.info("Purged {} idempotency records older than {}", deleted, cutoff)
