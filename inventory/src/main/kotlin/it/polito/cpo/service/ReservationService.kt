@@ -247,54 +247,72 @@ class ReservationService(
      * Atomically confirms a held reservation and its seats after a successful payment.
      * Uses natural idempotency and row-level locking to prevent expiration conflicts.
      */
-    @Transactional
     suspend fun confirmReservation(reservationId: String, orderId: UUID): ReservationResponse {
-        val reservation = reservationRepository.findByReservationIdForUpdate(reservationId)
-            ?: throw ApiException(HttpStatus.NOT_FOUND, "RESERVATION_NOT_FOUND", "Reservation not found")
+        var apiExceptionToThrow: ApiException? = null
 
-        if (reservation.orderId != orderId) {
-            throw ApiException(HttpStatus.CONFLICT, "RESERVATION_ORDER_CONFLICT", "Reservation belongs to another order")
-        }
+        val response = transactionalOperator.executeAndAwait {
+            val reservation = reservationRepository.findByReservationIdForUpdate(reservationId)
+            
+            if (reservation == null) {
+                apiExceptionToThrow = ApiException(HttpStatus.NOT_FOUND, "RESERVATION_NOT_FOUND", "Reservation not found")
+                return@executeAndAwait null
+            }
 
-        if (reservation.status == ReservationStatus.CONFIRMED.name) {
-            return ReservationResponse(
+            if (reservation.orderId != orderId) {
+                apiExceptionToThrow = ApiException(HttpStatus.CONFLICT, "RESERVATION_ORDER_CONFLICT", "Reservation belongs to another order")
+                return@executeAndAwait null
+            }
+
+            if (reservation.status == ReservationStatus.CONFIRMED.name) {
+                return@executeAndAwait ReservationResponse(
+                    reservationId,
+                    ReservationStatus.CONFIRMED,
+                    reservation.expiresAt.toLocalDateTime()
+                )
+            }
+
+            if (reservation.status == ReservationStatus.EXPIRED.name) {
+                apiExceptionToThrow = ApiException(HttpStatus.CONFLICT, "RESERVATION_EXPIRED", "Reservation has expired")
+                return@executeAndAwait null
+            }
+
+            if (reservation.status == ReservationStatus.CANCELLED.name) {
+                apiExceptionToThrow = ApiException(HttpStatus.CONFLICT, "RESERVATION_CANCELLED", "Reservation was cancelled")
+                return@executeAndAwait null
+            }
+
+            // It is HELD. Verify expiration in real-time with the DB clock
+            if (!reservation.expiresAt.isAfter(reservationRepository.getCurrentTimestamp())) {
+                val expiredReservation = reservation.copy(status = "EXPIRED", isNewRecord = false)
+                reservationRepository.save(expiredReservation)
+                seatRepository.releaseSeats(reservationId)
+                apiExceptionToThrow = ApiException(HttpStatus.CONFLICT, "RESERVATION_EXPIRED", "Reservation has expired")
+                return@executeAndAwait null
+            }
+
+            val expectedSeats = seatRepository.countByReservationId(reservationId)
+            val updatedSeats = seatRepository.confirmSeats(reservationId)
+
+            if (updatedSeats.toLong() != expectedSeats) {
+                apiExceptionToThrow = ApiException(HttpStatus.CONFLICT, "RESERVATION_SEAT_CONFLICT", "Seat count mismatch during confirmation")
+                return@executeAndAwait null
+            }
+
+            val confirmedReservation = reservation.copy(status = "CONFIRMED", isNewRecord = false)
+            reservationRepository.save(confirmedReservation)
+
+            ReservationResponse(
                 reservationId,
                 ReservationStatus.CONFIRMED,
                 reservation.expiresAt.toLocalDateTime()
             )
         }
 
-        if (reservation.status == ReservationStatus.EXPIRED.name) {
-            throw ApiException(HttpStatus.CONFLICT, "RESERVATION_EXPIRED", "Reservation has expired")
+        if (apiExceptionToThrow != null) {
+            throw apiExceptionToThrow
         }
 
-        if (reservation.status == ReservationStatus.CANCELLED.name) {
-            throw ApiException(HttpStatus.CONFLICT, "RESERVATION_CANCELLED", "Reservation was cancelled")
-        }
-
-        // It is HELD. Verify expiration in real-time with the DB clock
-        if (!reservation.expiresAt.isAfter(reservationRepository.getCurrentTimestamp())) {
-            val expiredReservation = reservation.copy(status = "EXPIRED", isNewRecord = false)
-            reservationRepository.save(expiredReservation)
-            seatRepository.releaseSeats(reservationId)
-            throw ApiException(HttpStatus.CONFLICT, "RESERVATION_EXPIRED", "Reservation has expired")
-        }
-
-        val expectedSeats = seatRepository.countByReservationId(reservationId)
-        val updatedSeats = seatRepository.confirmSeats(reservationId)
-
-        if (updatedSeats.toLong() != expectedSeats) {
-            throw ApiException(HttpStatus.CONFLICT, "RESERVATION_SEAT_CONFLICT", "Seat count mismatch during confirmation")
-        }
-
-        val confirmedReservation = reservation.copy(status = "CONFIRMED", isNewRecord = false)
-        reservationRepository.save(confirmedReservation)
-
-        return ReservationResponse(
-            reservationId,
-            ReservationStatus.CONFIRMED,
-            reservation.expiresAt.toLocalDateTime()
-        )
+        return response!!
     }
 
     /**
@@ -330,9 +348,6 @@ class ReservationService(
      * without being converted to a paid order. Releases the associated seats back to the
      * pool and marks the reservation as EXPIRED. This operation is essential to
      * maintain inventory correctness and prevent permanent oversell locks.
-     *
-     * @param now the current time used as a cutoff for evaluating expiration
-     * @return the number of reservations that were successfully expired and released
      */
     suspend fun sweepExpiredReservations(): Int {
         var count = 0
@@ -358,9 +373,6 @@ class ReservationService(
      * Purges idempotency records that are older than the specified cutoff time.
      * Enforces the retention policy (30 minutes) defined in the architecture decisions,
      * ensuring the database table does not grow indefinitely.
-     *
-     * @param cutoff the timestamp before which records should be deleted
-     * @return the number of records deleted
      */
     suspend fun purgeExpiredIdempotency(cutoff: OffsetDateTime): Int {
         return idempotencyRecordRepository.deleteByCreatedAtBefore(cutoff)
