@@ -7,6 +7,7 @@ import it.polito.cpo.repository.OutboxEventRepository
 import it.polito.cpo.repository.ReservationRepository
 import it.polito.cpo.repository.SeatRepository
 import it.polito.cpo.service.ReservationService
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.*
@@ -27,6 +28,9 @@ import kotlinx.coroutines.reactor.awaitSingleOrNull
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @Testcontainers
@@ -286,45 +290,49 @@ class ReservationServiceIntegrationTest {
             orderId = orderId,
             routeId = routeId,
             status = "HELD",
-            expiresAt = java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).plusMinutes(10),
+            expiresAt = OffsetDateTime.now(ZoneOffset.UTC).plusMinutes(10),
             isNewRecord = true
         )
         reservationRepository.save(held)
 
         // Act - Simulate race condition
-        kotlinx.coroutines.coroutineScope {
+        coroutineScope {
             val deferredResponses = listOf(
-                async(kotlinx.coroutines.Dispatchers.IO) {
+                async(Dispatchers.IO) {
                     try {
                         reservationService.confirmReservation(reservationId, orderId)
                         "CONFIRMED"
-                    } catch (e: Exception) {
+                    } catch (_: Exception) {
                         "CONFIRM_FAILED"
                     }
                 },
-                async(kotlinx.coroutines.Dispatchers.IO) {
+                async(Dispatchers.IO) {
                     try {
                         reservationService.releaseReservation(reservationId)
                         "RELEASED"
-                    } catch (e: Exception) {
+                    } catch (_: Exception) {
                         "RELEASE_FAILED"
                     }
                 }
             )
-            kotlinx.coroutines.awaitAll(*deferredResponses.toTypedArray())
+            awaitAll(*deferredResponses.toTypedArray())
         }
 
         // Assert
         // State must be consistent: either CONFIRMED (and seats SOLD) or CANCELLED (and seats AVAILABLE)
         val finalRes = reservationRepository.findById(reservationId)
         val finalSeat = getSeatStatus(routeId, seatId)
-        
-        if (finalRes?.status == "CONFIRMED") {
-            assertEquals("SOLD", finalSeat)
-        } else if (finalRes?.status == "CANCELLED") {
-            assertEquals("AVAILABLE", finalSeat)
-        } else {
-            fail("Invalid final state after race: ${finalRes?.status}")
+
+        when (finalRes?.status) {
+            "CONFIRMED" -> {
+                assertEquals("SOLD", finalSeat)
+            }
+            "CANCELLED" -> {
+                assertEquals("AVAILABLE", finalSeat)
+            }
+            else -> {
+                fail("Invalid final state after race: ${finalRes?.status}")
+            }
         }
     }
 }
