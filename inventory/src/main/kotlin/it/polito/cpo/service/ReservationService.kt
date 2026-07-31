@@ -254,8 +254,8 @@ class ReservationService(
             throw ApiException(HttpStatus.CONFLICT, "RESERVATION_CANCELLED", "Reservation was cancelled")
         }
 
-        // It is HELD. Verify expiration in real-time with the clock
-        if (!reservation.expiresAt.isAfter(OffsetDateTime.now(clock))) {
+        // It is HELD. Verify expiration in real-time with the DB clock
+        if (!reservation.expiresAt.isAfter(reservationRepository.getCurrentTimestamp())) {
             val expiredReservation = reservation.copy(status = "EXPIRED", isNewRecord = false)
             reservationRepository.save(expiredReservation)
             seatRepository.releaseSeats(reservationId)
@@ -311,11 +311,11 @@ class ReservationService(
      * @param now the current time used as a cutoff for evaluating expiration
      * @return the number of reservations that were successfully expired and released
      */
-    suspend fun sweepExpiredReservations(now: OffsetDateTime): Int {
+    suspend fun sweepExpiredReservations(): Int {
         var count = 0
         try {
             transactionalOperator.executeAndAwait {
-                val expiredReservations = reservationRepository.expireAndReturn(now).toList()
+                val expiredReservations = reservationRepository.expireAndReturn().toList()
                 for ((reservationId) in expiredReservations) {
                     logger.info("Reservation {} atomically expired. Releasing seats.", reservationId)
                     seatRepository.releaseSeats(reservationId)

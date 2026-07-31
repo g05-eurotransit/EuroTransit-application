@@ -12,8 +12,11 @@ interface ReservationRepository : CoroutineCrudRepository<Reservation, String> {
     suspend fun findByReservationId(reservationId: String): Reservation?
     
     // Atomically expires reservations and returns the affected rows
-    @Query("UPDATE reservations SET status = 'EXPIRED' WHERE status = 'HELD' AND expires_at < :now RETURNING *")
-    fun expireAndReturn(now: OffsetDateTime): Flow<Reservation>
+    @Query("UPDATE reservations SET status = 'EXPIRED' WHERE status = 'HELD' AND expires_at < CURRENT_TIMESTAMP RETURNING *")
+    fun expireAndReturn(): Flow<Reservation>
+
+    @Query("SELECT CURRENT_TIMESTAMP")
+    suspend fun getCurrentTimestamp(): OffsetDateTime
 
     @Query("SELECT * FROM reservations WHERE reservation_id = :reservationId FOR UPDATE")
     suspend fun findByReservationIdForUpdate(reservationId: String): Reservation?

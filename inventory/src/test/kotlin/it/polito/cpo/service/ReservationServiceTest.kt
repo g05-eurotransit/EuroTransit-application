@@ -91,11 +91,17 @@ class ReservationServiceTest {
             store[entity.reservationId] = entity
             return entity
         }
-        override fun expireAndReturn(now: OffsetDateTime): Flow<Reservation> {
-            val expired = store.values.filter { it.status == "HELD" && it.expiresAt.isBefore(now) }
+        var currentDbTime: OffsetDateTime = OffsetDateTime.now()
+        
+        override fun expireAndReturn(): Flow<Reservation> {
+            val expired = store.values.filter { it.status == "HELD" && it.expiresAt.isBefore(currentDbTime) }
             val updated = expired.map { it.copy(status = "EXPIRED") }
             updated.forEach { store[it.reservationId] = it }
             return flowOf(*updated.toTypedArray())
+        }
+        
+        override suspend fun getCurrentTimestamp(): OffsetDateTime {
+            return currentDbTime
         }
     }
 
@@ -451,7 +457,8 @@ class ReservationServiceTest {
         ))
 
         val now = OffsetDateTime.now(fixedClock)
-        val count = service.sweepExpiredReservations(now)
+        resRepo.currentDbTime = now
+        val count = service.sweepExpiredReservations()
 
         assertEquals(1, count, "Only one reservation should have expired")
         assertEquals("res-past", seatRepo.releaseCalledWith, "Seats for res-past should be released")
@@ -573,6 +580,7 @@ class ReservationServiceTest {
             // Expired 5 minutes ago!
             expiresAt = OffsetDateTime.parse("2026-07-30T11:55:00Z")
         ))
+        resRepo.currentDbTime = OffsetDateTime.now(fixedClock)
 
         val exception = assertThrows<ApiException> {
             service.confirmReservation(reservationId, orderId)

@@ -28,8 +28,7 @@ class InventoryCleanupJob(
         fixedDelayString = "\${inventory.reservations.cleanup-interval-ms:30000}",
     )
     fun sweepExpiredReservations() = runBlocking {
-        val now = OffsetDateTime.now(clock)
-        val expired = reservationService.sweepExpiredReservations(now)
+        val expired = reservationService.sweepExpiredReservations()
         if (expired > 0) {
             log.info("Swept {} expired reservations", expired)
         }
