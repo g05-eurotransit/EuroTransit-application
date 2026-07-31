@@ -14,9 +14,9 @@ Orders owns the customer order state and the required PostgreSQL order database 
 - Seat selection in the UI is tentative and does not reserve inventory.
 - Checkout creates a strongly consistent 10-minute hold only if the seat is available.
 - Payment is attempted only after the hold succeeds.
-- If payment succeeds before the hold expires, the seat transitions to sold.
+- If payment is authorized and Inventory confirms the still-valid hold before it expires, the seat transitions to sold.
 - If payment fails, the order is cancelled, or the 10-minute hold expires, the seat returns to available.
-- Store idempotency keys for hold/reservation attempts so retries return the original result.
+- Store idempotency keys for hold/reservation attempts so retries resolve the original reservation and return its current terminal or non-terminal result without extending the hold.
 - During a database partition or primary failover, checkout writes may fail temporarily rather than accept inconsistent holds.
 
 The intended state model is:
@@ -44,13 +44,13 @@ This option protects the core business invariant. EuroTransit can tolerate a tem
 - `POST /api/orders` returns `202 Accepted` quickly with an `orderId`.
 - Orders persists the accepted order and emits `order-placed`.
 - Orders runs the checkout pipeline with Kotlin coroutines/flows.
-- Inventory hold creation is a synchronous idempotent decision because seat consistency must be known before payment.
+- Inventory hold creation and final confirmation are synchronous idempotent decisions because seat consistency must be known before payment and before the order becomes final.
 - Payment authorization is a synchronous idempotent decision because retries must not double-charge.
 - Kafka carries durable pipeline events and decouples notifications from checkout success.
 
 ### Why This Is Better
 
-This option matches the assignment's async requirement without pretending every decision can safely be deferred. The costly/slow parts are observable and recoverable through Kafka, while the two correctness boundaries, seat hold creation and payment authorization, remain explicit synchronous decisions protected by resilience policies.
+This option matches the assignment's async requirement without pretending every decision can safely be deferred. The costly/slow parts are observable and recoverable through Kafka, while the three correctness boundaries—seat hold creation, payment authorization, and final Inventory confirmation—remain explicit synchronous decisions protected by resilience policies.
 
 ### Alternative Considered
 
@@ -228,7 +228,7 @@ The module is shared: changes go through a PR reviewed by the owner of any affec
 
 - **Durable/recoverable:** the previous detached `CoroutineScope(SupervisorJob + Dispatchers.Default)` lost in-flight orders on a hard crash (stuck forever in `RESERVING`/`PAYMENT_PENDING`). With Kafka, the offset is committed only after processing, so a crash is recovered by redelivery — satisfying the DoD "no duplicate processing after restart" and "in-flight work drains or cancels cooperatively" via the listener container's graceful stop.
 - **No throwaway migration:** `order-placed` was already published; this adds the consumer side. It keeps the design's synchronous consistency boundary (ADR-001/ADR-002) — reserve and pay remain synchronous HTTP calls *inside* the consumer — while making the orchestration durable.
-- **Idempotent under at-least-once:** processing is guarded by order state (terminal orders `CONFIRMED`/`FAILED`/`CANCELLED` are skipped) and downstream idempotency keys are derived from the immutable order id (`inv-<orderId>`, `pay-<orderId>`, `rel-<orderId>`), so a redelivery re-drives a non-terminal order to the same outcome.
+- **Idempotent under at-least-once:** processing resumes from the durable Orders phase; terminal orders are skipped, while `PAYMENT_PENDING`, `CONFIRMING_INVENTORY`, and `COMPENSATING` repeat only their idempotent remote operation. Downstream keys are derived from the immutable order id (`inv-<orderId>`, `pay-<orderId>`, `rel-<orderId>`, `refund-<orderId>`), so redelivery converges without duplicating business effects.
 - **Correlation preserved:** the consumer seeds the event's `correlationId` into the Reactor context and MDC, so the pipeline's outbound calls carry `X-Correlation-Id` and logs stay grep-able end-to-end.
 
 ### Consequences
@@ -236,7 +236,7 @@ The module is shared: changes go through a PR reviewed by the owner of any affec
 - Orders is now both producer and consumer of `order-placed` (a "pipeline observer" per `api-design.md`); consumer group `orders`.
 - The payment method token (a sandbox reference, not card data) is persisted on the order so the async pipeline can rebuild the payment request, and is cleared once the order reaches a terminal state. It is **not** placed on any Kafka event.
 - Synchronous calls to Inventory and Payments are wrapped with Resilience4j (timeout, bounded retry with backoff/jitter on transient faults only, circuit breaker, bulkhead) — see `ResilienceConfiguration`. A payment decline is a normal HTTP 200 result, so it never trips the breaker.
-- Follow-up: publish `order-placed` via a transactional outbox (to close the DB-commit-then-publish gap), and add a dead-letter topic for poison messages. Neither is required for the current slice and both are documented, not silent.
+- `order-placed` is persisted through the Orders transactional outbox and relayed by Debezium, closing the order-commit/event-publish gap. Exhausted consumer retries publish to `order-placed.DLT`; reconciliation preserves and redrives the durable Orders phase.
 
 ### Alternatives Considered
 
@@ -287,23 +287,33 @@ ADR-005.
   needs Keycloak token-exchange and a broader contract; heavier than needed now. Kept as the direction
   for the user-context follow-up.
 
-## ADR-013: Inventory Confirmation and Expiration Atomicity
+## ADR-013: Synchronous Inventory Confirmation Before Final Order Confirmation
 
-**Decision:** Use explicit API calls and atomic database operations to confirm and expire seat reservations, rather than relying on eventual consistency or Kafka events.
+**Decision:** After payment authorization, Orders synchronously and idempotently asks Inventory to
+transition the reservation from `HELD` to `CONFIRMED` and its seats from `HELD` to `SOLD`. Only after
+Inventory accepts that transition may Orders mark the order `CONFIRMED` and publish final outbox
+events.
 
-### Selected Option: Explicit API and DB Atomicity
+Inventory serializes confirmation against expiration and release in its own database. Exactly one
+transition may win: confirmation before the deadline or expiration after it. A retry of a completed
+confirmation returns success; an expired or cancelled reservation cannot be resurrected.
 
-- Orders explicitly confirms the reservation (`PUT /api/inventory/reservations/{reservationId}/confirmation`) synchronously upon successful payment.
-- Inventory commits `CONFIRMED` and `SOLD` atomically using database-level locking (`FOR UPDATE SKIP LOCKED`).
-- The inventory expiration job uses a single atomic `UPDATE ... RETURNING` query to sweep expired reservations.
-- Idempotency replays evaluate the real-time reservation state, explicitly rejecting retries for reservations that have logically expired.
+Kafka remains the durable trigger for the checkout pipeline and the channel for facts and asynchronous
+side effects. `order-confirmed` is a final fact for Notifications and observability consumers, not a
+command that Inventory uses to decide whether seats can be sold.
 
-### Why This Is Better
+This does not create a distributed ACID transaction. Unknown HTTP outcomes preserve the durable Orders
+phase and are retried or reconciled through idempotent Payment and Inventory operations. Normal hold
+release and checkout compensation never reverse a confirmed reservation; post-sale cancellation is a
+separate business process.
 
-This option provides a strict consistency boundary for inventory. By using atomic operations and explicit confirmation, we eliminate "overselling" race conditions that can occur if expiration cleanup or idempotency retries overlap with payment confirmation. It aligns perfectly with the strong consistency requirement defined in ADR-001.
+The complete protocol, failure matrix, API shape, and acceptance criteria are documented in
+[reservation-confirmation.md](reservation-confirmation.md).
 
-### Alternatives Considered
+### Alternative Considered
 
-- **Confirm through `order-confirmed` Kafka event:** Rejected because it relies on Kafka lag relative to hold deadlines, risking oversell if the event is delayed.
-- **Confirm seats before payment authorization:** Rejected because a payment decline would leave seats permanently locked as `SOLD` without complex compensations.
-- **Grace period before expiration:** Rejected because it merely shifts the race condition window without fundamentally solving the consistency gap.
+- **Confirm Inventory by consuming `order-confirmed`:** this makes checkout correctness depend on Kafka
+  consumer lag relative to a hard ten-minute hold deadline and publishes an order-complete fact before
+  Inventory has accepted the sale. A fully asynchronous confirmation saga is possible, but it requires
+  additional intermediate states, response events, timeouts, deduplication, and reconciliation without
+  a clear benefit for the current money path.
