@@ -287,31 +287,23 @@ ADR-005.
   needs Keycloak token-exchange and a broader contract; heavier than needed now. Kept as the direction
   for the user-context follow-up.
 
-## ADR-013: Reservation Confirmation and Hybrid Checkout Coordination
+## ADR-013: Inventory Confirmation and Expiration Atomicity
 
-**Decision:** Adopt a hybrid checkout coordination model where Orders calls Inventory and Payments synchronously for consistency, explicitly confirms the reservation via a new API upon successful payment, and uses Kafka to drive the durable saga asynchronously. Concurrency and idempotency conflicts are resolved via atomic database operations.
+**Decision:** Use explicit API calls and atomic database operations to confirm and expire seat reservations, rather than relying on eventual consistency or Kafka events.
 
-### Selected Option: Hybrid Sync+Async Coordination with Atomic Confirmation
+### Selected Option: Explicit API and DB Atomicity
 
-- Kafka durably drives the checkout pipeline via `order-placed`.
-- Orders calls Inventory and Payments synchronously for decisions needed before the next transition.
-- Orders explicitly confirms the reservation (`PUT /api/inventory/reservations/{reservationId}/confirmation`) upon successful payment.
-- Inventory atomically commits `CONFIRMED` and `SOLD` using database-level locking and logic.
-- The cleanup job for expired reservations (`HELD` -> `EXPIRED`) uses a single atomic `UPDATE ... RETURNING` query instead of fetching and saving in separate steps.
-- Idempotency replays evaluate the real-time reservation state in the database, rejecting retries if the reservation is already logically expired or cancelled.
-- Metrics are strictly commit-aware, incremented solely at the end of the transactional flow (e.g., using `.doOnSuccess`).
+- Orders explicitly confirms the reservation (`PUT /api/inventory/reservations/{reservationId}/confirmation`) synchronously upon successful payment.
+- Inventory commits `CONFIRMED` and `SOLD` atomically using database-level locking (`FOR UPDATE SKIP LOCKED`).
+- The inventory expiration job uses a single atomic `UPDATE ... RETURNING` query to sweep expired reservations.
+- Idempotency replays evaluate the real-time reservation state, explicitly rejecting retries for reservations that have logically expired.
 
 ### Why This Is Better
 
-- Provides an explicit consistency boundary before Orders declares checkout complete, preventing overselling of finite seats when holds expire.
-- Uses durable Orders state, atomic Inventory transitions, and idempotent remote operations rather than a complex distributed ACID transaction.
-- Eliminates "overselling" race conditions during cleanup and prevents the "late retry" vulnerability where a slow network retry claims an idempotency hit for an expired reservation.
-- Keeps observability metrics strictly aligned with the actual committed state of the database.
-- Aligns perfectly with the existing synchronous consistency boundary (ADR-001/002) while leveraging Kafka for durability and distribution of final facts (`order-confirmed`).
+This option provides a strict consistency boundary for inventory. By using atomic operations and explicit confirmation, we eliminate "overselling" race conditions that can occur if expiration cleanup or idempotency retries overlap with payment confirmation. It aligns perfectly with the strong consistency requirement defined in ADR-001.
 
 ### Alternatives Considered
 
-- **Confirm through `order-confirmed` Kafka event:** Rejected because it publishes a final fact before Inventory accepts the sale and relies on Kafka lag relative to hold deadlines.
-- **Confirm seats before payment authorization:** Rejected because a crash or decline would leave sold unpaid seats and require complex compensations to reverse `SOLD`.
-- **Grace period before expiration:** Rejected because it only moves the race boundary and blocks unpaid seats longer.
-- **Shared Orders and Inventory database:** Rejected because it violates service and datastore ownership boundaries.
+- **Confirm through `order-confirmed` Kafka event:** Rejected because it relies on Kafka lag relative to hold deadlines, risking oversell if the event is delayed.
+- **Confirm seats before payment authorization:** Rejected because a payment decline would leave seats permanently locked as `SOLD` without complex compensations.
+- **Grace period before expiration:** Rejected because it merely shifts the race condition window without fundamentally solving the consistency gap.
