@@ -103,6 +103,15 @@ class ReservationServiceTest {
         override suspend fun getCurrentTimestamp(): OffsetDateTime {
             return currentDbTime
         }
+        
+        override suspend fun cancelIfHeld(reservationId: String): Int {
+            val res = store[reservationId]
+            if (res != null && res.status == "HELD") {
+                store[reservationId] = res.copy(status = "CANCELLED")
+                return 1
+            }
+            return 0
+        }
     }
 
     private class FakeIdempotencyRecordRepository(

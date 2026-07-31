@@ -322,20 +322,14 @@ class ReservationService(
     suspend fun releaseReservation(reservationId: String) {
         var released = false
         transactionalOperator.executeAndAwait {
-            val reservation = reservationRepository.findByReservationId(reservationId)
+            val rowsUpdated = reservationRepository.cancelIfHeld(reservationId)
             
-            if (reservation != null && reservation.status == ReservationStatus.HELD.name) {
-                logger.info("Releasing reservation: {} for order: {}", reservationId, reservation.orderId)
+            if (rowsUpdated > 0) {
+                logger.info("Releasing seats for cancelled reservation: {}", reservationId)
                 seatRepository.releaseSeats(reservationId)
-                
-                val updatedReservation = reservation.copy(
-                    status = "CANCELLED",
-                    isNewRecord = false
-                )
-                reservationRepository.save(updatedReservation)
                 released = true
             } else {
-                logger.info("Ignored release request for reservation: {} (not found or already cancelled)", reservationId)
+                logger.info("Ignored release request for reservation: {} (not found, already cancelled, or not HELD)", reservationId)
             }
         }
         if (released) {

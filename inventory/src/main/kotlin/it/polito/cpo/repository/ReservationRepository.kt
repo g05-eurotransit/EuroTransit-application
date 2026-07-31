@@ -2,6 +2,7 @@ package it.polito.cpo.repository
 
 import it.polito.cpo.model.Reservation
 import kotlinx.coroutines.flow.Flow
+import org.springframework.data.r2dbc.repository.Modifying
 import org.springframework.data.r2dbc.repository.Query
 import org.springframework.data.repository.kotlin.CoroutineCrudRepository
 import org.springframework.stereotype.Repository
@@ -29,6 +30,10 @@ interface ReservationRepository : CoroutineCrudRepository<Reservation, String> {
 
     @Query("SELECT CURRENT_TIMESTAMP")
     suspend fun getCurrentTimestamp(): OffsetDateTime
+    
+    @Modifying
+    @Query("UPDATE reservations SET status = 'CANCELLED' WHERE reservation_id = :reservationId AND status = 'HELD'")
+    suspend fun cancelIfHeld(reservationId: String): Int
 
     @Query("SELECT * FROM reservations WHERE reservation_id = :reservationId FOR UPDATE")
     suspend fun findByReservationIdForUpdate(reservationId: String): Reservation?
