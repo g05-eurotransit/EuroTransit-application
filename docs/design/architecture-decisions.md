@@ -287,6 +287,30 @@ ADR-005.
   needs Keycloak token-exchange and a broader contract; heavier than needed now. Kept as the direction
   for the user-context follow-up.
 
+## ADR-013: Reservation Confirmation and Hybrid Checkout Coordination
+
+**Decision:** Adopt a hybrid checkout coordination model where Orders calls Inventory and Payments synchronously for consistency, explicitly confirms the reservation via a new API upon successful payment, and uses Kafka to drive the durable saga asynchronously.
+
+### Selected Option: Hybrid Sync+Async Coordination with Atomic Confirmation
+
+- Kafka durably drives the checkout pipeline via `order-placed`.
+- Orders calls Inventory and Payments synchronously for decisions needed before the next transition.
+- Orders explicitly confirms the reservation (`PUT /api/inventory/reservations/{reservationId}/confirmation`) upon successful payment.
+- Inventory atomically commits `CONFIRMED` and `SOLD` using database-level locking and logic.
+
+### Why This Is Better
+
+- Provides an explicit consistency boundary before Orders declares checkout complete, preventing overselling of finite seats when holds expire.
+- Uses durable Orders state, atomic Inventory transitions, and idempotent remote operations rather than a complex distributed ACID transaction.
+- Aligns perfectly with the existing synchronous consistency boundary (ADR-001/002) while leveraging Kafka for durability and distribution of final facts (`order-confirmed`).
+
+### Alternatives Considered
+
+- **Confirm through `order-confirmed` Kafka event:** Rejected because it publishes a final fact before Inventory accepts the sale and relies on Kafka lag relative to hold deadlines.
+- **Confirm seats before payment authorization:** Rejected because a crash or decline would leave sold unpaid seats and require complex compensations to reverse `SOLD`.
+- **Grace period before expiration:** Rejected because it only moves the race boundary and blocks unpaid seats longer.
+- **Shared Orders and Inventory database:** Rejected because it violates service and datastore ownership boundaries.
+
 ## ADR-014: Inventory Concurrency and Idempotency Conflicts
 
 **Decision:** Resolve inventory overselling and late-idempotency conflicts by moving the consistency checks directly into the PostgreSQL database using atomic operations and real-time state checks.
