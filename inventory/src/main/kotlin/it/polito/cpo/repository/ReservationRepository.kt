@@ -11,8 +11,20 @@ import java.time.OffsetDateTime
 interface ReservationRepository : CoroutineCrudRepository<Reservation, String> {
     suspend fun findByReservationId(reservationId: String): Reservation?
     
-    // Atomically expires reservations and returns the affected rows
-    @Query("UPDATE reservations SET status = 'EXPIRED' WHERE status = 'HELD' AND expires_at < CURRENT_TIMESTAMP RETURNING *")
+    // Atomically expires reservations in batches and returns the affected rows
+    @Query("""
+        WITH expired_batch AS (
+            SELECT reservation_id FROM reservations 
+            WHERE status = 'HELD' AND expires_at < CURRENT_TIMESTAMP 
+            FOR UPDATE SKIP LOCKED 
+            LIMIT 100
+        )
+        UPDATE reservations 
+        SET status = 'EXPIRED' 
+        FROM expired_batch 
+        WHERE reservations.reservation_id = expired_batch.reservation_id 
+        RETURNING reservations.*
+    """)
     fun expireAndReturn(): Flow<Reservation>
 
     @Query("SELECT CURRENT_TIMESTAMP")
