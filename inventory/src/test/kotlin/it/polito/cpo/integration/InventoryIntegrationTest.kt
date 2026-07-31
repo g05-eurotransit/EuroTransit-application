@@ -57,7 +57,7 @@ class InventoryIntegrationTest {
     }
 
     @Test
-    fun `Phase 1 - should execute real DELETE R2DBC query for expired idempotency records`() = runBlocking {
+    fun `should execute real DELETE R2DBC query for expired idempotency records`() = runBlocking {
         // Arrange: Insert a record that is very old
         val oldDate = OffsetDateTime.now(ZoneOffset.UTC).minusHours(2)
         val record = IdempotencyRecord(
@@ -86,5 +86,48 @@ class InventoryIntegrationTest {
         
         allRecords = idempotencyRecordRepository.findAll().toList()
         assertTrue(allRecords.isEmpty(), "Table should be empty after delete")
+    }
+
+    @Autowired
+    lateinit var reservationRepository: it.polito.cpo.repository.ReservationRepository
+
+    @Test
+    fun `should execute UPDATE RETURNING native query and map results correctly`() = runBlocking {
+        // Arrange: one expired reservation, one valid
+        reservationRepository.deleteAll()
+        
+        val expired = it.polito.cpo.model.Reservation(
+            reservationId = "res-expired",
+            orderId = java.util.UUID.randomUUID(),
+            routeId = "route-1",
+            status = "HELD",
+            expiresAt = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(5),
+            isNewRecord = true
+        )
+        val valid = it.polito.cpo.model.Reservation(
+            reservationId = "res-valid",
+            orderId = java.util.UUID.randomUUID(),
+            routeId = "route-1",
+            status = "HELD",
+            expiresAt = OffsetDateTime.now(ZoneOffset.UTC).plusMinutes(5),
+            isNewRecord = true
+        )
+        
+        reservationRepository.saveAll(listOf(expired, valid)).toList()
+
+        // Act: expire and return
+        val expiredReservations = reservationRepository.expireAndReturn().toList()
+
+        // Assert: only the expired one was modified and returned
+        assertEquals(1, expiredReservations.size, "Only one reservation should have expired")
+        assertEquals("res-expired", expiredReservations.first().reservationId)
+        assertEquals("EXPIRED", expiredReservations.first().status, "Returned object should have the new status")
+        
+        // Verify DB state
+        val expiredInDb = reservationRepository.findById("res-expired")
+        assertEquals("EXPIRED", expiredInDb?.status)
+        
+        val validInDb = reservationRepository.findById("res-valid")
+        assertEquals("HELD", validInDb?.status)
     }
 }
