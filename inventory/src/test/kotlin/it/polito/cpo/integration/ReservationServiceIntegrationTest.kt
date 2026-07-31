@@ -234,4 +234,97 @@ class ReservationServiceIntegrationTest {
         assertEquals(1.0, meterRegistry.counter("inventory.holds.successful").count())
         assertEquals(4.0, meterRegistry.counter("inventory.idempotency.hits").count())
     }
+
+    @Test
+    fun `should persist EXPIRED status when confirmReservation detects logical expiration and throws 409`() = runBlocking {
+        // Arrange
+        val routeId = "route-exp"
+        val seatId = "seat-exp"
+        insertSeat(routeId, seatId, "AVAILABLE")
+        seatRepository.holdSeats(routeId, listOf(seatId), "res-exp-123")
+        
+        val orderId = UUID.randomUUID()
+        val expired = it.polito.cpo.model.Reservation(
+            reservationId = "res-exp-123",
+            orderId = orderId,
+            routeId = routeId,
+            status = "HELD",
+            expiresAt = java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).minusMinutes(5),
+            isNewRecord = true
+        )
+        reservationRepository.save(expired)
+
+        // Act
+        try {
+            reservationService.confirmReservation("res-exp-123", orderId)
+            fail("Should throw ApiException")
+        } catch (e: it.polito.cpo.observability.ApiException) {
+            // Assert exception
+            assertEquals(org.springframework.http.HttpStatus.CONFLICT, e.status)
+            assertEquals("RESERVATION_EXPIRED", e.code)
+        }
+
+        // Assert DB state is updated
+        val updated = reservationRepository.findById("res-exp-123")
+        assertEquals("EXPIRED", updated?.status)
+        
+        val seatStatus = getSeatStatus(routeId, seatId)
+        assertEquals("AVAILABLE", seatStatus)
+    }
+
+    @Test
+    fun `should handle concurrent confirmation and release safely`() = runBlocking {
+        // Arrange
+        val routeId = "route-race"
+        val seatId = "seat-race"
+        insertSeat(routeId, seatId, "AVAILABLE")
+        val reservationId = "res-race-1"
+        seatRepository.holdSeats(routeId, listOf(seatId), reservationId)
+        val orderId = UUID.randomUUID()
+        val held = it.polito.cpo.model.Reservation(
+            reservationId = reservationId,
+            orderId = orderId,
+            routeId = routeId,
+            status = "HELD",
+            expiresAt = java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).plusMinutes(10),
+            isNewRecord = true
+        )
+        reservationRepository.save(held)
+
+        // Act - Simulate race condition
+        kotlinx.coroutines.coroutineScope {
+            val deferredResponses = listOf(
+                async(kotlinx.coroutines.Dispatchers.IO) {
+                    try {
+                        reservationService.confirmReservation(reservationId, orderId)
+                        "CONFIRMED"
+                    } catch (e: Exception) {
+                        "CONFIRM_FAILED"
+                    }
+                },
+                async(kotlinx.coroutines.Dispatchers.IO) {
+                    try {
+                        reservationService.releaseReservation(reservationId)
+                        "RELEASED"
+                    } catch (e: Exception) {
+                        "RELEASE_FAILED"
+                    }
+                }
+            )
+            kotlinx.coroutines.awaitAll(*deferredResponses.toTypedArray())
+        }
+
+        // Assert
+        // State must be consistent: either CONFIRMED (and seats SOLD) or CANCELLED (and seats AVAILABLE)
+        val finalRes = reservationRepository.findById(reservationId)
+        val finalSeat = getSeatStatus(routeId, seatId)
+        
+        if (finalRes?.status == "CONFIRMED") {
+            assertEquals("SOLD", finalSeat)
+        } else if (finalRes?.status == "CANCELLED") {
+            assertEquals("AVAILABLE", finalSeat)
+        } else {
+            fail("Invalid final state after race: ${finalRes?.status}")
+        }
+    }
 }
