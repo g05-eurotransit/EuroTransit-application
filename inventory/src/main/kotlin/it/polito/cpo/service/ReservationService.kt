@@ -301,22 +301,27 @@ class ReservationService(
      * Releases a reservation and frees up the associated seats.
      * This operation is naturally idempotent.
      */
-    @Transactional
     suspend fun releaseReservation(reservationId: String) {
-        val reservation = reservationRepository.findByReservationId(reservationId)
-        
-        if (reservation != null && reservation.status == ReservationStatus.HELD.name) {
-            meterRegistry.counter("inventory.holds.released").increment()
-            logger.info("Releasing reservation: {} for order: {}", reservationId, reservation.orderId)
-            seatRepository.releaseSeats(reservationId)
+        var released = false
+        transactionalOperator.executeAndAwait {
+            val reservation = reservationRepository.findByReservationId(reservationId)
             
-            val updatedReservation = reservation.copy(
-                status = "CANCELLED",
-                isNewRecord = false
-            )
-            reservationRepository.save(updatedReservation)
-        } else {
-            logger.info("Ignored release request for reservation: {} (not found or already cancelled)", reservationId)
+            if (reservation != null && reservation.status == ReservationStatus.HELD.name) {
+                logger.info("Releasing reservation: {} for order: {}", reservationId, reservation.orderId)
+                seatRepository.releaseSeats(reservationId)
+                
+                val updatedReservation = reservation.copy(
+                    status = "CANCELLED",
+                    isNewRecord = false
+                )
+                reservationRepository.save(updatedReservation)
+                released = true
+            } else {
+                logger.info("Ignored release request for reservation: {} (not found or already cancelled)", reservationId)
+            }
+        }
+        if (released) {
+            meterRegistry.counter("inventory.holds.released").increment()
         }
     }
 
