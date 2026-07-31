@@ -221,8 +221,9 @@ The selected money path is hybrid sync+async:
 3. Orders executes the reservation/payment pipeline with Kotlin coroutines/flows and structured cancellation.
 4. Orders calls Inventory synchronously with an Orders-generated reservation idempotency key to create a 10-minute seat hold because this is the consistency boundary.
 5. Orders calls Payments synchronously with an Orders-generated payment idempotency key only after the hold succeeds, because payment must be idempotent and immediately known before confirmation.
-6. Orders emits final events such as `order-confirmed` and `notification-requested`.
-7. Notifications consumes events asynchronously; if it is down, checkout remains successful and Kafka retains the work.
+6. Orders calls Inventory `PUT /api/inventory/reservations/{reservationId}/confirmation` synchronously upon successful payment to permanently commit the seats.
+7. Orders emits final events such as `order-confirmed` and `notification-requested`.
+8. Notifications consumes events asynchronously; if it is down, checkout remains successful and Kafka retains the work.
 
 ## Resilience Requirements
 

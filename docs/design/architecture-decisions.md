@@ -287,7 +287,7 @@ ADR-005.
   needs Keycloak token-exchange and a broader contract; heavier than needed now. Kept as the direction
   for the user-context follow-up.
 
-## ADR-013: Inventory Concurrency and Idempotency Conflicts
+## ADR-014: Inventory Concurrency and Idempotency Conflicts
 
 **Decision:** Resolve inventory overselling and late-idempotency conflicts by moving the consistency checks directly into the PostgreSQL database using atomic operations and real-time state checks.
 
@@ -303,3 +303,4 @@ ADR-005.
 - It completely eliminates the "overselling" race condition where two concurrent instances of the cleanup job could double-release the seats.
 - It prevents the "late retry" vulnerability where a slow network retry from Orders could successfully claim an idempotency cache hit for a reservation that the cleanup job already expired.
 - It keeps the metrics strictly aligned with the actual committed state of the database.
+- It provides a safe foundation for the new confirmation endpoint, even though the `Orders` service must still be updated to invoke it during the checkout saga.
