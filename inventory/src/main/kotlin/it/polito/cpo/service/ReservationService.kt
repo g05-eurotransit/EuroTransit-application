@@ -202,21 +202,39 @@ class ReservationService(
 
             if (response.status == ReservationStatus.HELD) {
                 val currentReservation = reservationRepository.findByReservationId(response.reservationId)
-                if (currentReservation != null && currentReservation.status == "EXPIRED") {
-                    logger.warn("Idempotency hit for reservation {} but it has expired in DB.", response.reservationId)
-                    throw ApiException(
-                        status = HttpStatus.CONFLICT,
-                        code = "RESERVATION_EXPIRED",
-                        message = "The reservation hold has expired"
-                    )
-                }
-                if (currentReservation != null && currentReservation.status == "CANCELLED") {
-                    logger.warn("Idempotency hit for reservation {} but it was cancelled in DB.", response.reservationId)
-                    throw ApiException(
-                        status = HttpStatus.CONFLICT,
-                        code = "RESERVATION_CANCELLED",
-                        message = "The reservation hold was cancelled"
-                    )
+                if (currentReservation != null) {
+                    if (currentReservation.status == "EXPIRED") {
+                        logger.warn("Idempotency hit for reservation {} but it has expired in DB.", response.reservationId)
+                        throw ApiException(
+                            status = HttpStatus.CONFLICT,
+                            code = "RESERVATION_EXPIRED",
+                            message = "The reservation hold has expired"
+                        )
+                    }
+                    if (currentReservation.status == "CANCELLED") {
+                        logger.warn("Idempotency hit for reservation {} but it was cancelled in DB.", response.reservationId)
+                        throw ApiException(
+                            status = HttpStatus.CONFLICT,
+                            code = "RESERVATION_CANCELLED",
+                            message = "The reservation hold was cancelled"
+                        )
+                    }
+                    if (currentReservation.status == "CONFIRMED") {
+                        logger.info("Idempotency hit for reservation {} but it is already CONFIRMED in DB.", response.reservationId)
+                        return ReservationResponse(
+                            reservationId = currentReservation.reservationId,
+                            status = ReservationStatus.CONFIRMED,
+                            expiresAt = currentReservation.expiresAt.toLocalDateTime()
+                        )
+                    }
+                    if (currentReservation.status == "HELD" && !currentReservation.expiresAt.isAfter(reservationRepository.getCurrentTimestamp())) {
+                        logger.warn("Idempotency hit for reservation {} but it has logically expired.", response.reservationId)
+                        throw ApiException(
+                            status = HttpStatus.CONFLICT,
+                            code = "RESERVATION_EXPIRED",
+                            message = "The reservation hold has expired"
+                        )
+                    }
                 }
             }
             
