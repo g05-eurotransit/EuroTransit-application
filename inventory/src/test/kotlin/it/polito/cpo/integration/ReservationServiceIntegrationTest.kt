@@ -22,7 +22,11 @@ import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import java.util.UUID
+import org.springframework.dao.DataIntegrityViolationException
 import kotlinx.coroutines.reactor.awaitSingleOrNull
+import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.awaitAll
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @Testcontainers
@@ -177,5 +181,57 @@ class ReservationServiceIntegrationTest {
         // successful metric should not exist or be 0
         val successfulCounter = meterRegistry.find("inventory.holds.successful").counter()
         assertTrue(successfulCounter == null || successfulCounter.count() == 0.0)
+    }
+
+    @Test
+    fun `should handle concurrent requests with the same idempotency key safely`() = runBlocking {
+        // Arrange
+        val routeId = "route-concurrent"
+        val seatId = "seat-concurrent"
+        insertSeat(routeId, seatId, "AVAILABLE")
+
+        val request = ReservationRequest(
+            orderId = UUID.randomUUID(),
+            routeId = routeId,
+            seats = listOf(seatId)
+        )
+
+        // Act
+        // Fire multiple concurrent requests simulating a race condition
+        val concurrencyCount = 5
+        val responses = kotlinx.coroutines.coroutineScope {
+            val deferredResponses = (1..concurrencyCount).map {
+                async(kotlinx.coroutines.Dispatchers.IO) {
+                    reservationService.reserveSeats("concurrent-key", "user-concurrent", "corr-$it", request)
+                }
+            }
+            kotlinx.coroutines.awaitAll(*deferredResponses.toTypedArray())
+        }
+
+        // Assert
+        assertEquals(concurrencyCount, responses.size)
+        // All responses should be successful (one actual, others cached)
+        assertTrue(responses.all { it.status == ReservationStatus.HELD })
+        
+        // They should all return the EXACT same reservation ID
+        val uniqueReservationIds = responses.map { it.reservationId }.toSet()
+        assertEquals(1, uniqueReservationIds.size)
+
+        // Verify Database state
+        val reservations = reservationRepository.findAll().toList()
+        assertEquals(1, reservations.size, "Only 1 reservation should be created")
+
+        val idempotencyRecords = idempotencyRecordRepository.findAll().toList()
+        assertEquals(1, idempotencyRecords.size, "Only 1 idempotency record should be created")
+
+        val outboxEvents = outboxEventRepository.findAll().toList()
+        assertEquals(1, outboxEvents.size, "Only 1 outbox event should be created")
+        
+        // Assert Metrics
+        // Under high concurrency, the fast-path check misses, so ALL threads will increment "attempted"
+        // But only 1 transaction will succeed, the rest will fallback and increment "hits".
+        assertEquals(concurrencyCount.toDouble(), meterRegistry.counter("inventory.holds.attempted").count())
+        assertEquals(1.0, meterRegistry.counter("inventory.holds.successful").count())
+        assertEquals(4.0, meterRegistry.counter("inventory.idempotency.hits").count())
     }
 }
