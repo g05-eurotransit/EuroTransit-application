@@ -289,7 +289,7 @@ ADR-005.
 
 ## ADR-013: Reservation Confirmation and Hybrid Checkout Coordination
 
-**Decision:** Adopt a hybrid checkout coordination model where Orders calls Inventory and Payments synchronously for consistency, explicitly confirms the reservation via a new API upon successful payment, and uses Kafka to drive the durable saga asynchronously.
+**Decision:** Adopt a hybrid checkout coordination model where Orders calls Inventory and Payments synchronously for consistency, explicitly confirms the reservation via a new API upon successful payment, and uses Kafka to drive the durable saga asynchronously. Concurrency and idempotency conflicts are resolved via atomic database operations.
 
 ### Selected Option: Hybrid Sync+Async Coordination with Atomic Confirmation
 
@@ -297,11 +297,16 @@ ADR-005.
 - Orders calls Inventory and Payments synchronously for decisions needed before the next transition.
 - Orders explicitly confirms the reservation (`PUT /api/inventory/reservations/{reservationId}/confirmation`) upon successful payment.
 - Inventory atomically commits `CONFIRMED` and `SOLD` using database-level locking and logic.
+- The cleanup job for expired reservations (`HELD` -> `EXPIRED`) uses a single atomic `UPDATE ... RETURNING` query instead of fetching and saving in separate steps.
+- Idempotency replays evaluate the real-time reservation state in the database, rejecting retries if the reservation is already logically expired or cancelled.
+- Metrics are strictly commit-aware, incremented solely at the end of the transactional flow (e.g., using `.doOnSuccess`).
 
 ### Why This Is Better
 
 - Provides an explicit consistency boundary before Orders declares checkout complete, preventing overselling of finite seats when holds expire.
 - Uses durable Orders state, atomic Inventory transitions, and idempotent remote operations rather than a complex distributed ACID transaction.
+- Eliminates "overselling" race conditions during cleanup and prevents the "late retry" vulnerability where a slow network retry claims an idempotency hit for an expired reservation.
+- Keeps observability metrics strictly aligned with the actual committed state of the database.
 - Aligns perfectly with the existing synchronous consistency boundary (ADR-001/002) while leveraging Kafka for durability and distribution of final facts (`order-confirmed`).
 
 ### Alternatives Considered
@@ -310,21 +315,3 @@ ADR-005.
 - **Confirm seats before payment authorization:** Rejected because a crash or decline would leave sold unpaid seats and require complex compensations to reverse `SOLD`.
 - **Grace period before expiration:** Rejected because it only moves the race boundary and blocks unpaid seats longer.
 - **Shared Orders and Inventory database:** Rejected because it violates service and datastore ownership boundaries.
-
-## ADR-014: Inventory Concurrency and Idempotency Conflicts
-
-**Decision:** Resolve inventory overselling and late-idempotency conflicts by moving the consistency checks directly into the PostgreSQL database using atomic operations and real-time state checks.
-
-### Selected Option: Atomic Database Updates and State Verification
-
-- The cleanup job for expired reservations (`HELD` -> `EXPIRED`) now uses a single atomic `UPDATE ... RETURNING` query instead of fetching, checking, and saving in separate steps.
-- The `IdempotencyRecordRepository` uses a similar atomic approach with `@Modifying` queries.
-- When an idempotency hit occurs (a retry for the same idempotency key), the system now checks the *real-time* state of the reservation in the database. If the cached idempotency record says the seats are `HELD`, but the database says they are `EXPIRED` or `CANCELLED`, the system rejects the retry with a `409 Conflict`.
-- Metrics are incremented solely at the end of the `TransactionalOperator` flow (using `.doOnSuccess`), ensuring that rollbacks (e.g. outbox failures) do not result in false metric increments.
-
-### Why This Is Better
-
-- It completely eliminates the "overselling" race condition where two concurrent instances of the cleanup job could double-release the seats.
-- It prevents the "late retry" vulnerability where a slow network retry from Orders could successfully claim an idempotency cache hit for a reservation that the cleanup job already expired.
-- It keeps the metrics strictly aligned with the actual committed state of the database.
-- It provides a safe foundation for the new confirmation endpoint, even though the `Orders` service must still be updated to invoke it during the checkout saga.
