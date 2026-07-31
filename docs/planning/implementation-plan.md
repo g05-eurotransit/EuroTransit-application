@@ -51,8 +51,9 @@ The selected decisions are documented in [architecture-decisions.md](../design/a
 - Implement Orders order-state persistence on PostgreSQL managed through CloudNativePG.
 - Add gateway authentication and service-level authorization for customer and operations flows.
 - Define principal propagation for synchronous calls and Kafka events without leaking secrets or payment data.
-- Implement Inventory reservation using the selected strong consistency model.
+- Implement Inventory reservation and final confirmation using the selected strong consistency model, including atomic `HELD -> CONFIRMED` / `HELD -> SOLD` transitions serialized against cleanup and release.
 - Implement Payments authorization with strict idempotency and sandbox provider integration.
+- Implement Orders `CONFIRMING_INVENTORY` and `COMPENSATING` resume states plus DLT-backed reconciliation and idempotent outbox redrive.
 - Implement Notifications as an asynchronous event consumer.
 - Add graceful shutdown behavior: readiness refusal, coroutine cancellation, and in-flight draining.
 
