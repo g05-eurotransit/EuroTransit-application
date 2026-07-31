@@ -27,9 +27,13 @@ EuroTransit is designed as an enterprise-grade system. Public APIs must assume a
 | `GET /api/catalog/**` | Public or authenticated depending on offer visibility | Optional for public catalog; required for personalized offers | Public read or customer scope |
 | `POST /api/orders` | External | Required | Customer scope; principal becomes order owner |
 | `GET /api/orders/{orderId}` | External | Required | Order owner or privileged operations scope |
+| `POST /api/orders/{orderId}/reconciliation/redrive` | Internal operations | Required operations credential | Operations role only; redrives an open reconciliation record through the Orders outbox |
+| `POST /api/orders/{orderId}/reconciliation/{recordId}/resolve` | Internal operations | Required operations credential | Operations role only; records evidence-backed resolution of a terminal invariant incident |
 | `POST /api/inventory/reservations` | Internal | Required service credential plus propagated user context | Orders service only; order owner context required |
+| `PUT /api/inventory/reservations/{reservationId}/confirmation` | Internal | Required service credential plus propagated user context | Orders service only; confirms the reservation for its owning order |
 | `DELETE /api/inventory/reservations/{reservationId}` | Internal | Required service credential plus propagated user context | Orders service only; compensation for owned order |
 | `POST /api/payments/authorize` | Internal | Required service credential plus propagated user context | Orders service only; payment belongs to owned order |
+| `POST /api/payments/refund` | Internal | Required service credential plus propagated user context | Orders service only; idempotently reverses payment for a failed checkout |
 | `GET /api/notifications` | External | Required | Authenticated customer can read only their own notifications |
 | `GET /api/notifications/stream` | External | Required | Authenticated customer can receive only their own live notification events |
 
@@ -40,7 +44,7 @@ EuroTransit is designed as an enterprise-grade system. Public APIs must assume a
 | `Authorization` | Protected external APIs and internal service calls according to the endpoint security summary | Carries a bearer JWT for public APIs or service identity for internal calls. |
 | `X-User-Id` | Internal service-to-service calls (e.g. `POST /api/inventory/reservations`) | Explicitly propagates the original customer identity when the `Authorization` header carries a service account token instead of the user token. |
 | `X-Correlation-Id` | All internal calls, logs, and Kafka events | Public clients may provide it; the gateway generates one if absent; services must propagate it unchanged through one checkout flow. |
-| `Idempotency-Key` | `POST /api/orders`, `POST /api/inventory/reservations`, `POST /api/payments/authorize` | Identifies one mutating attempt. It is not an authorization credential and must be scoped with caller/user context, operation, and request fingerprint. |
+| `Idempotency-Key` | `POST /api/orders`, both `POST /api/orders/{orderId}/reconciliation/**` operations, `POST /api/inventory/reservations`, `POST /api/payments/authorize`, `POST /api/payments/refund` | Identifies one mutating attempt. It is not an authorization credential and must be scoped with caller/user context, operation, and request fingerprint. |
 
 Idempotency keys are generated at the caller boundary for the operation they protect:
 
@@ -48,9 +52,9 @@ Idempotency keys are generated at the caller boundary for the operation they pro
 - Public clients reuse that key only for retries of the same checkout attempt.
 - A new checkout attempt uses a new key, even if the request payload is identical.
 - Orders consumes the public checkout key and stores it with `principalId`, operation, request fingerprint, and result.
-- Orders generates separate downstream keys for internal operations, derived from the immutable order id. The implemented scheme (ADR-011) is `inv-{orderId}` for the seat reservation, `pay-{orderId}` for the payment authorization, and `rel-{orderId}` for the compensating release.
+- Orders generates separate downstream keys for internal operations, derived from the immutable order id. The scheme is `inv-{orderId}` for the seat reservation, `pay-{orderId}` for payment authorization, `rel-{orderId}` for hold release, and `refund-{orderId}` for payment reversal.
 - Inventory and Payments store their received keys scoped by operation, service caller/user context where applicable, request fingerprint, and result.
-- Reusing the same key with the same logical payload returns the original logical result.
+- Reusing the same key with the same logical payload returns the current idempotent business result.
 - Reusing the same key with a different logical payload returns `409 Conflict`.
 
 Idempotency retention is service-specific:
@@ -61,7 +65,7 @@ Idempotency retention is service-specific:
 | Inventory | Seat reservation | 30 minutes |
 | Payments | Payment authorization | 24 hours |
 
-Inventory seat holds last 10 minutes. The 30-minute Inventory idempotency retention remembers the reservation attempt but does not extend or renew the seat hold; retrying the same key after expiration returns the original expired reservation result instead of creating a new hold.
+Inventory seat holds last 10 minutes. The 30-minute idempotency record identifies the original reservation but does not freeze a cached `HELD` response, extend the deadline, or create a replacement hold. A replay resolves the reservation's current state. `reservations.order_id` remains unique after idempotency-record purge, so one order cannot acquire a second reservation.
 
 ## Service Boundaries
 
@@ -69,7 +73,7 @@ Inventory seat holds last 10 minutes. The 30-minute Inventory idempotency retent
 | --- | --- | --- | --- |
 | Catalog | Exposes routes, schedules, products, and offers. | Synchronous read API. | Catalog is read-heavy and tolerant of stale data, so it can be scaled and deployed independently from checkout. |
 | Orders | Owns the customer-facing purchase workflow, order state, idempotent checkout acceptance, and its PostgreSQL database. | Synchronous entry API plus asynchronous pipeline orchestration. | Orders is the money-path coordinator: it accepts checkout requests quickly and records/reports order progress. |
-| Inventory | Owns finite seat availability and time-limited seat holds. | Synchronous hold decision plus reservation events. | Inventory is the contended resource. It must create one strongly consistent hold before a seat can proceed to payment. Its reservation store is separate from Orders' order-state ownership. |
+| Inventory | Owns finite seat availability, time-limited seat holds, and the hold-to-sale transition. | Synchronous hold and confirmation decisions plus reservation events. | Inventory is the contended resource. It must create one strongly consistent hold before payment and atomically confirm the sale before Orders becomes final. Its reservation store is separate from Orders' order-state ownership. |
 | Payments | Owns payment authorization state and integrates with a provider sandbox/test API. | Synchronous idempotent authorization plus payment events. | Payment authorization must not double-charge under retries; an immediate success/failure decision is needed before order confirmation. |
 | Notifications | Sends confirmations and customer updates. | Fully asynchronous event consumer. | Notification failure must not fail checkout. Kafka buffers the work until the service recovers. |
 
@@ -105,10 +109,18 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
   - Requires a public-client-generated `Idempotency-Key` so client retries do not create duplicate orders.
   - Stores checkout idempotency records for 24 hours.
 - `GET /api/orders/{orderId}`
-  - Returns the current order status: accepted, reserving, payment-pending, confirmed, failed, or cancelled.
+  - Returns the current order status: accepted, reserving, payment-pending, confirming-inventory, compensating, confirmed, failed, or cancelled.
   - Requires the authenticated customer to own the order, unless an operator/admin role is used.
   - Returns `404 Not Found` for customer-to-customer access to avoid revealing another customer's order.
 - Orders persists order state in `orders_db`.
+- `POST /api/orders/{orderId}/reconciliation/redrive`
+  - Requires an operations credential and an idempotency key.
+  - Accepts only orders with an open reconciliation record.
+  - Atomically stores the redrive result and writes a new `order-placed` outbox row, then returns `202 Accepted`.
+  - Never modifies Inventory, Payments, or terminal Orders state directly.
+- `POST /api/orders/{orderId}/reconciliation/{recordId}/resolve`
+  - Requires an operations credential, an idempotency key, a terminal order, and an evidence reference.
+  - Resolves only an investigated invariant-violation record; it cannot waive payment reversal or change order state.
 
 ### Inventory
 
@@ -119,9 +131,15 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
   - Uses a strong consistency decision: the same seat cannot have two active holds.
   - Stores reservation idempotency records for 30 minutes without extending the 10-minute hold.
   - Owns reservation/seat availability state for the no-oversell invariant; this does not replace Orders' ownership of the order-state database.
+- `PUT /api/inventory/reservations/{reservationId}/confirmation`
+  - Confirms a non-expired hold for the owning `orderId` after payment authorization.
+  - Atomically transitions the reservation `HELD -> CONFIRMED` and its seats `HELD -> SOLD`.
+  - Is idempotent by reservation and order: a first success and every valid replay return `200 CONFIRMED`.
+  - Serializes with expiration and release. If expiration wins, confirmation returns a stable conflict and cannot resurrect the reservation.
+  - Uses the protocol and failure semantics defined in [reservation-confirmation.md](reservation-confirmation.md).
 - `DELETE /api/inventory/reservations/{reservationId}`
   - Releases a hold when payment fails, the order is cancelled, or the 10-minute hold expires.
-  - Is idempotent by reservation state and does not require an `Idempotency-Key`.
+  - Is idempotent by reservation state, operates only on `HELD`, never releases `CONFIRMED`/`SOLD`, and does not require an `Idempotency-Key`.
 
 ### Payments
 
@@ -133,10 +151,10 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
   - Calls a configured provider sandbox/test API through a Payments-owned adapter; raw card data and live charges are out of scope.
   - Accepts only payment method tokens or provider references, never raw card number, CVV, or live payment credentials.
 - `POST /api/payments/refund`
-  - Refunds a previously authorized payment for one order, full or partial.
+  - Fully reverses a previously authorized payment for one failed checkout.
   - Internal API; callers must be trusted services such as Orders (compensation when an order is cancelled or fails after authorization).
   - Requires an Orders-generated idempotency key so retries return the original refund result instead of refunding again.
-  - Calls the provider sandbox/test refund API through the Payments-owned adapter.
+  - The Payments-owned adapter selects a provider void for uncaptured funds or a provider refund after capture; Orders uses the same EuroTransit refund command in both cases.
 
 ### Notifications
 
@@ -216,9 +234,12 @@ The selected money path is hybrid sync+async:
 2. Orders validates the request, stores an accepted order, emits `order-placed`, and returns `202 Accepted`.
 3. Orders executes the reservation/payment pipeline with Kotlin coroutines/flows and structured cancellation.
 4. Orders calls Inventory synchronously with an Orders-generated reservation idempotency key to create a 10-minute seat hold because this is the consistency boundary.
-5. Orders calls Payments synchronously with an Orders-generated payment idempotency key only after the hold succeeds, because payment must be idempotent and immediately known before confirmation.
-6. Orders emits final events such as `order-confirmed` and `notification-requested`.
-7. Notifications consumes events asynchronously; if it is down, checkout remains successful and Kafka retains the work.
+5. Orders stores `reservationId`, transitions to `PAYMENT_PENDING`, and closes customer cancellation before authorization begins.
+6. Orders calls Payments synchronously with `pay-{orderId}` only after the hold succeeds.
+7. After authorization, Orders transitions to `CONFIRMING_INVENTORY` and synchronously confirms the reservation in Inventory. Inventory atomically transitions the reservation `HELD -> CONFIRMED` and its seats `HELD -> SOLD`, serialized against cleanup and release.
+8. Orders marks the order `CONFIRMED` and records final outbox events only after Inventory confirms the sale.
+9. Kafka publishes facts such as `order-confirmed` and asynchronous work such as `notification-requested`.
+10. Notifications consumes events asynchronously; if it is down, checkout remains successful and Kafka retains the work.
 
 ## Resilience Requirements
 
@@ -227,5 +248,7 @@ The selected money path is hybrid sync+async:
 - Inventory and Payments must persist idempotency records so duplicate events or HTTP retries return the same outcome.
 - Orders persists checkout idempotency records for 24 hours, Inventory persists reservation idempotency records for 30 minutes, and Payments persists authorization idempotency records for 24 hours.
 - Inventory holds must expire after 10 minutes if payment does not complete, returning the seat to available state. Inventory idempotency retention must not renew an expired hold.
+- Reservation confirmation, expiration, and release must use atomic state transitions. Unknown confirmation outcomes are retried or reconciled; they are not treated as definitive failures.
+- Kafka retry exhaustion publishes to `order-placed.DLT`; a DLT consumer creates a reconciliation record without changing the durable checkout phase or issuing speculative compensation. Redrive uses the transactional outbox and resumes from the stored order state.
 - Notification failure is a degraded mode, not a checkout failure.
 - The checkout SLOs, alerts, and tracing requirements are defined in [slo-observability.md](../operations/slo-observability.md).
