@@ -77,10 +77,12 @@ class ReservationService(
         meterRegistry.counter("inventory.holds.attempted").increment()
 
         val reservationId = UUID.randomUUID().toString()
-        val expiresAt = OffsetDateTime.now(clock).plusMinutes(10)
 
         try {
-            val isSuccess = transactionalOperator.executeAndAwait {
+            val response = transactionalOperator.executeAndAwait {
+                val dbNow = reservationRepository.getCurrentTimestamp()
+                val expiresAt = dbNow.plusMinutes(10)
+
                 val rowsUpdated = seatRepository.holdSeats(request.routeId, request.seats, reservationId)
                 val success = rowsUpdated == request.seats.size
                 val status = if (success) ReservationStatus.HELD else ReservationStatus.FAILED
@@ -151,21 +153,16 @@ class ReservationService(
                     outboxEventRepository.save(outboxEvent)
                 }
 
-                success
+                storedResponse
             }
 
-            if (isSuccess) {
+            if (response.status == ReservationStatus.HELD) {
                 meterRegistry.counter("inventory.holds.successful").increment()
             } else {
                 meterRegistry.counter("inventory.holds.rejected").increment()
             }
 
-            val finalStatus = if (isSuccess) ReservationStatus.HELD else ReservationStatus.FAILED
-            return ReservationResponse(
-                reservationId = reservationId,
-                status = finalStatus,
-                expiresAt = expiresAt.toLocalDateTime()
-            )
+            return response
         } catch (_: DuplicateKeyException) {
             logger.info("Concurrent request detected for idempotency key: {}. Falling back to cached response.", idempotencyKey)
             val concurrentRecord = idempotencyRecordRepository.findByKeyAndPrincipal(idempotencyKey, principalId)
