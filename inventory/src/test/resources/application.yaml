@@ -1,0 +1,8 @@
+inventory:
+  reservations:
+    # 1-hour initial delay and interval in test profile to prevent background scheduler interference
+    cleanup-initial-delay-ms: 3600000
+    cleanup-interval-ms: 3600000
+  idempotency:
+    cleanup-initial-delay-ms: 3600000
+    cleanup-interval-ms: 3600000
