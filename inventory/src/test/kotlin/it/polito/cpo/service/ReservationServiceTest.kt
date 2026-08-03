@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.mockito.Mockito
 import org.springframework.http.HttpStatus
+import org.springframework.dao.DuplicateKeyException
 import it.polito.cpo.observability.ApiException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
@@ -93,7 +94,14 @@ class ReservationServiceTest {
         override suspend fun findByReservationIdForUpdate(reservationId: String): Reservation? {
             return store[reservationId]
         }
+        override suspend fun findByOrderId(orderId: UUID): Reservation? {
+            return store.values.firstOrNull { it.orderId == orderId }
+        }
         override suspend fun <S : Reservation> save(entity: S): S {
+            val existing = store.values.firstOrNull { it.orderId == entity.orderId && it.reservationId != entity.reservationId }
+            if (existing != null) {
+                throw DuplicateKeyException("Unique index violation on uk_reservations_order_id")
+            }
             store[entity.reservationId] = entity
             return entity
         }
@@ -678,5 +686,43 @@ class ReservationServiceTest {
         assertEquals(1, deleted)
         assertNull(idemRepo.findByKeyAndPrincipal("old-key", "user-1"))
         assertNotNull(idemRepo.findByKeyAndPrincipal("recent-key", "user-1"))
+    }
+
+    @Test
+    fun `reserveSeats throws 409 ORDER_ALREADY_RESERVED when duplicate order_id occurs without idempotency record`() = runTest {
+        val seatRepo = FakeSeatRepository()
+        val resRepo = FakeReservationRepository()
+        val idemRepo = FakeIdempotencyRecordRepository()
+        val outboxRepo = FakeOutboxEventRepository()
+        val service = buildService(seatRepo, resRepo, idemRepo, outboxRepo)
+
+        val orderId = UUID.randomUUID()
+        // Existing reservation in DB for this orderId (e.g. from an earlier hold whose idempotency key was purged)
+        resRepo.save(Reservation(
+            reservationId = "res-existing-123",
+            orderId = orderId,
+            routeId = "route-1",
+            status = "CONFIRMED",
+            expiresAt = OffsetDateTime.now()
+        ))
+
+        // New request arrives for the same orderId with a new idempotency key
+        val request = ReservationRequest(
+            orderId = orderId,
+            routeId = "route-1",
+            seats = listOf("seat-1", "seat-2")
+        )
+
+        val exception = assertThrows<ApiException> {
+            service.reserveSeats(
+                request = request,
+                idempotencyKey = "new-key-after-purge",
+                principalId = "user-1",
+                correlationId = "corr-1"
+            )
+        }
+
+        assertEquals(HttpStatus.CONFLICT, exception.status)
+        assertEquals("ORDER_ALREADY_RESERVED", exception.code)
     }
 }

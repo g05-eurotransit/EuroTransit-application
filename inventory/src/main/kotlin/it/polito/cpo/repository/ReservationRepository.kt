@@ -7,10 +7,14 @@ import org.springframework.data.r2dbc.repository.Query
 import org.springframework.data.repository.kotlin.CoroutineCrudRepository
 import org.springframework.stereotype.Repository
 import java.time.OffsetDateTime
+import java.util.UUID
 
 @Repository
 interface ReservationRepository : CoroutineCrudRepository<Reservation, String> {
+
     suspend fun findByReservationId(reservationId: String): Reservation?
+
+    suspend fun findByOrderId(orderId: UUID): Reservation?
     
     // Atomically expires reservations in batches and returns the affected rows
     @Query(

@@ -34,6 +34,9 @@ import kotlinx.coroutines.coroutineScope
 import org.springframework.dao.DataAccessException
 import org.springframework.r2dbc.core.DatabaseClient
 import org.springframework.test.context.ActiveProfiles
+import org.springframework.http.HttpStatus
+import it.polito.cpo.observability.ApiException
+import org.junit.jupiter.api.assertThrows
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
 
@@ -492,5 +495,54 @@ class ReservationServiceIntegrationTest {
         assertNotNull(storedRes)
         assertEquals("HELD", storedRes?.status)
         assertEquals(orderId, storedRes?.orderId)
+    }
+
+    @Test
+    fun `reserveSeats should return 409 when orderId already exists in DB even after idempotency record is purged`() = runBlocking {
+        // Arrange
+        val routeId = "route-dup-order"
+        val seat1 = "seat-dup-1"
+        val seat2 = "seat-dup-2"
+        insertSeat(routeId, seat1, "AVAILABLE")
+        insertSeat(routeId, seat2, "AVAILABLE")
+
+        val orderId = UUID.randomUUID()
+        val idempotencyKey1 = "key-first-${UUID.randomUUID()}"
+        val request = ReservationRequest(
+            orderId = orderId,
+            routeId = routeId,
+            seats = listOf(seat1)
+        )
+
+        // First reservation succeeds
+        val response1 = reservationService.reserveSeats(
+            idempotencyKey = idempotencyKey1,
+            principalId = "user-test",
+            correlationId = "corr-1",
+            request = request
+        )
+        assertEquals(ReservationStatus.HELD, response1.status)
+
+        // Simulate idempotency record purge
+        idempotencyRecordRepository.deleteAll()
+
+        // Second reservation with same orderId, different idempotencyKey, and available seat2
+        val request2 = ReservationRequest(
+            orderId = orderId,
+            routeId = routeId,
+            seats = listOf(seat2)
+        )
+        val idempotencyKey2 = "key-second-${UUID.randomUUID()}"
+        val ex = assertThrows<ApiException> {
+            reservationService.reserveSeats(
+                idempotencyKey = idempotencyKey2,
+                principalId = "user-test",
+                correlationId = "corr-2",
+                request = request2
+            )
+        }
+
+        assertEquals(HttpStatus.CONFLICT, ex.status)
+        assertEquals("ORDER_ALREADY_RESERVED", ex.code)
     }
 }

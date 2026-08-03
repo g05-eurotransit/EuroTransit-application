@@ -167,15 +167,27 @@ class ReservationService(
 
             return response
         } catch (_: DuplicateKeyException) {
-            logger.info("Concurrent request detected for idempotency key: {}. Falling back to cached response.", idempotencyKey)
             val concurrentRecord = idempotencyRecordRepository.findByKeyAndPrincipal(idempotencyKey, principalId)
-                ?: throw ApiException(
-                    HttpStatus.INTERNAL_SERVER_ERROR,
-                    "INTERNAL_ERROR",
-                    "Idempotency record lost after DuplicateKeyException"
+            if (concurrentRecord != null) {
+                logger.info("Concurrent request detected for idempotency key: {}. Falling back to cached response.", idempotencyKey)
+                return processExistingRecord(concurrentRecord, fingerprint, idempotencyKey)
+            }
+
+            val existingReservation = reservationRepository.findByOrderId(request.orderId)
+            if (existingReservation != null) {
+                logger.warn("Reservation already exists for order: {} (status: {}). Handled DuplicateKeyException on order_id constraint.", request.orderId, existingReservation.status)
+                throw ApiException(
+                    status = HttpStatus.CONFLICT,
+                    code = "ORDER_ALREADY_RESERVED",
+                    message = "A reservation already exists for order ${request.orderId} (status: ${existingReservation.status})"
                 )
-            
-            return processExistingRecord(concurrentRecord, fingerprint, idempotencyKey)
+            }
+
+            throw ApiException(
+                HttpStatus.INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Idempotency record lost after DuplicateKeyException"
+            )
         }
     }
 
