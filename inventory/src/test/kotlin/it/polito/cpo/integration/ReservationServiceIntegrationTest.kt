@@ -335,4 +335,77 @@ class ReservationServiceIntegrationTest {
             }
         }
     }
+
+    @Test
+    fun `sweepExpiredReservations should expire oldest HELD reservations first and release seats`() = runBlocking {
+        // Arrange
+        val routeId = "route-sweep"
+        val seat1 = "seat-sweep-1"
+        val seat2 = "seat-sweep-2"
+        val seat3 = "seat-sweep-3"
+        insertSeat(routeId, seat1, "AVAILABLE")
+        insertSeat(routeId, seat2, "AVAILABLE")
+        insertSeat(routeId, seat3, "AVAILABLE")
+
+        val resOld = "res-old"
+        val resNew = "res-new"
+        val resFuture = "res-future"
+
+        seatRepository.holdSeats(routeId, listOf(seat1), resOld)
+        seatRepository.holdSeats(routeId, listOf(seat2), resNew)
+        seatRepository.holdSeats(routeId, listOf(seat3), resFuture)
+
+        val now = OffsetDateTime.now(ZoneOffset.UTC)
+        // resOld: expired 10 minutes ago
+        reservationRepository.save(
+            it.polito.cpo.model.Reservation(
+                reservationId = resOld,
+                orderId = UUID.randomUUID(),
+                routeId = routeId,
+                status = "HELD",
+                expiresAt = now.minusMinutes(10),
+                isNewRecord = true
+            )
+        )
+        // resNew: expired 1 minute ago
+        reservationRepository.save(
+            it.polito.cpo.model.Reservation(
+                reservationId = resNew,
+                orderId = UUID.randomUUID(),
+                routeId = routeId,
+                status = "HELD",
+                expiresAt = now.minusMinutes(1),
+                isNewRecord = true
+            )
+        )
+        // resFuture: expires in 10 minutes
+        reservationRepository.save(
+            it.polito.cpo.model.Reservation(
+                reservationId = resFuture,
+                orderId = UUID.randomUUID(),
+                routeId = routeId,
+                status = "HELD",
+                expiresAt = now.plusMinutes(10),
+                isNewRecord = true
+            )
+        )
+
+        // Act
+        val expiredCount = reservationService.sweepExpiredReservations()
+
+        // Assert
+        assertEquals(2, expiredCount)
+        assertEquals("EXPIRED", reservationRepository.findById(resOld)?.status)
+        assertEquals("EXPIRED", reservationRepository.findById(resNew)?.status)
+        assertEquals("HELD", reservationRepository.findById(resFuture)?.status)
+
+        // Seats for expired reservations should be released back to AVAILABLE
+        assertEquals("AVAILABLE", getSeatStatus(routeId, seat1))
+        assertEquals("AVAILABLE", getSeatStatus(routeId, seat2))
+        // Seat for future reservation should remain HELD
+        assertEquals("HELD", getSeatStatus(routeId, seat3))
+
+        // Check metric
+        assertEquals(2.0, meterRegistry.counter("inventory.holds.expired").count())
+    }
 }
