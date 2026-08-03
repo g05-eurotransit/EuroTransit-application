@@ -15,57 +15,21 @@ import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.springframework.beans.factory.annotation.Autowired
-import org.springframework.boot.test.context.SpringBootTest
-import org.springframework.test.context.bean.override.mockito.MockitoBean
-import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder
-import org.springframework.test.context.DynamicPropertyRegistry
-import org.springframework.test.context.DynamicPropertySource
-import org.testcontainers.containers.PostgreSQLContainer
-import org.testcontainers.junit.jupiter.Container
-import org.testcontainers.junit.jupiter.Testcontainers
-import java.util.UUID
-import org.springframework.dao.DataIntegrityViolationException
-import kotlinx.coroutines.reactor.awaitSingleOrNull
-import kotlinx.coroutines.async
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
-import org.springframework.dao.DataAccessException
-import org.springframework.r2dbc.core.DatabaseClient
-import org.springframework.test.context.ActiveProfiles
-import org.springframework.http.HttpStatus
-import it.polito.cpo.observability.ApiException
 import org.junit.jupiter.api.assertThrows
+import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.http.HttpStatus
+import org.springframework.r2dbc.core.DatabaseClient
+import org.springframework.dao.DataAccessException
+import it.polito.cpo.observability.ApiException
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
+import java.util.UUID
+import kotlinx.coroutines.reactor.awaitSingleOrNull
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
-@ActiveProfiles("test")
-@Testcontainers
-class ReservationServiceIntegrationTest {
-
-    companion object {
-        @Container
-        val postgres: PostgreSQLContainer<*> = PostgreSQLContainer("postgres:15-alpine")
-            .withDatabaseName("inventory")
-            .withUsername("test")
-            .withPassword("test")
-
-        @JvmStatic
-        @DynamicPropertySource
-        fun properties(registry: DynamicPropertyRegistry) {
-            registry.add("spring.r2dbc.url") {
-                "r2dbc:postgresql://${postgres.host}:${postgres.firstMappedPort}/${postgres.databaseName}"
-            }
-            registry.add("spring.r2dbc.username", postgres::getUsername)
-            registry.add("spring.r2dbc.password", postgres::getPassword)
-            
-            registry.add("spring.flyway.url", postgres::getJdbcUrl)
-            registry.add("spring.flyway.user", postgres::getUsername)
-            registry.add("spring.flyway.password", postgres::getPassword)
-        }
-    }
+class ReservationServiceIntegrationTest : BaseIntegrationTest() {
 
     @Autowired
     lateinit var reservationService: ReservationService
@@ -84,9 +48,6 @@ class ReservationServiceIntegrationTest {
 
     @Autowired
     lateinit var outboxEventRepository: OutboxEventRepository
-
-    @MockitoBean
-    lateinit var reactiveJwtDecoder: ReactiveJwtDecoder
 
     @Autowired
     lateinit var databaseClient: DatabaseClient
