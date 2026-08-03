@@ -55,3 +55,7 @@ management:
     metrics:
       export:
         enabled: false
+
+inventory:
+  cleanup:
+    enabled: ${INVENTORY_CLEANUP_ENABLED:true}

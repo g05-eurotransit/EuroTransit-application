@@ -2,6 +2,7 @@ package it.polito.cpo.service
 
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
 
@@ -11,6 +12,11 @@ import org.springframework.stereotype.Component
  * to [ReservationService] to ensure clean architectural boundaries.
  */
 @Component
+@ConditionalOnProperty(
+    name = ["inventory.cleanup.enabled"],
+    havingValue = "true",
+    matchIfMissing = true
+)
 class InventoryCleanupJob(
     private val reservationService: ReservationService,
 ) {
