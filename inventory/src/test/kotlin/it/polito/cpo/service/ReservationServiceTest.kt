@@ -725,4 +725,24 @@ class ReservationServiceTest {
         assertEquals(HttpStatus.CONFLICT, exception.status)
         assertEquals("ORDER_ALREADY_RESERVED", exception.code)
     }
+
+    @Test
+    fun `generateFingerprint produces identical hash for reordered and duplicate seats`() {
+        val service = buildService(FakeSeatRepository(), FakeReservationRepository(), FakeIdempotencyRecordRepository(), FakeOutboxEventRepository())
+        val orderId = UUID.randomUUID()
+        val req1 = ReservationRequest(orderId, listOf("1A", "1B", "1C"), "route-1")
+        val req2 = ReservationRequest(orderId, listOf("1C", "1A", "1B"), "route-1")
+        val req3 = ReservationRequest(orderId, listOf("1B", "1A", "1C", "1A", "1B"), "route-1")
+
+        val method = service.javaClass.getDeclaredMethod("generateFingerprint", ReservationRequest::class.java).apply {
+            isAccessible = true
+        }
+
+        val fp1 = method.invoke(service, req1) as String
+        val fp2 = method.invoke(service, req2) as String
+        val fp3 = method.invoke(service, req3) as String
+
+        assertEquals(fp1, fp2)
+        assertEquals(fp1, fp3)
+    }
 }

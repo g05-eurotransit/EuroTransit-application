@@ -45,8 +45,8 @@ class ReservationService(
      * Generates the SHA-256 fingerprint of the normalized reservation request payload.
      */
     private fun generateFingerprint(request: ReservationRequest): String {
-        // Canonize the seats order to prevent false conflicts
-        val canonicalRequest = request.copy(seats = request.seats.sorted())
+        // Canonize the seats order and remove duplicates to prevent false conflicts
+        val canonicalRequest = request.copy(seats = request.seats.distinct().sorted())
         val json = objectMapper.writeValueAsString(canonicalRequest)
         val digest = MessageDigest.getInstance("SHA-256").digest(json.toByteArray())
         return digest.joinToString("") { "%02x".format(it) }
