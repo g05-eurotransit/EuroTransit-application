@@ -18,7 +18,6 @@ import it.polito.cpo.repository.SeatRepository
 import io.micrometer.core.instrument.MeterRegistry
 import org.springframework.http.HttpStatus
 import org.springframework.stereotype.Service
-import org.springframework.transaction.annotation.Transactional
 import java.security.MessageDigest
 import java.time.OffsetDateTime
 import java.util.UUID
@@ -39,7 +38,6 @@ class ReservationService(
     private val objectMapper: ObjectMapper,
     private val transactionalOperator: TransactionalOperator,
     private val meterRegistry: MeterRegistry,
-    private val clock: java.time.Clock
 ) {
     private val logger = LoggerFactory.getLogger(ReservationService::class.java)
 
@@ -83,8 +81,13 @@ class ReservationService(
                 val dbNow = reservationRepository.getCurrentTimestamp()
                 val expiresAt = dbNow.plusMinutes(10)
 
-                val rowsUpdated = seatRepository.holdSeats(request.routeId, request.seats, reservationId)
-                val success = rowsUpdated == request.seats.size
+                val distinctSeats = request.seats.distinct()
+                val rowsUpdated = if (distinctSeats.isEmpty()) {
+                    0
+                } else {
+                    seatRepository.holdSeats(request.routeId, distinctSeats, reservationId, distinctSeats.size)
+                }
+                val success = distinctSeats.isNotEmpty() && rowsUpdated == distinctSeats.size
                 val status = if (success) ReservationStatus.HELD else ReservationStatus.FAILED
 
                 if (success) {

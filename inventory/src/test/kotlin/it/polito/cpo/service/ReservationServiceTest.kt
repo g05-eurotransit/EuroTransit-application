@@ -60,7 +60,7 @@ class ReservationServiceTest {
         var seatsAvailable: Boolean = true
     ) : SeatRepository by delegate {
         var releaseCalledWith: String? = null
-        override suspend fun holdSeats(routeId: String, seatIds: List<String>, reservationId: String): Int {
+        override suspend fun holdSeats(routeId: String, seatIds: List<String>, reservationId: String, expectedCount: Int): Int {
             return if (seatsAvailable) seatIds.size else 0
         }
         override suspend fun releaseSeats(reservationId: String): Int {
@@ -152,8 +152,7 @@ class ReservationServiceTest {
         objectMapper = mapper,
         outboxEventRepository = outboxRepo,
         transactionalOperator = fakeTransactionalOperator,
-        meterRegistry = SimpleMeterRegistry(),
-        clock = Clock.systemUTC()
+        meterRegistry = SimpleMeterRegistry()
     )
 
     @Test
@@ -437,14 +436,11 @@ class ReservationServiceTest {
         val seatRepo = FakeSeatRepository()
         val resRepo = FakeReservationRepository()
         
-        // Fixed time for the clock
-        val fixedInstant = Instant.parse("2026-07-30T12:00:00Z")
-        val fixedClock = Clock.fixed(fixedInstant, java.time.ZoneOffset.UTC)
+        val fixedTime = OffsetDateTime.parse("2026-07-30T12:00:00Z")
+        resRepo.currentDbTime = fixedTime
         
-        val service = ReservationService(
-            seatRepo, resRepo, FakeIdempotencyRecordRepository(), FakeOutboxEventRepository(),
-            mapper, fakeTransactionalOperator, SimpleMeterRegistry(),
-            fixedClock
+        val service = buildService(
+            seatRepo, resRepo, FakeIdempotencyRecordRepository(), FakeOutboxEventRepository()
         )
 
         // Reservation that expires in the past (11:55) -> SHOULD be expired
@@ -465,8 +461,6 @@ class ReservationServiceTest {
             expiresAt = OffsetDateTime.parse("2026-07-30T12:05:00Z")
         ))
 
-        val now = OffsetDateTime.now(fixedClock)
-        resRepo.currentDbTime = now
         val count = service.sweepExpiredReservations()
 
         assertEquals(1, count, "Only one reservation should have expired")
@@ -500,8 +494,7 @@ class ReservationServiceTest {
         val meterRegistry = SimpleMeterRegistry()
         val service = ReservationService(
             seatRepo, resRepo, idemRepo, failingOutboxRepo,
-            mapper, fakeTransactionalOperator, meterRegistry,
-            Clock.systemUTC()
+            mapper, fakeTransactionalOperator, meterRegistry
         )
 
         val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1")
@@ -569,14 +562,11 @@ class ReservationServiceTest {
         val seatRepo = FakeSeatRepository()
         val resRepo = FakeReservationRepository()
         
-        // Fixed time for the clock
-        val fixedInstant = Instant.parse("2026-07-30T12:00:00Z")
-        val fixedClock = Clock.fixed(fixedInstant, java.time.ZoneOffset.UTC)
+        val fixedTime = OffsetDateTime.parse("2026-07-30T12:00:00Z")
+        resRepo.currentDbTime = fixedTime
         
-        val service = ReservationService(
-            seatRepo, resRepo, FakeIdempotencyRecordRepository(), FakeOutboxEventRepository(),
-            mapper, fakeTransactionalOperator, SimpleMeterRegistry(),
-            fixedClock
+        val service = buildService(
+            seatRepo, resRepo, FakeIdempotencyRecordRepository(), FakeOutboxEventRepository()
         )
 
         val orderId = UUID.randomUUID()
@@ -589,7 +579,6 @@ class ReservationServiceTest {
             // Expired 5 minutes ago!
             expiresAt = OffsetDateTime.parse("2026-07-30T11:55:00Z")
         ))
-        resRepo.currentDbTime = OffsetDateTime.now(fixedClock)
 
         val exception = assertThrows<ApiException> {
             service.confirmReservation(reservationId, orderId)

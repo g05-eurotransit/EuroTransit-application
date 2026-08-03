@@ -408,4 +408,83 @@ class ReservationServiceIntegrationTest {
         // Check metric
         assertEquals(2.0, meterRegistry.counter("inventory.holds.expired").count())
     }
+
+    @Test
+    fun `reserveSeats should fail and not leave orphan held seats when one requested seat is already unavailable`() = runBlocking {
+        // Arrange
+        val routeId = "route-atomic-fail"
+        val seatAvail = "seat-avail-1"
+        val seatSold = "seat-sold-1"
+        insertSeat(routeId, seatAvail, "AVAILABLE")
+        insertSeat(routeId, seatSold, "SOLD")
+
+        val orderId = UUID.randomUUID()
+        val idempotencyKey = "key-atomic-fail-${UUID.randomUUID()}"
+        val request = ReservationRequest(
+            orderId = orderId,
+            routeId = routeId,
+            seats = listOf(seatAvail, seatSold)
+        )
+
+        // Act
+        val response = reservationService.reserveSeats(
+            idempotencyKey = idempotencyKey,
+            principalId = "user-atomic",
+            correlationId = "corr-atomic-1",
+            request = request
+        )
+
+        // Assert
+        // 1. Response status should be FAILED
+        assertEquals(ReservationStatus.FAILED, response.status)
+
+        // 2. AVAILABLE seat must NOT have been converted to HELD (no partial/orphan hold leak)
+        assertEquals("AVAILABLE", getSeatStatus(routeId, seatAvail))
+        assertEquals("SOLD", getSeatStatus(routeId, seatSold))
+
+        // 3. No reservation record created in DB
+        val storedRes = reservationRepository.findById(response.reservationId)
+        assertNull(storedRes)
+
+        // 4. Idempotency record stored with 409 Conflict
+        val record = idempotencyRecordRepository.findByKeyAndPrincipal(idempotencyKey, "user-atomic")
+        assertNotNull(record)
+        assertEquals(409, record?.responseStatusCode)
+    }
+
+    @Test
+    fun `reserveSeats should successfully hold all seats when all requested seats are available`() = runBlocking {
+        // Arrange
+        val routeId = "route-atomic-ok"
+        val seat1 = "seat-ok-1"
+        val seat2 = "seat-ok-2"
+        insertSeat(routeId, seat1, "AVAILABLE")
+        insertSeat(routeId, seat2, "AVAILABLE")
+
+        val orderId = UUID.randomUUID()
+        val idempotencyKey = "key-atomic-ok-${UUID.randomUUID()}"
+        val request = ReservationRequest(
+            orderId = orderId,
+            routeId = routeId,
+            seats = listOf(seat1, seat2)
+        )
+
+        // Act
+        val response = reservationService.reserveSeats(
+            idempotencyKey = idempotencyKey,
+            principalId = "user-atomic",
+            correlationId = "corr-atomic-2",
+            request = request
+        )
+
+        // Assert
+        assertEquals(ReservationStatus.HELD, response.status)
+        assertEquals("HELD", getSeatStatus(routeId, seat1))
+        assertEquals("HELD", getSeatStatus(routeId, seat2))
+
+        val storedRes = reservationRepository.findById(response.reservationId)
+        assertNotNull(storedRes)
+        assertEquals("HELD", storedRes?.status)
+        assertEquals(orderId, storedRes?.orderId)
+    }
 }

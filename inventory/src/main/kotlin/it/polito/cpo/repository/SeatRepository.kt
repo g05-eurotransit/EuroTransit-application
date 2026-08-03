@@ -10,13 +10,31 @@ import org.springframework.stereotype.Repository
 interface SeatRepository : CoroutineCrudRepository<Seat, String> {
 
     /**
-     * Attempts to atomically update seats to HELD only if they are all AVAILABLE.
-     * Returns the number of modified rows: if it differs from requested seats, an oversale was prevented.
+     * Attempts to atomically update seats to HELD only if ALL requested seats are AVAILABLE (all-or-nothing).
+     * If any requested seat is not AVAILABLE, 0 rows are updated to prevent partial holds and seat leaks.
      */
     @Modifying
-    @Query("UPDATE seats SET status = 'HELD', reservation_id = :reservationId " +
-            "WHERE route_id = :routeId AND seat_id IN (:seatIds) AND status = 'AVAILABLE'")
-    suspend fun holdSeats(routeId: String, seatIds: List<String>, reservationId: String): Int
+    @Query("""
+        WITH available_seats AS (
+            SELECT seat_id 
+            FROM seats 
+            WHERE route_id = :routeId 
+              AND seat_id IN (:seatIds) 
+              AND status = 'AVAILABLE' 
+            FOR UPDATE
+        )
+        UPDATE seats 
+        SET status = 'HELD', reservation_id = :reservationId 
+        WHERE route_id = :routeId 
+          AND seat_id IN (SELECT seat_id FROM available_seats) 
+          AND (SELECT COUNT(*) FROM available_seats) = :expectedCount
+    """)
+    suspend fun holdSeats(
+        routeId: String,
+        seatIds: List<String>,
+        reservationId: String,
+        expectedCount: Int = seatIds.size
+    ): Int
 
     /**
      * Releases seats when a hold expires or is canceled. Only operates on HELD seats.

@@ -77,8 +77,7 @@ class InventoryControllerTest {
         Mockito.mock(OutboxEventRepository::class.java),
         Mockito.mock(ObjectMapper::class.java),
         Mockito.mock(TransactionalOperator::class.java),
-        SimpleMeterRegistry(),
-        Clock.systemUTC()
+        SimpleMeterRegistry()
     ) {
         var lastReserveRequest: ReservationRequest? = null
         var lastIdempotencyKey: String? = null
