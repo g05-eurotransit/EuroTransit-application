@@ -33,10 +33,12 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import org.springframework.dao.DataAccessException
 import org.springframework.r2dbc.core.DatabaseClient
+import org.springframework.test.context.ActiveProfiles
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
+@ActiveProfiles("test")
 @Testcontainers
 class ReservationServiceIntegrationTest {
 
