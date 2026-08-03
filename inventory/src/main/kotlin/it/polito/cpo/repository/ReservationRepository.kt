@@ -12,11 +12,19 @@ import java.util.UUID
 @Repository
 interface ReservationRepository : CoroutineCrudRepository<Reservation, String> {
 
+    /**
+     * Finds a reservation by its identifier.
+     */
     suspend fun findByReservationId(reservationId: String): Reservation?
 
+    /**
+     * Finds a reservation by its associated order identifier.
+     */
     suspend fun findByOrderId(orderId: UUID): Reservation?
-    
-    // Atomically expires reservations in batches and returns the affected rows
+
+    /**
+     * Updates a batch of expired held reservations to expired and returns them.
+     */
     @Query(
         """
         WITH expired_batch AS (
@@ -35,13 +43,22 @@ interface ReservationRepository : CoroutineCrudRepository<Reservation, String> {
     )
     fun expireAndReturn(): Flow<Reservation>
 
+    /**
+     * Retrieves the current database timestamp.
+     */
     @Query("SELECT CURRENT_TIMESTAMP")
     suspend fun getCurrentTimestamp(): OffsetDateTime
     
+    /**
+     * Updates a reservation status to cancelled if currently held.
+     */
     @Modifying
     @Query("UPDATE reservations SET status = 'CANCELLED' WHERE reservation_id = :reservationId AND status = 'HELD'")
     suspend fun cancelIfHeld(reservationId: String): Int
 
+    /**
+     * Finds a reservation by identifier acquiring a row-level update lock.
+     */
     @Query("SELECT * FROM reservations WHERE reservation_id = :reservationId FOR UPDATE")
     suspend fun findByReservationIdForUpdate(reservationId: String): Reservation?
 }

@@ -42,7 +42,7 @@ class ReservationService(
     private val logger = LoggerFactory.getLogger(ReservationService::class.java)
 
     /**
-     * Generates an SHA-256 fingerprint of the request payload to detect idempotency collisions.
+     * Generates the SHA-256 fingerprint of the normalized reservation request payload.
      */
     private fun generateFingerprint(request: ReservationRequest): String {
         // Canonize the seats order to prevent false conflicts
@@ -53,8 +53,7 @@ class ReservationService(
     }
 
     /**
-     * Reserves seats and handles idempotency to prevent oversell or double-processing.
-     * DB writes and Outbox events are executed atomically in a programmatic transaction.
+     * Holds the requested seats, creates the reservation record, outbox event, and idempotency entry.
      */
     suspend fun reserveSeats(
         idempotencyKey: String,
@@ -191,6 +190,9 @@ class ReservationService(
         }
     }
 
+    /**
+     * Processes a stored idempotency record and returns the cached reservation response.
+     */
     private suspend fun processExistingRecord(
         existingRecord: IdempotencyRecord,
         fingerprint: String,
@@ -256,8 +258,7 @@ class ReservationService(
     }
 
     /**
-     * Atomically confirms a held reservation and its seats after a successful payment.
-     * Uses natural idempotency and row-level locking to prevent expiration conflicts.
+     * Confirms a held reservation and transitions its seats to sold.
      */
     suspend fun confirmReservation(reservationId: String, orderId: UUID): ReservationResponse {
         var apiExceptionToThrow: ApiException? = null
@@ -328,8 +329,7 @@ class ReservationService(
     }
 
     /**
-     * Releases a reservation and frees up the associated seats.
-     * This operation is naturally idempotent.
+     * Cancels a held reservation and releases its associated seats.
      */
     suspend fun releaseReservation(reservationId: String) {
         var released = false
@@ -350,10 +350,7 @@ class ReservationService(
     }
 
     /**
-     * Sweeps the database for reservations that have exceeded their hold period
-     * without being converted to a paid order. Releases the associated seats back to the
-     * pool and marks the reservation as EXPIRED. This operation is essential to
-     * maintain inventory correctness and prevent permanent oversell locks.
+     * Marks expired held reservations as expired and releases their seats.
      */
     suspend fun sweepExpiredReservations(): Int {
         var count = 0
@@ -378,8 +375,7 @@ class ReservationService(
     }
 
     /**
-     * Purges idempotency records older than the retention period (default 30 minutes),
-     * calculating the cutoff from authoritative database time.
+     * Deletes idempotency records created before the specified retention cutoff.
      */
     suspend fun purgeExpiredIdempotency(retentionMinutes: Long = 30): Int {
         val cutoff = reservationRepository.getCurrentTimestamp().minusMinutes(retentionMinutes)

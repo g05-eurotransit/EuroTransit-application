@@ -23,9 +23,7 @@ class InventoryCleanupJob(
     private val log = LoggerFactory.getLogger(InventoryCleanupJob::class.java)
 
     /**
-     * Periodically triggers the expiration of reservations that have exceeded their
-     * hold duration (10 minutes). Ensuring seats are promptly released is critical
-     * for preventing capacity leaks and lost sales.
+     * Triggers the periodic sweep of expired reservations.
      */
     @Scheduled(
         initialDelayString = "\${inventory.reservations.cleanup-initial-delay-ms:30000}",
@@ -39,8 +37,7 @@ class InventoryCleanupJob(
     }
 
     /**
-     * Periodically cleans up stale idempotency keys to prevent unbounded database growth.
-     * Per api-design.md, the Inventory service retains idempotency records for 30 minutes.
+     * Triggers the periodic purge of expired idempotency records.
      */
     @Scheduled(
         initialDelayString = "\${inventory.idempotency.cleanup-initial-delay-ms:600000}",

@@ -10,8 +10,7 @@ import org.springframework.stereotype.Repository
 interface SeatRepository : CoroutineCrudRepository<Seat, String> {
 
     /**
-     * Attempts to atomically update seats to HELD only if ALL requested seats are AVAILABLE (all-or-nothing).
-     * If any requested seat is not AVAILABLE, 0 rows are updated to prevent partial holds and seat leaks.
+     * Updates available seats to held for a route and reservation when all seats are available.
      */
     @Modifying
     @Query("""
@@ -37,27 +36,29 @@ interface SeatRepository : CoroutineCrudRepository<Seat, String> {
     ): Int
 
     /**
-     * Releases seats when a hold expires or is canceled. Only operates on HELD seats.
+     * Updates held seats for a reservation back to available.
      */
     @Modifying
     @Query("UPDATE seats SET status = 'AVAILABLE', reservation_id = NULL WHERE reservation_id = :reservationId AND status = 'HELD'")
     suspend fun releaseSeats(reservationId: String): Int
 
     /**
-     * Releases seats in batch for multiple expired/canceled reservations.
-     * Prevents N+1 query overhead during routine background sweeps.
+     * Updates held seats for multiple reservations back to available in batch.
      */
     @Modifying
     @Query("UPDATE seats SET status = 'AVAILABLE', reservation_id = NULL WHERE reservation_id IN (:reservationIds) AND status = 'HELD'")
     suspend fun releaseSeatsForReservations(reservationIds: Collection<String>): Int
     
     /**
-     * Confirms seats by transitioning them to SOLD. Only operates on HELD seats.
+     * Updates held seats for a reservation to sold.
      */
     @Modifying
     @Query("UPDATE seats SET status = 'SOLD' WHERE reservation_id = :reservationId AND status = 'HELD'")
     suspend fun confirmSeats(reservationId: String): Int
     
+    /**
+     * Counts the number of seats assigned to a reservation.
+     */
     @Query("SELECT COUNT(*) FROM seats WHERE reservation_id = :reservationId")
     suspend fun countByReservationId(reservationId: String): Long
 }

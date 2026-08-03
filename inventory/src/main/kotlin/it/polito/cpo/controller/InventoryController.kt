@@ -17,6 +17,9 @@ class InventoryController(
     private val reservationService: ReservationService
 ) {
 
+    /**
+     * Handles seat reservation requests with idempotency validation.
+     */
     @PostMapping
     suspend fun createReservation(
         @RequestHeader("Idempotency-Key") idempotencyKey: String,
@@ -29,6 +32,9 @@ class InventoryController(
         return ResponseEntity.status(httpStatus).body(response)
     }
 
+    /**
+     * Handles requests to cancel and release an existing reservation.
+     */
     @DeleteMapping("/{reservationId}")
     suspend fun releaseReservation(
         @PathVariable reservationId: String,
@@ -38,6 +44,9 @@ class InventoryController(
         return ResponseEntity.noContent().build()
     }
 
+    /**
+     * Handles requests to confirm an active reservation for an order.
+     */
     @PutMapping("/{reservationId}/confirmation")
     suspend fun confirmReservation(
         @PathVariable reservationId: String,
