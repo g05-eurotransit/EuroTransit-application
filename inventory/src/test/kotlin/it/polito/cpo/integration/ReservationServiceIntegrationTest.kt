@@ -1,5 +1,6 @@
 package it.polito.cpo.integration
 
+import io.micrometer.core.instrument.MeterRegistry
 import it.polito.cpo.contracts.inventory.ReservationRequest
 import it.polito.cpo.contracts.inventory.ReservationStatus
 import it.polito.cpo.model.Reservation
@@ -31,6 +32,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import org.springframework.dao.DataAccessException
+import org.springframework.r2dbc.core.DatabaseClient
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
 
@@ -73,7 +75,7 @@ class ReservationServiceIntegrationTest {
     lateinit var idempotencyRecordRepository: IdempotencyRecordRepository
 
     @Autowired
-    lateinit var meterRegistry: io.micrometer.core.instrument.MeterRegistry
+    lateinit var meterRegistry: MeterRegistry
 
     @Autowired
     lateinit var outboxEventRepository: OutboxEventRepository
@@ -82,7 +84,7 @@ class ReservationServiceIntegrationTest {
     lateinit var reactiveJwtDecoder: ReactiveJwtDecoder
 
     @Autowired
-    lateinit var databaseClient: org.springframework.r2dbc.core.DatabaseClient
+    lateinit var databaseClient: DatabaseClient
 
     @BeforeEach
     fun setup() = runBlocking {
@@ -205,7 +207,7 @@ class ReservationServiceIntegrationTest {
         // Act
         // Fire multiple concurrent requests simulating a race condition
         val concurrencyCount = 5
-        val responses = kotlinx.coroutines.coroutineScope {
+        val responses = coroutineScope {
             val deferredResponses = (1..concurrencyCount).map {
                 async(Dispatchers.IO) {
                     reservationService.reserveSeats("concurrent-key", "user-concurrent", "corr-$it", request)

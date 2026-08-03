@@ -1,5 +1,6 @@
 package it.polito.cpo.service
 
+import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.r2dbc.postgresql.codec.Json
 import it.polito.cpo.contracts.events.InventoryFailedEvent
@@ -144,7 +145,8 @@ class ReservationServiceTest {
         seatRepo: FakeSeatRepository,
         resRepo: FakeReservationRepository,
         idemRepo: FakeIdempotencyRecordRepository,
-        outboxRepo: FakeOutboxEventRepository
+        outboxRepo: FakeOutboxEventRepository,
+        meterRegistry: MeterRegistry = SimpleMeterRegistry()
     ) = ReservationService(
         seatRepository = seatRepo,
         reservationRepository = resRepo,
@@ -152,7 +154,7 @@ class ReservationServiceTest {
         objectMapper = mapper,
         outboxEventRepository = outboxRepo,
         transactionalOperator = fakeTransactionalOperator,
-        meterRegistry = SimpleMeterRegistry()
+        meterRegistry = meterRegistry
     )
 
     @Test
@@ -376,11 +378,13 @@ class ReservationServiceTest {
     @Test
     fun `reserveSeats with existing idempotency key but different payload throws ApiException`() = runTest {
         val idemRepo = FakeIdempotencyRecordRepository()
+        val meterRegistry = SimpleMeterRegistry()
         val service = buildService(
             FakeSeatRepository(),
             FakeReservationRepository(),
             idemRepo,
-            FakeOutboxEventRepository()
+            FakeOutboxEventRepository(),
+            meterRegistry
         )
 
         val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1")
@@ -403,6 +407,7 @@ class ReservationServiceTest {
 
         assertEquals(HttpStatus.CONFLICT, exception.status)
         assertEquals("IDEMPOTENCY_CONFLICT", exception.code)
+        assertEquals(0.0, meterRegistry.counter("inventory.idempotency.hits").count())
     }
 
     @Test
@@ -467,6 +472,36 @@ class ReservationServiceTest {
         assertEquals("res-past", seatRepo.releaseCalledWith, "Seats for res-past should be released")
         assertEquals("EXPIRED", resRepo.store["res-past"]?.status, "Past reservation should be marked EXPIRED")
         assertEquals("HELD", resRepo.store["res-future"]?.status, "Future reservation should remain HELD")
+    }
+
+    @Test
+    fun `sweepExpiredReservations increments error counter on exception`() = runTest {
+        val seatRepo = FakeSeatRepository()
+        val resRepo = FakeReservationRepository()
+        val meterRegistry = SimpleMeterRegistry()
+        
+        val failingTransactionalOperator = object : TransactionalOperator {
+            override fun <T : Any> execute(action: TransactionCallback<T>): Flux<T> {
+                return Flux.error(RuntimeException("DB connection failure during sweep"))
+            }
+            override fun <T : Any> transactional(flux: Flux<T>): Flux<T> = flux
+            override fun <T : Any> transactional(mono: Mono<T>): Mono<T> = mono
+        }
+
+        val service = ReservationService(
+            seatRepository = seatRepo,
+            reservationRepository = resRepo,
+            idempotencyRecordRepository = FakeIdempotencyRecordRepository(),
+            objectMapper = mapper,
+            outboxEventRepository = FakeOutboxEventRepository(),
+            transactionalOperator = failingTransactionalOperator,
+            meterRegistry = meterRegistry
+        )
+
+        val count = service.sweepExpiredReservations()
+
+        assertEquals(0, count)
+        assertEquals(1.0, meterRegistry.counter("inventory.holds.sweep.errors").count())
     }
 
     @Test

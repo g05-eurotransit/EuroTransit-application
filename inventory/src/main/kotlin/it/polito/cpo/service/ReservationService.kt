@@ -184,8 +184,6 @@ class ReservationService(
         fingerprint: String,
         idempotencyKey: String
     ): ReservationResponse {
-        meterRegistry.counter("inventory.idempotency.hits").increment()
-        
         if (existingRecord.requestFingerprint != fingerprint) {
             throw ApiException(
                 status = HttpStatus.CONFLICT,
@@ -193,6 +191,8 @@ class ReservationService(
                 message = "Idempotency key reused with a different payload"
             )
         }
+
+        meterRegistry.counter("inventory.idempotency.hits").increment()
         if (existingRecord.responseBody != null) {
             logger.info("Returning cached reservation response for idempotency key: {}", idempotencyKey)
             val response = objectMapper.readValue(
@@ -359,6 +359,7 @@ class ReservationService(
             }
         } catch (e: Exception) {
             logger.error("Failed during atomic sweepExpiredReservations", e)
+            meterRegistry.counter("inventory.holds.sweep.errors").increment()
         }
         return count
     }
