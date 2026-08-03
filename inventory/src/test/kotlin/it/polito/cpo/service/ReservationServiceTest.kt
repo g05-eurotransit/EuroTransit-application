@@ -572,7 +572,8 @@ class ReservationServiceTest {
     fun `confirmReservation successfully confirms a valid held reservation and updates seats`() = runTest {
         val seatRepo = FakeSeatRepository()
         val resRepo = FakeReservationRepository()
-        val service = buildService(seatRepo, resRepo, FakeIdempotencyRecordRepository(), FakeOutboxEventRepository())
+        val meterRegistry = SimpleMeterRegistry()
+        val service = buildService(seatRepo, resRepo, FakeIdempotencyRecordRepository(), FakeOutboxEventRepository(), meterRegistry)
 
         val orderId = UUID.randomUUID()
         val reservationId = "res-confirm-1"
@@ -589,13 +590,15 @@ class ReservationServiceTest {
         assertEquals(ReservationStatus.CONFIRMED, response.status)
         assertEquals("CONFIRMED", resRepo.store[reservationId]?.status)
         assertEquals(reservationId, seatRepo.confirmCalledWith)
+        assertEquals(1.0, meterRegistry.counter("inventory.holds.confirmed").count())
     }
 
     @Test
     fun `confirmReservation throws 409 if orderId mismatches`() = runTest {
         val seatRepo = FakeSeatRepository()
         val resRepo = FakeReservationRepository()
-        val service = buildService(seatRepo, resRepo, FakeIdempotencyRecordRepository(), FakeOutboxEventRepository())
+        val meterRegistry = SimpleMeterRegistry()
+        val service = buildService(seatRepo, resRepo, FakeIdempotencyRecordRepository(), FakeOutboxEventRepository(), meterRegistry)
 
         val reservationId = "res-confirm-2"
         resRepo.save(Reservation(
@@ -612,18 +615,20 @@ class ReservationServiceTest {
 
         assertEquals(HttpStatus.CONFLICT, exception.status)
         assertEquals("RESERVATION_ORDER_CONFLICT", exception.code)
+        assertEquals(0.0, meterRegistry.counter("inventory.holds.confirmed").count())
     }
 
     @Test
     fun `confirmReservation throws 409 if real-time clock says it is expired, sets it to EXPIRED and releases seats`() = runTest {
         val seatRepo = FakeSeatRepository()
         val resRepo = FakeReservationRepository()
+        val meterRegistry = SimpleMeterRegistry()
         
         val fixedTime = OffsetDateTime.parse("2026-07-30T12:00:00Z")
         resRepo.currentDbTime = fixedTime
         
         val service = buildService(
-            seatRepo, resRepo, FakeIdempotencyRecordRepository(), FakeOutboxEventRepository()
+            seatRepo, resRepo, FakeIdempotencyRecordRepository(), FakeOutboxEventRepository(), meterRegistry
         )
 
         val orderId = UUID.randomUUID()
@@ -647,6 +652,8 @@ class ReservationServiceTest {
         // Ensure it transitioned to EXPIRED and seats released
         assertEquals("EXPIRED", resRepo.store[reservationId]?.status)
         assertEquals(reservationId, seatRepo.releaseCalledWith)
+        assertEquals(1.0, meterRegistry.counter("inventory.holds.expired").count())
+        assertEquals(0.0, meterRegistry.counter("inventory.holds.confirmed").count())
     }
 
     @Test
@@ -656,7 +663,8 @@ class ReservationServiceTest {
             confirmSeatsReturnCount = 1 // Only 1 updated instead of expected 2
         }
         val resRepo = FakeReservationRepository()
-        val service = buildService(seatRepo, resRepo, FakeIdempotencyRecordRepository(), FakeOutboxEventRepository())
+        val meterRegistry = SimpleMeterRegistry()
+        val service = buildService(seatRepo, resRepo, FakeIdempotencyRecordRepository(), FakeOutboxEventRepository(), meterRegistry)
 
         val orderId = UUID.randomUUID()
         val reservationId = "res-seat-mismatch"
@@ -674,6 +682,7 @@ class ReservationServiceTest {
 
         assertEquals(HttpStatus.CONFLICT, exception.status)
         assertEquals("RESERVATION_SEAT_CONFLICT", exception.code)
+        assertEquals(0.0, meterRegistry.counter("inventory.holds.confirmed").count())
     }
 
     @Test

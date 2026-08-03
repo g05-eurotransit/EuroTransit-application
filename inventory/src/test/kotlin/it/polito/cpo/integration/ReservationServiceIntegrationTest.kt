@@ -210,6 +210,38 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
     }
 
     @Test
+    fun `should confirm reservation, transition seats to SOLD, and increment holds confirmed metric`() = runBlocking {
+        // Arrange
+        val routeId = "route-confirm-ok"
+        val seatId = "seat-confirm-ok"
+        insertSeat(routeId, seatId, "AVAILABLE")
+        val reservationId = "res-confirm-ok-1"
+        seatRepository.holdSeats(routeId, listOf(seatId), reservationId)
+
+        val orderId = UUID.randomUUID()
+        val held = Reservation(
+            reservationId = reservationId,
+            orderId = orderId,
+            routeId = routeId,
+            status = "HELD",
+            expiresAt = OffsetDateTime.now(ZoneOffset.UTC).plusMinutes(10),
+            isNewRecord = true
+        )
+        reservationRepository.save(held)
+
+        // Act
+        val response = reservationService.confirmReservation(reservationId, orderId)
+
+        // Assert
+        assertEquals(ReservationStatus.CONFIRMED, response.status)
+        val updated = reservationRepository.findById(reservationId)
+        assertEquals("CONFIRMED", updated?.status)
+        val seatStatus = getSeatStatus(routeId, seatId)
+        assertEquals("SOLD", seatStatus)
+        assertEquals(1.0, meterRegistry.counter("inventory.holds.confirmed").count())
+    }
+
+    @Test
     fun `should persist EXPIRED status when confirmReservation detects logical expiration and throws 409`() = runBlocking {
         // Arrange
         val routeId = "route-exp"
@@ -244,6 +276,7 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         
         val seatStatus = getSeatStatus(routeId, seatId)
         assertEquals("AVAILABLE", seatStatus)
+        assertEquals(1.0, meterRegistry.counter("inventory.holds.expired").count())
     }
 
     @Test

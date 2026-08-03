@@ -19,7 +19,6 @@ import io.micrometer.core.instrument.MeterRegistry
 import org.springframework.http.HttpStatus
 import org.springframework.stereotype.Service
 import java.security.MessageDigest
-import java.time.OffsetDateTime
 import java.util.UUID
 import it.polito.cpo.model.OutboxEvent
 import it.polito.cpo.repository.OutboxEventRepository
@@ -262,6 +261,7 @@ class ReservationService(
      */
     suspend fun confirmReservation(reservationId: String, orderId: UUID): ReservationResponse {
         var apiExceptionToThrow: ApiException? = null
+        var isNewlyConfirmed = false
 
         val response = transactionalOperator.executeAndAwait {
             val reservation = reservationRepository.findByReservationIdForUpdate(reservationId) ?: throw ApiException(
@@ -308,6 +308,7 @@ class ReservationService(
 
             val confirmedReservation = reservation.copy(status = "CONFIRMED", isNewRecord = false)
             reservationRepository.save(confirmedReservation)
+            isNewlyConfirmed = true
 
             ReservationResponse(
                 reservationId,
@@ -317,7 +318,12 @@ class ReservationService(
         }
 
         if (apiExceptionToThrow != null) {
+            meterRegistry.counter("inventory.holds.expired").increment()
             throw apiExceptionToThrow
+        }
+
+        if (isNewlyConfirmed) {
+            meterRegistry.counter("inventory.holds.confirmed").increment()
         }
 
         return response!!
