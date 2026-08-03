@@ -75,12 +75,14 @@ class ReservationServiceTest {
             return reservationIds.size
         }
         var confirmCalledWith: String? = null
+        var confirmSeatsReturnCount: Int = 2
+        var countByReservationIdReturnCount: Long = 2L
         override suspend fun confirmSeats(reservationId: String): Int {
             confirmCalledWith = reservationId
-            return 2
+            return confirmSeatsReturnCount
         }
         override suspend fun countByReservationId(reservationId: String): Long {
-            return 2L
+            return countByReservationIdReturnCount
         }
     }
 
@@ -643,6 +645,33 @@ class ReservationServiceTest {
         // Ensure it transitioned to EXPIRED and seats released
         assertEquals("EXPIRED", resRepo.store[reservationId]?.status)
         assertEquals(reservationId, seatRepo.releaseCalledWith)
+    }
+
+    @Test
+    fun `confirmReservation throws 409 RESERVATION_SEAT_CONFLICT when seat count mismatch occurs`() = runTest {
+        val seatRepo = FakeSeatRepository().apply {
+            countByReservationIdReturnCount = 2L
+            confirmSeatsReturnCount = 1 // Only 1 updated instead of expected 2
+        }
+        val resRepo = FakeReservationRepository()
+        val service = buildService(seatRepo, resRepo, FakeIdempotencyRecordRepository(), FakeOutboxEventRepository())
+
+        val orderId = UUID.randomUUID()
+        val reservationId = "res-seat-mismatch"
+        resRepo.save(Reservation(
+            reservationId = reservationId,
+            orderId = orderId,
+            routeId = "route-1",
+            status = ReservationStatus.HELD.name,
+            expiresAt = OffsetDateTime.now().plusMinutes(10)
+        ))
+
+        val exception = assertThrows<ApiException> {
+            service.confirmReservation(reservationId, orderId)
+        }
+
+        assertEquals(HttpStatus.CONFLICT, exception.status)
+        assertEquals("RESERVATION_SEAT_CONFLICT", exception.code)
     }
 
     @Test

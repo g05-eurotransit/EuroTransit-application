@@ -506,4 +506,49 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         assertEquals(HttpStatus.CONFLICT, ex.status)
         assertEquals("ORDER_ALREADY_RESERVED", ex.code)
     }
+
+    @Test
+    fun `confirmReservation should rollback partial seat changes and reservation status on RESERVATION_SEAT_CONFLICT`() = runBlocking {
+        // Arrange
+        val routeId = "route-seat-conflict"
+        val seat1 = "seat-conflict-1"
+        val seat2 = "seat-conflict-2"
+        val reservationId = "res-conflict-rollback"
+        val orderId = UUID.randomUUID()
+
+        insertSeat(routeId, seat1, "HELD")
+        insertSeat(routeId, seat2, "AVAILABLE") // Inconsistent DB state: assigned reservation_id below, but status is AVAILABLE
+
+        databaseClient.sql("UPDATE seats SET reservation_id = :resId WHERE route_id = :routeId AND seat_id IN (:s1, :s2)")
+            .bind("resId", reservationId)
+            .bind("routeId", routeId)
+            .bind("s1", seat1)
+            .bind("s2", seat2)
+            .fetch().rowsUpdated().block()
+
+        val reservation = Reservation(
+            reservationId = reservationId,
+            orderId = orderId,
+            routeId = routeId,
+            status = "HELD",
+            expiresAt = OffsetDateTime.now(ZoneOffset.UTC).plusMinutes(10),
+            isNewRecord = true
+        )
+        reservationRepository.save(reservation)
+
+        // Act & Assert
+        val ex = assertThrows<ApiException> {
+            reservationService.confirmReservation(reservationId, orderId)
+        }
+
+        assertEquals(HttpStatus.CONFLICT, ex.status)
+        assertEquals("RESERVATION_SEAT_CONFLICT", ex.code)
+
+        // Verify transaction rolled back: seat1 remains HELD (NOT committed to SOLD), reservation remains HELD (NOT CONFIRMED)
+        val res = reservationRepository.findById(reservationId)
+        assertEquals("HELD", res?.status)
+
+        val seat1Status = getSeatStatus(routeId, seat1)
+        assertEquals("HELD", seat1Status)
+    }
 }

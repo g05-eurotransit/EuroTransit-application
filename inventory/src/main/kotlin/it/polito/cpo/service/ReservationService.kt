@@ -267,13 +267,11 @@ class ReservationService(
             val reservation = reservationRepository.findByReservationIdForUpdate(reservationId)
             
             if (reservation == null) {
-                apiExceptionToThrow = ApiException(HttpStatus.NOT_FOUND, "RESERVATION_NOT_FOUND", "Reservation not found")
-                return@executeAndAwait null
+                throw ApiException(HttpStatus.NOT_FOUND, "RESERVATION_NOT_FOUND", "Reservation not found")
             }
 
             if (reservation.orderId != orderId) {
-                apiExceptionToThrow = ApiException(HttpStatus.CONFLICT, "RESERVATION_ORDER_CONFLICT", "Reservation belongs to another order")
-                return@executeAndAwait null
+                throw ApiException(HttpStatus.CONFLICT, "RESERVATION_ORDER_CONFLICT", "Reservation belongs to another order")
             }
 
             if (reservation.status == ReservationStatus.CONFIRMED.name) {
@@ -285,13 +283,11 @@ class ReservationService(
             }
 
             if (reservation.status == ReservationStatus.EXPIRED.name) {
-                apiExceptionToThrow = ApiException(HttpStatus.CONFLICT, "RESERVATION_EXPIRED", "Reservation has expired")
-                return@executeAndAwait null
+                throw ApiException(HttpStatus.CONFLICT, "RESERVATION_EXPIRED", "Reservation has expired")
             }
 
             if (reservation.status == ReservationStatus.CANCELLED.name) {
-                apiExceptionToThrow = ApiException(HttpStatus.CONFLICT, "RESERVATION_CANCELLED", "Reservation was cancelled")
-                return@executeAndAwait null
+                throw ApiException(HttpStatus.CONFLICT, "RESERVATION_CANCELLED", "Reservation was cancelled")
             }
 
             // It is HELD. Verify expiration in real-time with the DB clock
@@ -307,8 +303,7 @@ class ReservationService(
             val updatedSeats = seatRepository.confirmSeats(reservationId)
 
             if (updatedSeats.toLong() != expectedSeats) {
-                apiExceptionToThrow = ApiException(HttpStatus.CONFLICT, "RESERVATION_SEAT_CONFLICT", "Seat count mismatch during confirmation")
-                return@executeAndAwait null
+                throw ApiException(HttpStatus.CONFLICT, "RESERVATION_SEAT_CONFLICT", "Seat count mismatch during confirmation")
             }
 
             val confirmedReservation = reservation.copy(status = "CONFIRMED", isNewRecord = false)
