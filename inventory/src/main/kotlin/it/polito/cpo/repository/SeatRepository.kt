@@ -42,6 +42,14 @@ interface SeatRepository : CoroutineCrudRepository<Seat, String> {
     @Modifying
     @Query("UPDATE seats SET status = 'AVAILABLE', reservation_id = NULL WHERE reservation_id = :reservationId AND status = 'HELD'")
     suspend fun releaseSeats(reservationId: String): Int
+
+    /**
+     * Releases seats in batch for multiple expired/canceled reservations.
+     * Prevents N+1 query overhead during routine background sweeps.
+     */
+    @Modifying
+    @Query("UPDATE seats SET status = 'AVAILABLE', reservation_id = NULL WHERE reservation_id IN (:reservationIds) AND status = 'HELD'")
+    suspend fun releaseSeatsForReservations(reservationIds: Collection<String>): Int
     
     /**
      * Confirms seats by transitioning them to SOLD. Only operates on HELD seats.

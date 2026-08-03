@@ -61,12 +61,17 @@ class ReservationServiceTest {
         var seatsAvailable: Boolean = true
     ) : SeatRepository by delegate {
         var releaseCalledWith: String? = null
+        var batchReleaseCalledWith: Collection<String>? = null
         override suspend fun holdSeats(routeId: String, seatIds: List<String>, reservationId: String, expectedCount: Int): Int {
             return if (seatsAvailable) seatIds.size else 0
         }
         override suspend fun releaseSeats(reservationId: String): Int {
             releaseCalledWith = reservationId
             return 1
+        }
+        override suspend fun releaseSeatsForReservations(reservationIds: Collection<String>): Int {
+            batchReleaseCalledWith = reservationIds
+            return reservationIds.size
         }
         var confirmCalledWith: String? = null
         override suspend fun confirmSeats(reservationId: String): Int {
@@ -474,7 +479,7 @@ class ReservationServiceTest {
         val count = service.sweepExpiredReservations()
 
         assertEquals(1, count, "Only one reservation should have expired")
-        assertEquals("res-past", seatRepo.releaseCalledWith, "Seats for res-past should be released")
+        assertEquals(listOf("res-past"), seatRepo.batchReleaseCalledWith?.toList(), "Seats for res-past should be released in batch")
         assertEquals("EXPIRED", resRepo.store["res-past"]?.status, "Past reservation should be marked EXPIRED")
         assertEquals("HELD", resRepo.store["res-future"]?.status, "Future reservation should remain HELD")
     }

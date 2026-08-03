@@ -348,10 +348,11 @@ class ReservationService(
         try {
             transactionalOperator.executeAndAwait {
                 val expiredReservations = reservationRepository.expireAndReturn().toList()
-                for ((reservationId) in expiredReservations) {
-                    logger.info("Reservation {} atomically expired. Releasing seats.", reservationId)
-                    seatRepository.releaseSeats(reservationId)
-                    count++
+                if (expiredReservations.isNotEmpty()) {
+                    val reservationIds = expiredReservations.map { it.reservationId }
+                    seatRepository.releaseSeatsForReservations(reservationIds)
+                    count = expiredReservations.size
+                    logger.info("Swept and expired {} reservations, seats released in batch: {}", count, reservationIds)
                 }
             }
             if (count > 0) {
