@@ -2,6 +2,7 @@ package it.polito.cpo.integration
 
 import it.polito.cpo.contracts.inventory.ReservationRequest
 import it.polito.cpo.contracts.inventory.ReservationStatus
+import it.polito.cpo.model.Reservation
 import it.polito.cpo.repository.IdempotencyRecordRepository
 import it.polito.cpo.repository.OutboxEventRepository
 import it.polito.cpo.repository.ReservationRepository
@@ -29,6 +30,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import org.springframework.dao.DataAccessException
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
 
@@ -166,7 +168,7 @@ class ReservationServiceIntegrationTest {
         } catch (e: Exception) {
             // Assert
             // It might be DataIntegrityViolationException or a similar Spring exception
-            assertTrue(e is org.springframework.dao.DataAccessException, "Expected DataAccessException but was ${e.javaClass}")
+            assertTrue(e is DataAccessException, "Expected DataAccessException but was ${e.javaClass}")
         }
 
         // Verify Rollback
@@ -205,11 +207,11 @@ class ReservationServiceIntegrationTest {
         val concurrencyCount = 5
         val responses = kotlinx.coroutines.coroutineScope {
             val deferredResponses = (1..concurrencyCount).map {
-                async(kotlinx.coroutines.Dispatchers.IO) {
+                async(Dispatchers.IO) {
                     reservationService.reserveSeats("concurrent-key", "user-concurrent", "corr-$it", request)
                 }
             }
-            kotlinx.coroutines.awaitAll(*deferredResponses.toTypedArray())
+            awaitAll(*deferredResponses.toTypedArray())
         }
 
         // Assert
@@ -248,7 +250,7 @@ class ReservationServiceIntegrationTest {
         seatRepository.holdSeats(routeId, listOf(seatId), "res-exp-123")
         
         val orderId = UUID.randomUUID()
-        val expired = it.polito.cpo.model.Reservation(
+        val expired = Reservation(
             reservationId = "res-exp-123",
             orderId = orderId,
             routeId = routeId,
@@ -285,7 +287,7 @@ class ReservationServiceIntegrationTest {
         val reservationId = "res-race-1"
         seatRepository.holdSeats(routeId, listOf(seatId), reservationId)
         val orderId = UUID.randomUUID()
-        val held = it.polito.cpo.model.Reservation(
+        val held = Reservation(
             reservationId = reservationId,
             orderId = orderId,
             routeId = routeId,
@@ -358,7 +360,7 @@ class ReservationServiceIntegrationTest {
         val now = OffsetDateTime.now(ZoneOffset.UTC)
         // resOld: expired 10 minutes ago
         reservationRepository.save(
-            it.polito.cpo.model.Reservation(
+            Reservation(
                 reservationId = resOld,
                 orderId = UUID.randomUUID(),
                 routeId = routeId,
@@ -369,7 +371,7 @@ class ReservationServiceIntegrationTest {
         )
         // resNew: expired 1 minute ago
         reservationRepository.save(
-            it.polito.cpo.model.Reservation(
+            Reservation(
                 reservationId = resNew,
                 orderId = UUID.randomUUID(),
                 routeId = routeId,
@@ -380,7 +382,7 @@ class ReservationServiceIntegrationTest {
         )
         // resFuture: expires in 10 minutes
         reservationRepository.save(
-            it.polito.cpo.model.Reservation(
+            Reservation(
                 reservationId = resFuture,
                 orderId = UUID.randomUUID(),
                 routeId = routeId,
