@@ -264,11 +264,11 @@ class ReservationService(
         var apiExceptionToThrow: ApiException? = null
 
         val response = transactionalOperator.executeAndAwait {
-            val reservation = reservationRepository.findByReservationIdForUpdate(reservationId)
-            
-            if (reservation == null) {
-                throw ApiException(HttpStatus.NOT_FOUND, "RESERVATION_NOT_FOUND", "Reservation not found")
-            }
+            val reservation = reservationRepository.findByReservationIdForUpdate(reservationId) ?: throw ApiException(
+                HttpStatus.NOT_FOUND,
+                "RESERVATION_NOT_FOUND",
+                "Reservation not found"
+            )
 
             if (reservation.orderId != orderId) {
                 throw ApiException(HttpStatus.CONFLICT, "RESERVATION_ORDER_CONFLICT", "Reservation belongs to another order")
@@ -373,7 +373,17 @@ class ReservationService(
      * Deletes idempotency records created before the specified retention cutoff.
      */
     suspend fun purgeExpiredIdempotency(retentionMinutes: Long = 30): Int {
-        val cutoff = reservationRepository.getCurrentTimestamp().minusMinutes(retentionMinutes)
-        return idempotencyRecordRepository.deleteByCreatedAtBefore(cutoff)
+        var count = 0
+        try {
+            val cutoff = reservationRepository.getCurrentTimestamp().minusMinutes(retentionMinutes)
+            count = idempotencyRecordRepository.deleteByCreatedAtBefore(cutoff)
+            if (count > 0) {
+                meterRegistry.counter("inventory.idempotency.purged").increment(count.toDouble())
+            }
+        } catch (e: Exception) {
+            logger.error("Failed during purgeExpiredIdempotency", e)
+            meterRegistry.counter("inventory.idempotency.purge.errors").increment()
+        }
+        return count
     }
 }

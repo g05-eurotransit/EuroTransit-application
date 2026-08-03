@@ -132,7 +132,8 @@ class ReservationServiceTest {
 
     private class FakeIdempotencyRecordRepository(
         private val delegate: IdempotencyRecordRepository = Mockito.mock(
-            IdempotencyRecordRepository::class.java)
+            IdempotencyRecordRepository::class.java),
+        var shouldThrow: Boolean = false
     ) : IdempotencyRecordRepository by delegate {
         val store = HashMap<String, IdempotencyRecord>()
         override suspend fun <S : IdempotencyRecord> save(entity: S): S {
@@ -143,6 +144,7 @@ class ReservationServiceTest {
             return store["$key-$principalId"]
         }
         override suspend fun deleteByCreatedAtBefore(cutoff: OffsetDateTime): Int {
+            if (shouldThrow) throw RuntimeException("Database error during idempotency purge")
             val toRemove = store.filter { it.value.createdAt?.isBefore(cutoff) == true }.keys
             toRemove.forEach { store.remove(it) }
             return toRemove.size
@@ -681,11 +683,13 @@ class ReservationServiceTest {
         val fixedDbTime = OffsetDateTime.parse("2026-07-30T12:00:00Z")
         resRepo.currentDbTime = fixedDbTime
 
+        val meterRegistry = SimpleMeterRegistry()
         val service = buildService(
             FakeSeatRepository(),
             resRepo,
             idemRepo,
-            FakeOutboxEventRepository()
+            FakeOutboxEventRepository(),
+            meterRegistry
         )
 
         // Record created 35 minutes ago -> should be purged
@@ -715,6 +719,27 @@ class ReservationServiceTest {
         assertEquals(1, deleted)
         assertNull(idemRepo.findByKeyAndPrincipal("old-key", "user-1"))
         assertNotNull(idemRepo.findByKeyAndPrincipal("recent-key", "user-1"))
+        assertEquals(1.0, meterRegistry.counter("inventory.idempotency.purged").count())
+    }
+
+    @Test
+    fun `purgeExpiredIdempotency catches exception and records error metric on repository failure`() = runTest {
+        val resRepo = FakeReservationRepository()
+        val idemRepo = FakeIdempotencyRecordRepository(shouldThrow = true)
+        val meterRegistry = SimpleMeterRegistry()
+        val service = buildService(
+            FakeSeatRepository(),
+            resRepo,
+            idemRepo,
+            FakeOutboxEventRepository(),
+            meterRegistry
+        )
+
+        val deleted = service.purgeExpiredIdempotency()
+
+        assertEquals(0, deleted)
+        assertEquals(1.0, meterRegistry.counter("inventory.idempotency.purge.errors").count())
+        assertEquals(0.0, meterRegistry.counter("inventory.idempotency.purged").count())
     }
 
     @Test
