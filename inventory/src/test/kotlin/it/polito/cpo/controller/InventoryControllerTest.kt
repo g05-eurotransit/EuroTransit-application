@@ -363,19 +363,16 @@ class InventoryControllerTest {
     }
 
     @Test
-    fun `deleteReservation succeeds with optional X-User-Id header`() {
+    fun `deleteReservation succeeds and delegates to service`() {
         val reservationId = "res-999"
-        val userId = "user-123"
 
         webClient
             .mutateWith(
                 mockJwt()
-                    .jwt { it.subject(userId) }
                     .authorities(SimpleGrantedAuthority(EuroTransitAuthorities.SERVICE))
             )
             .delete()
             .uri("/api/inventory/reservations/{reservationId}", reservationId)
-            .header("X-User-Id", userId)
             .exchange()
             .expectStatus().isNoContent
 
@@ -387,12 +384,11 @@ class InventoryControllerTest {
     }
 
     @Test
-    fun `confirmReservation returns 200 OK and delegates to service with and without X-User-Id`() {
+    fun `confirmReservation returns 200 OK and delegates to service`() {
         val reservationId = "res-123"
         val orderId = UUID.randomUUID()
         val request = ReservationConfirmationRequest(orderId = orderId)
 
-        // Without X-User-Id
         webClient
             .mutateWith(
                 mockJwt()
@@ -410,23 +406,6 @@ class InventoryControllerTest {
 
         assertEquals(reservationId, fakeService.lastConfirmReservationId)
         assertEquals(orderId, fakeService.lastConfirmOrderId)
-
-        // With X-User-Id
-        webClient
-            .mutateWith(
-                mockJwt()
-                    .authorities(SimpleGrantedAuthority(EuroTransitAuthorities.SERVICE))
-            )
-            .put()
-            .uri("/api/inventory/reservations/{reservationId}/confirmation", reservationId)
-            .header("X-User-Id", "user-123")
-            .contentType(MediaType.APPLICATION_JSON)
-            .bodyValue(request)
-            .exchange()
-            .expectStatus().isOk
-            .expectBody()
-            .jsonPath("$.reservationId").isEqualTo("res-123")
-            .jsonPath("$.status").isEqualTo("CONFIRMED")
     }
 
     @Test

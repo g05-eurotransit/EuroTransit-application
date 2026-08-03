@@ -37,8 +37,7 @@ class InventoryController(
      */
     @DeleteMapping("/{reservationId}")
     suspend fun releaseReservation(
-        @PathVariable reservationId: String,
-        @RequestHeader("X-User-Id", required = false) userId: String? = null
+        @PathVariable reservationId: String
     ): ResponseEntity<Void> {
         reservationService.releaseReservation(reservationId)
         return ResponseEntity.noContent().build()
@@ -50,8 +49,7 @@ class InventoryController(
     @PutMapping("/{reservationId}/confirmation")
     suspend fun confirmReservation(
         @PathVariable reservationId: String,
-        @RequestBody request: ReservationConfirmationRequest,
-        @RequestHeader("X-User-Id", required = false) userId: String? = null
+        @RequestBody request: ReservationConfirmationRequest
     ): ResponseEntity<ReservationResponse> {
         val response = reservationService.confirmReservation(reservationId, request.orderId)
         return ResponseEntity.ok(response)

@@ -158,7 +158,6 @@ Orders calls:
 ```http
 PUT /api/inventory/reservations/{reservationId}/confirmation
 Authorization: Bearer <service-token>
-X-User-Id: <customer-principal>
 X-Correlation-Id: <checkout-correlation-id>
 Content-Type: application/json
 

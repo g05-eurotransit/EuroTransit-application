@@ -29,7 +29,7 @@ interface ReservationRepository : CoroutineCrudRepository<Reservation, String> {
         """
         WITH expired_batch AS (
             SELECT reservation_id FROM reservations 
-            WHERE status = 'HELD' AND expires_at < CURRENT_TIMESTAMP 
+            WHERE status = 'HELD' AND expires_at <= CURRENT_TIMESTAMP 
             ORDER BY expires_at 
             FOR UPDATE SKIP LOCKED 
             LIMIT 100
