@@ -365,11 +365,11 @@ class ReservationService(
     }
 
     /**
-     * Purges idempotency records that are older than the specified cutoff time.
-     * Enforces the retention policy (30 minutes) defined in the architecture decisions,
-     * ensuring the database table does not grow indefinitely.
+     * Purges idempotency records older than the retention period (default 30 minutes),
+     * calculating the cutoff from authoritative database time.
      */
-    suspend fun purgeExpiredIdempotency(cutoff: OffsetDateTime): Int {
+    suspend fun purgeExpiredIdempotency(retentionMinutes: Long = 30): Int {
+        val cutoff = reservationRepository.getCurrentTimestamp().minusMinutes(retentionMinutes)
         return idempotencyRecordRepository.deleteByCreatedAtBefore(cutoff)
     }
 }

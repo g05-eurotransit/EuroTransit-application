@@ -4,7 +4,6 @@ import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
-import java.time.OffsetDateTime
 
 /**
  * Scheduled background job that acts as the trigger for all routine maintenance
@@ -14,7 +13,6 @@ import java.time.OffsetDateTime
 @Component
 class InventoryCleanupJob(
     private val reservationService: ReservationService,
-    private val clock: java.time.Clock,
 ) {
     private val log = LoggerFactory.getLogger(InventoryCleanupJob::class.java)
 
@@ -43,11 +41,9 @@ class InventoryCleanupJob(
         fixedDelayString = "\${inventory.idempotency.cleanup-interval-ms:600000}",
     )
     fun purgeExpiredIdempotency() = runBlocking {
-        // Idempotency for inventory is 30 minutes
-        val cutoff = OffsetDateTime.now(clock).minusMinutes(30)
-        val deleted = reservationService.purgeExpiredIdempotency(cutoff)
+        val deleted = reservationService.purgeExpiredIdempotency()
         if (deleted > 0) {
-            log.info("Purged {} idempotency records older than {}", deleted, cutoff)
+            log.info("Purged {} stale idempotency records", deleted)
         }
     }
 }

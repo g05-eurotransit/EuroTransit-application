@@ -127,6 +127,11 @@ class ReservationServiceTest {
         override suspend fun findByKeyAndPrincipal(key: String, principalId: String): IdempotencyRecord? {
             return store["$key-$principalId"]
         }
+        override suspend fun deleteByCreatedAtBefore(cutoff: OffsetDateTime): Int {
+            val toRemove = store.filter { it.value.createdAt?.isBefore(cutoff) == true }.keys
+            toRemove.forEach { store.remove(it) }
+            return toRemove.size
+        }
     }
 
     private class FakeOutboxEventRepository(
@@ -625,5 +630,48 @@ class ReservationServiceTest {
         // Ensure it transitioned to EXPIRED and seats released
         assertEquals("EXPIRED", resRepo.store[reservationId]?.status)
         assertEquals(reservationId, seatRepo.releaseCalledWith)
+    }
+
+    @Test
+    fun `purgeExpiredIdempotency deletes records older than 30 minutes using DB clock`() = runTest {
+        val resRepo = FakeReservationRepository()
+        val idemRepo = FakeIdempotencyRecordRepository()
+        val fixedDbTime = OffsetDateTime.parse("2026-07-30T12:00:00Z")
+        resRepo.currentDbTime = fixedDbTime
+
+        val service = buildService(
+            FakeSeatRepository(),
+            resRepo,
+            idemRepo,
+            FakeOutboxEventRepository()
+        )
+
+        // Record created 35 minutes ago -> should be purged
+        idemRepo.save(IdempotencyRecord(
+            idempotencyKey = "old-key",
+            principalId = "user-1",
+            operation = "RESERVE",
+            requestFingerprint = "hash1",
+            responseStatusCode = 201,
+            responseBody = Json.of("{}"),
+            createdAt = fixedDbTime.minusMinutes(35)
+        ))
+
+        // Record created 10 minutes ago -> should be kept
+        idemRepo.save(IdempotencyRecord(
+            idempotencyKey = "recent-key",
+            principalId = "user-1",
+            operation = "RESERVE",
+            requestFingerprint = "hash2",
+            responseStatusCode = 201,
+            responseBody = Json.of("{}"),
+            createdAt = fixedDbTime.minusMinutes(10)
+        ))
+
+        val deleted = service.purgeExpiredIdempotency()
+
+        assertEquals(1, deleted)
+        assertNull(idemRepo.findByKeyAndPrincipal("old-key", "user-1"))
+        assertNotNull(idemRepo.findByKeyAndPrincipal("recent-key", "user-1"))
     }
 }
