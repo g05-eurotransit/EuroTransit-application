@@ -7,34 +7,24 @@ import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
 
 /**
- * Scheduled background job that acts as the trigger for all routine maintenance
- * tasks in the Inventory service. It delegates all business and transactional logic
- * to [ReservationService] to ensure clean architectural boundaries.
+ * Scheduled trigger for purging stale idempotency records. All business and
+ * transactional logic stays in [ReservationService].
+ *
+ * Enabled by default, and deliberately independent of the reservation-expiration
+ * toggle: this purge only bounds table growth against the 30-minute Inventory
+ * retention documented in docs/design/api-design.md, and has no bearing on seat
+ * availability or on the expiration gate.
  */
 @Component
 @ConditionalOnProperty(
-    name = ["inventory.cleanup.enabled"],
+    name = ["inventory.idempotency.purge.enabled"],
     havingValue = "true",
-    matchIfMissing = true
+    matchIfMissing = true,
 )
-class InventoryCleanupJob(
+class IdempotencyPurgeJob(
     private val reservationService: ReservationService,
 ) {
-    private val log = LoggerFactory.getLogger(InventoryCleanupJob::class.java)
-
-    /**
-     * Triggers the periodic sweep of expired reservations.
-     */
-    @Scheduled(
-        initialDelayString = "\${inventory.reservations.cleanup-initial-delay-ms:30000}",
-        fixedDelayString = "\${inventory.reservations.cleanup-interval-ms:30000}",
-    )
-    fun sweepExpiredReservations() = runBlocking {
-        val expired = reservationService.sweepExpiredReservations()
-        if (expired > 0) {
-            log.info("Swept {} expired reservations", expired)
-        }
-    }
+    private val log = LoggerFactory.getLogger(IdempotencyPurgeJob::class.java)
 
     /**
      * Triggers the periodic purge of expired idempotency records.
