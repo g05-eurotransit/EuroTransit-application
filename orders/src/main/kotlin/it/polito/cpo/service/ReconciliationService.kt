@@ -81,10 +81,44 @@ class ReconciliationService(
     }
 
     /**
+     * Records that automatic redelivery gave up on an event. Self-transacting, and it deliberately
+     * leaves the durable checkout phase untouched: the phase is what tells a later redrive where to
+     * resume from, so an incident report must not disturb it.
+     */
+    suspend fun recordDeliveryExhausted(
+        orderId: UUID,
+        orderState: String,
+        correlationId: String,
+        failureClass: String,
+        detail: String?,
+    ): ReconciliationRecord {
+        val record = txOperator.executeAndAwait {
+            upsert(
+                orderId = orderId,
+                kind = ReconciliationKind.DELIVERY_EXHAUSTED,
+                orderState = orderState,
+                correlationId = correlationId,
+                failureClass = failureClass,
+                detail = detail,
+            )
+        }!!
+        countRequired(record)
+        return record
+    }
+
+    /**
      * Closes the incidents that a terminal order resolves by definition. Must be called from inside
      * the terminal transaction so the close and the terminal state commit together.
      */
     suspend fun closeAutoResolvable(orderId: UUID): Long = records.closeAutoResolvable(orderId)
+
+    /**
+     * Closes the auto-resolvable incidents of an order that is already terminal, in its own
+     * transaction. Used by the paths that observe a stale incident from outside a state transition:
+     * a dead letter for an order that later succeeded, and a redrive request on a terminal order.
+     */
+    suspend fun closeStaleFor(orderId: UUID): Long =
+        txOperator.executeAndAwait { records.closeAutoResolvable(orderId) } ?: 0L
 
     /**
      * Commit-aware alert signal. A counter alone cannot express "alert while any record is open"
