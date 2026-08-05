@@ -83,6 +83,44 @@ class OrdersSecurityConfigTests @Autowired constructor(
     }
 
     @Test
+    fun `order cancellation is reachable for the customer role`() {
+        // Regression guard: with no matching rule, anyExchange().denyAll() made this endpoint
+        // unreachable for everyone, which also made the cancellation-race behaviour untestable.
+        webTestClient.post()
+            .uri("/api/orders/order-123/cancel")
+            .headers { it.setBearerAuth("customer-token") }
+            .exchange()
+            .expectStatus().isOk
+    }
+
+    @Test
+    fun `order cancellation is reachable for the operations role`() {
+        webTestClient.post()
+            .uri("/api/orders/order-123/cancel")
+            .headers { it.setBearerAuth("operations-token") }
+            .exchange()
+            .expectStatus().isOk
+    }
+
+    @Test
+    fun `order cancellation rejects anonymous requests`() {
+        webTestClient.post()
+            .uri("/api/orders/order-123/cancel")
+            .exchange()
+            .expectStatus().isUnauthorized
+    }
+
+    @Test
+    fun `order cancellation rejects a service credential`() {
+        // A service token drives internal calls; it must not be able to cancel a customer's order.
+        webTestClient.post()
+            .uri("/api/orders/order-123/cancel")
+            .headers { it.setBearerAuth("service-token") }
+            .exchange()
+            .expectStatus().isForbidden
+    }
+
+    @Test
     fun `unlisted paths are denied even for authenticated users`() {
         webTestClient.get()
             .uri("/internal/debug")
@@ -110,6 +148,9 @@ class OrdersSecurityConfigTests @Autowired constructor(
 
         @GetMapping("/api/orders/{orderId}")
         fun readOrder(@PathVariable orderId: String): Map<String, String> = mapOf("orderId" to orderId)
+
+        @PostMapping("/api/orders/{orderId}/cancel")
+        fun cancelOrder(@PathVariable orderId: String): Map<String, String> = mapOf("orderId" to orderId)
 
         // Stands in for the actuator health endpoint, which is not booted in this web slice.
         // It lets us verify the SecurityConfig rule that /actuator/health/** is permitAll.

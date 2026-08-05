@@ -19,6 +19,11 @@ class SecurityConfig {
             .authorizeExchange {
                 it.pathMatchers(*EuroTransitPaths.HEALTH_ENDPOINTS).permitAll()
                 it.pathMatchers(HttpMethod.POST, "/api/orders").hasAuthority(EuroTransitAuthorities.CUSTOMER)
+                // Without this rule anyExchange().denyAll() makes the existing cancel endpoint
+                // unreachable for everyone. `*` is a single-segment PathPattern wildcard, so it cannot
+                // widen beyond the cancel action itself. Ownership is enforced in the controller.
+                it.pathMatchers(HttpMethod.POST, "/api/orders/*/cancel")
+                    .hasAnyAuthority(EuroTransitAuthorities.CUSTOMER, EuroTransitAuthorities.OPERATIONS)
                 it.pathMatchers(HttpMethod.GET, "/api/orders/**")
                     .hasAnyAuthority(EuroTransitAuthorities.CUSTOMER, EuroTransitAuthorities.OPERATIONS)
                 it.anyExchange().denyAll()
