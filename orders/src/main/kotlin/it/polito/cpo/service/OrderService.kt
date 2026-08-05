@@ -29,9 +29,16 @@ class OrderService(
     suspend fun markPaymentPending(id: UUID, reservationId: String): Long =
         orderRepository.markPaymentPending(id, reservationId)
 
+    suspend fun markConfirmingInventory(id: UUID): Long = orderRepository.markConfirmingInventory(id)
+
+    suspend fun markCompensating(id: UUID, reason: String): Long =
+        orderRepository.markCompensating(id, reason)
+
     suspend fun markConfirmed(id: UUID): Long = orderRepository.markConfirmed(id)
 
-    suspend fun markFailed(id: UUID): Long = orderRepository.markFailed(id)
+    suspend fun markFailedUnpaid(id: UUID): Long = orderRepository.markFailedUnpaid(id)
+
+    suspend fun markFailedAfterReversal(id: UUID): Long = orderRepository.markFailedAfterReversal(id)
 
     suspend fun cancelIfUnpaid(id: UUID): Long = orderRepository.cancelIfUnpaid(id)
 

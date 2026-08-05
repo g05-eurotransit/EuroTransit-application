@@ -1,11 +1,35 @@
 package it.polito.cpo.client
 
 import it.polito.cpo.contracts.inventory.ReservationRequest
-import it.polito.cpo.contracts.inventory.ReservationResponse
+import java.util.UUID
 
+/**
+ * Orders' view of the Inventory money-path commands.
+ *
+ * Every method returns a sealed outcome covering only DEFINITIVE results. Unknown outcomes — timeout,
+ * connection failure, open circuit, 5xx, or any 4xx whose code Orders does not recognise — are thrown,
+ * so the orchestrator cannot pattern-match them into a business decision and the Kafka offset is not
+ * committed. See docs/design/reservation-confirmation.md:92 (invariant 8) and :303.
+ */
 interface InventoryClient {
-    // userId is the end customer, propagated as X-User-Id so inventory records the real principal
-    // (the service token identifies the caller as a service, not the customer).
-    suspend fun reserveSeats(request: ReservationRequest, idempotencyKey: String, userId: String): ReservationResponse
+
+    /**
+     * Creates or replays the seat hold. [userId] is the end customer, propagated as `X-User-Id` so
+     * Inventory records the real principal (the service token identifies the caller as a service).
+     */
+    suspend fun reserveSeats(request: ReservationRequest, idempotencyKey: String, userId: String): HoldOutcome
+
+    /**
+     * Transitions the reservation to CONFIRMED and its seats to SOLD, atomically inside Inventory.
+     *
+     * No `Idempotency-Key`: the resource identity plus the stored [orderId] provide natural
+     * idempotency, so a replay after a lost response returns the same success (doc:169-170).
+     */
+    suspend fun confirmReservation(reservationId: String, orderId: UUID): ConfirmReservationOutcome
+
+    /**
+     * Releases a hold. Inventory's release only ever touches HELD rows, so releasing an already
+     * terminal reservation is an idempotent no-op and has no business refusal to report.
+     */
     suspend fun releaseSeats(reservationId: String, idempotencyKey: String)
 }
