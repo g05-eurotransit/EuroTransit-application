@@ -98,3 +98,23 @@ This log is intentionally required by the assignment. It records concrete cases 
 - **How the team caught it:** Code review flagged the TOCTOU idempotency flow, the false conflicts on arrays, and the risky dual-write pattern, mandating the Outbox pattern.
 - **Correction:** Refactored the idempotency logic to use an "insert-first" (catch `DuplicateKeyException`) fallback to safely handle concurrency. Replaced direct Kafka publishing with the Transactional Outbox pattern, inserting events into an `outbox_events` table within the same R2DBC transaction to be processed by Debezium. Also updated the controller to return a `422 Unprocessable Entity` instead of `201 Created` for failed reservations due to oversell, and sorted the seats array before hashing.
 
+
+## Case 12: Entity Mapping Trap Silently Routed Reconciliation Failures to the Dead-Letter Topic
+
+- **Date:** 2026-08-05
+- **Owner:** Person 2 (Orders)
+- **Prompt/task:** Implement the Orders side of issue #53 — synchronous Inventory reservation confirmation, the new durable checkout phases, and the typed reconciliation records.
+- **Agent output:** A `ReconciliationRecord` R2DBC entity modelled on the existing `Order`, carrying a `@Transient private val isNewRecord: Boolean = false` constructor parameter to control insert-versus-update, plus a repository whose `upsertOpen` uses `INSERT ... ON CONFLICT ... RETURNING *`.
+- **Why it was wrong:** Spring Data cannot bind a `@Transient` constructor parameter when materialising a row, so every `upsertOpen` threw `MappingException: No property isNewRecord found on entity class`. The failure mode was the dangerous part, not the exception: the write happens inside the orchestrator's compensation path, so the exception propagated out of the pipeline, Kafka retried three times, the record went to the dead-letter topic, and the order was left stranded in `CONFIRMING_INVENTORY`. Nothing was logged at ERROR by Orders itself. A reviewer reading the code would see a correct-looking upsert; the copied pattern from `Order` was the trap, because `Order` declares the flag as a body property rather than a constructor parameter.
+- **How the team caught it:** Two integration tests failed with unhelpful symptoms — one timed out waiting for a terminal state, the other simply saw zero records. Neither pointed at the entity. A dedicated `ReconciliationRecordRepositoryIntegrationTest` written to isolate the SQL surfaced the real `MappingException` immediately on all ten cases.
+- **Correction:** Dropped `Persistable` from `ReconciliationRecord` entirely. Every write already goes through explicit SQL in the repository, so nothing needs Spring Data to choose between insert and update, and the flag had no reason to exist. Lesson recorded in the entity's KDoc so the pattern is not copied back.
+
+## Case 13: Kotlin SAM Conversion Produced a WebClient Filter Spring Could Not Compose
+
+- **Date:** 2026-08-05
+- **Owner:** Person 2 (Orders)
+- **Prompt/task:** Test the Inventory client's HTTP error decoding without adding a mock HTTP server dependency.
+- **Agent output:** First a Mockito mock of `ServerOAuth2AuthorizedClientExchangeFilterFunction`, then — after that class turned out to be `final` — a Kotlin SAM lambda: `ExchangeFilterFunction { request, next -> next.exchange(request) }`.
+- **Why it was wrong:** Both produced a filter that `DefaultWebClient` could not reduce, failing every request with `NullPointerException: ... "finalFilterFunction" is null`. The misleading part is that the error names an internal Spring field and points at the request line, so it reads as a WebClient or connector problem rather than as a problem with the argument the test supplied.
+- **How the team caught it:** Eight of nine client tests failed with the same NPE while one passed, which is the signature of a harness fault rather than a logic fault.
+- **Correction:** Used Spring's own factory, `ExchangeFilterFunction.ofRequestProcessor { Mono.just(it) }`. Separately, changed both WebClient clients to depend on the `ExchangeFilterFunction` interface instead of the final Spring Security implementation — a one-line production change that makes the clients substitutable at all, and the reason the wire-level error-decoding tests can exist without WireMock.

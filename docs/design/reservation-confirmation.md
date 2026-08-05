@@ -177,14 +177,23 @@ Content-Type: application/json
 
 {
   "reservationId": "<reservation-id>",
-  "orderId": "<order-id>",
-  "status": "CONFIRMED"
+  "status": "CONFIRMED",
+  "expiresAt": "<original-hold-deadline>"
 }
 ```
 
-Inventory never exposes `ALREADY_CONFIRMED` as a separate reservation state. It
-can record replay metrics internally, while the wire result remains
-`CONFIRMED`.
+The body is the shared `ReservationResponse`, so it carries `expiresAt` and not
+`orderId`; the caller already knows the order it asked about. Orders treats a `200`
+whose `status` is anything other than `CONFIRMED` as an unknown outcome rather than
+a success, because that would mean the two services disagree about what the command
+does.
+
+Inventory never exposes `ALREADY_CONFIRMED` as a separate reservation state, and the
+wire result stays `CONFIRMED` for both the first success and every replay. The replay
+count is therefore only observable inside Inventory: `inventory.holds.confirmed` is
+incremented solely on a first confirmation, so replays are the difference between
+confirmation attempts and that counter. Orders cannot distinguish them and does not
+try; its own proxy for redelivery volume is `orders.checkout.resumed`.
 
 The complete HTTP result mapping is:
 
@@ -199,9 +208,15 @@ The complete HTTP result mapping is:
 | Held seats do not exactly match the reservation | `409` | `RESERVATION_SEAT_CONFLICT` | Enter `COMPENSATING` and create a reconciliation record. |
 | Reservation does not exist | `404` | `RESERVATION_NOT_FOUND` | Enter `COMPENSATING` and create a reconciliation record. |
 | Timeout, connection failure, circuit open, or `5xx` | No definitive business result | Transport/dependency error | Keep `CONFIRMING_INVENTORY` and redrive. |
+| Any other `4xx`, or a `4xx` with no decodable code | No definitive business result | Unrecognised | Keep `CONFIRMING_INVENTORY` and redrive. |
 
 Orders resolves an unknown result by repeating the same `PUT`; no separate
 reservation-status endpoint is required for checkout recovery.
+
+The last row matters as much as the others. A `401` from a broken service credential
+or a `400` from a contract drift means Inventory never evaluated the reservation, so
+treating it as a refusal would reverse a paid checkout in order to hide a deployment
+fault. Orders acts only on the codes listed above and redrives everything else.
 
 ## Atomic Inventory Implementation
 
@@ -266,11 +281,21 @@ stored reservation and returns its current state.
 - current `CONFIRMED`: return `CONFIRMED`;
 - current or logically expired reservation: return `409 RESERVATION_EXPIRED`;
 - current `CANCELLED`: return `409 RESERVATION_CANCELLED`;
-- same key with a different fingerprint: return `409 IDEMPOTENCY_CONFLICT`.
+- same key with a different fingerprint: return `409 IDEMPOTENCY_CONFLICT`;
+- idempotency record already purged, but the permanent unique `order_id` still holds:
+  return `409 ORDER_ALREADY_RESERVED`.
 
 The replay never extends `expiresAt` and never creates a replacement hold. A
 customer who wants another attempt creates a new checkout and therefore a new
 order ID and idempotency key.
+
+`ORDER_ALREADY_RESERVED` is reachable only once the 30-minute idempotency retention
+has outlived the 10-minute hold deadline, so the surviving reservation is necessarily
+terminal by then. Orders therefore treats it as a definitive rejection before any
+payment: the order fails, with no reversal and no release. The response does not
+currently carry the reservation id, so Orders cannot recover the existing reservation
+even when that would be preferable; adding it to the error `details` map is an open
+improvement on the Inventory side.
 
 ## Successful Saga
 
@@ -325,8 +350,13 @@ random backoff. Business `4xx` results are not retried by the HTTP client.
 
 If a transient or unknown outcome remains, the orchestrator rethrows it. The
 Kafka listener does not commit the offset. The existing error handler performs
-three redelivery attempts one second apart and then publishes the record to
-`order-placed.DLT`.
+three redelivery attempts one second apart and then publishes the record to the
+dead-letter topic.
+
+Note the topic name: `DeadLetterPublishingRecoverer` in the current Spring Kafka
+version derives it by appending `-dlt`, so the live topic is `order-placed-dlt`,
+not the `order-placed.DLT` spelling used elsewhere in this document. The DLT
+consumer and the Strimzi `KafkaTopic` definition must both use the real name.
 
 A DLT consumer creates or updates a `DELIVERY_EXHAUSTED` Orders reconciliation
 record containing `orderId`, the durable order state, correlation ID, failure
@@ -479,27 +509,32 @@ boundaries, and Payments would remain external.
 ## Implementation Gate and Acceptance Tests
 
 Hold expiration must not be enabled until all of the following are implemented
-and pass against PostgreSQL and Kafka:
+and pass against PostgreSQL and Kafka. Runtime enforcement is
+`inventory.reservations.expiration.enabled`, which defaults to `false`.
 
-- shared reservation states `HELD`, `CONFIRMED`, `EXPIRED`, and `CANCELLED`;
-- Orders states `CONFIRMING_INVENTORY` and `COMPENSATING`;
-- the confirmation `PUT` and Orders client;
-- unique `reservations.order_id` ownership;
-- atomic confirm, expire, and release transitions;
-- batched `FOR UPDATE SKIP LOCKED` expiration;
-- current-state hold replay semantics after expiration;
-- state-based Orders redelivery without restarting completed stages;
-- typed reconciliation records plus idempotent operations redrive and resolution
-  endpoints;
-- payment reversal through `refund-{orderId}`;
-- confirmation versus expiration and release concurrency tests;
-- retry after a lost successful confirmation response;
-- crash after Inventory confirmation and before the Orders commit;
-- cancellation racing with an in-flight hold;
-- payment authorization followed by expired confirmation and successful reversal;
-- failed and unknown reversal outcomes;
-- proof that release and expiration never modify `CONFIRMED` or `SOLD`;
-- commit-aware metrics and reconciliation alerts.
+- [x] shared reservation states `HELD`, `CONFIRMED`, `EXPIRED`, and `CANCELLED`;
+- [x] Orders states `CONFIRMING_INVENTORY` and `COMPENSATING`;
+- [x] the confirmation `PUT` and Orders client;
+- [x] unique `reservations.order_id` ownership;
+- [x] atomic confirm, expire, and release transitions;
+- [x] batched `FOR UPDATE SKIP LOCKED` expiration;
+- [x] current-state hold replay semantics after expiration;
+- [x] state-based Orders redelivery without restarting completed stages;
+- [ ] typed reconciliation records plus idempotent operations redrive and resolution
+  endpoints — records are implemented; the redrive and resolve endpoints and the
+  dead-letter consumer are the remaining Orders work;
+- [x] payment reversal through `refund-{orderId}`;
+- [x] confirmation versus expiration and release concurrency tests;
+- [x] retry after a lost successful confirmation response;
+- [x] crash after Inventory confirmation and before the Orders commit;
+- [x] cancellation racing with an in-flight hold;
+- [x] payment authorization followed by expired confirmation and successful reversal;
+- [x] failed and unknown reversal outcomes;
+- [x] proof that release and expiration never modify `CONFIRMED` or `SOLD`;
+- [ ] commit-aware metrics and reconciliation alerts — the metrics are commit-aware
+  and `orders.reconciliation.required` is emitted; the alert rules belong to the
+  configuration repository, and `/actuator/prometheus` is still denied by the Orders
+  security chain, so no Orders metric is scrapable yet.
 
 This list is the release gate for the reservation-expiration capability; none of
 its items are deferred design questions.

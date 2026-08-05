@@ -112,6 +112,12 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
   - Returns the current order status: accepted, reserving, payment-pending, confirming-inventory, compensating, confirmed, failed, or cancelled.
   - Requires the authenticated customer to own the order, unless an operator/admin role is used.
   - Returns `404 Not Found` for customer-to-customer access to avoid revealing another customer's order.
+- `POST /api/orders/{orderId}/cancel`
+  - Cancels an order that has not yet started payment authorization, releasing any seat hold.
+  - Requires the authenticated customer to own the order, or an operations role.
+  - Accepted only while the order is `accepted` or `reserving`. From `payment-pending` onward it
+    returns `409 ORDER_NOT_CANCELLABLE`, which is what closes the cancellation race before money
+    moves; post-sale cancellation is a separate business process and cannot use hold release.
 - Orders persists order state in `orders_db`.
 - `POST /api/orders/{orderId}/reconciliation/redrive`
   - Requires an operations credential and an idempotency key.
