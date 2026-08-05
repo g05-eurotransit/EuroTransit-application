@@ -118,3 +118,13 @@ This log is intentionally required by the assignment. It records concrete cases 
 - **Why it was wrong:** Both produced a filter that `DefaultWebClient` could not reduce, failing every request with `NullPointerException: ... "finalFilterFunction" is null`. The misleading part is that the error names an internal Spring field and points at the request line, so it reads as a WebClient or connector problem rather than as a problem with the argument the test supplied.
 - **How the team caught it:** Eight of nine client tests failed with the same NPE while one passed, which is the signature of a harness fault rather than a logic fault.
 - **Correction:** Used Spring's own factory, `ExchangeFilterFunction.ofRequestProcessor { Mono.just(it) }`. Separately, changed both WebClient clients to depend on the `ExchangeFilterFunction` interface instead of the final Spring Security implementation — a one-line production change that makes the clients substitutable at all, and the reason the wire-level error-decoding tests can exist without WireMock.
+
+## Case 14: Test Assertions Scoped Globally in a Shared Spring Context
+
+- **Date:** 2026-08-05
+- **Owner:** Person 2 (Orders)
+- **Prompt/task:** Add integration tests for the reconciliation gauges and for the dead-letter consumer.
+- **Agent output:** Assertions written against absolute counts of shared state — `assertEquals(1, countOpenByKind(...))` for the gauge, and `assertEquals(0, reconciliationRepository.findAll().count())` to prove that a poison record opens no incident.
+- **Why it was wrong:** Both tests run in a `@SpringBootTest` context shared with siblings that create their own rows, so the absolute count depends on execution order. The gauge queries are intentionally global because they feed an "any open incident" alert, so they cannot be scoped away. The failure mode is the problem: the test passes or fails depending on which tests ran before it, which reads as flakiness and erodes trust in the whole suite rather than pointing at the mistake.
+- **How the team caught it:** Both failed on the first full-suite run after passing in isolation — the signature of order dependence rather than of a logic fault.
+- **Correction:** Two different fixes for two different situations. For the gauge test, a `@BeforeEach` truncation, because the query under test is legitimately global and the test needs a known starting point. For the dead-letter test, an assertion on the *delta* rather than the absolute value, because truncating there would have destroyed state the surrounding checkout scenarios depend on. Recorded because the instinct to reach for the same fix twice was itself the trap.

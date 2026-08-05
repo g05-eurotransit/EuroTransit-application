@@ -520,9 +520,8 @@ and pass against PostgreSQL and Kafka. Runtime enforcement is
 - [x] batched `FOR UPDATE SKIP LOCKED` expiration;
 - [x] current-state hold replay semantics after expiration;
 - [x] state-based Orders redelivery without restarting completed stages;
-- [ ] typed reconciliation records plus idempotent operations redrive and resolution
-  endpoints — records are implemented; the redrive and resolve endpoints and the
-  dead-letter consumer are the remaining Orders work;
+- [x] typed reconciliation records plus idempotent operations redrive and resolution
+  endpoints;
 - [x] payment reversal through `refund-{orderId}`;
 - [x] confirmation versus expiration and release concurrency tests;
 - [x] retry after a lost successful confirmation response;
@@ -531,10 +530,14 @@ and pass against PostgreSQL and Kafka. Runtime enforcement is
 - [x] payment authorization followed by expired confirmation and successful reversal;
 - [x] failed and unknown reversal outcomes;
 - [x] proof that release and expiration never modify `CONFIRMED` or `SOLD`;
-- [ ] commit-aware metrics and reconciliation alerts — the metrics are commit-aware
-  and `orders.reconciliation.required` is emitted; the alert rules belong to the
-  configuration repository, and `/actuator/prometheus` is still denied by the Orders
-  security chain, so no Orders metric is scrapable yet.
+- [ ] commit-aware metrics and reconciliation alerts — the metrics are complete and
+  commit-aware: `orders.reconciliation.required` on every incident, the
+  `orders.reconciliation.open` and `orders.pipeline.inflight` gauges with their oldest-age
+  companions, and `orders.events.dlt` on the dead-letter path. What remains is outside this
+  repository and outside the Orders slice: the `PrometheusRule` objects belong to the
+  configuration repository, and `/actuator/prometheus` is still denied by the Orders security
+  chain, so no Orders metric is scrapable yet. **This is the only item still blocking the
+  gate.**
 
 This list is the release gate for the reservation-expiration capability; none of
 its items are deferred design questions.
