@@ -1,6 +1,7 @@
 package it.polito.cpo.repository
 
 import it.polito.cpo.model.Order
+import kotlinx.coroutines.flow.Flow
 import org.springframework.data.r2dbc.repository.Modifying
 import org.springframework.data.r2dbc.repository.Query
 import org.springframework.data.repository.kotlin.CoroutineCrudRepository
@@ -112,4 +113,31 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
         """,
     )
     suspend fun cancelIfUnpaid(id: UUID): Long
+
+    /**
+     * Feeds the non-terminal pipeline gauges. An order stranded in one of these phases is the failure
+     * mode the synchronous confirmation introduces — money is committed somewhere and the checkout has
+     * not converged — so it needs to be observable by age, not just by count.
+     *
+     * `created_at` is `TIMESTAMP WITHOUT TIME ZONE`, so the age is computed against `LOCALTIMESTAMP`.
+     * Comparing it with `CURRENT_TIMESTAMP` would silently offset every age by the session time zone.
+     */
+    @Query(
+        """
+        SELECT status                                                              AS status,
+               COUNT(*)                                                            AS order_count,
+               COALESCE(MAX(EXTRACT(EPOCH FROM (LOCALTIMESTAMP - created_at))), 0) AS oldest_age_seconds
+          FROM orders
+         WHERE status IN ('PAYMENT_PENDING', 'CONFIRMING_INVENTORY', 'COMPENSATING')
+         GROUP BY status
+        """,
+    )
+    fun countNonTerminalByState(): Flow<NonTerminalStateRow>
 }
+
+/** One row of [OrderRepository.countNonTerminalByState]. */
+data class NonTerminalStateRow(
+    val status: String,
+    val orderCount: Long,
+    val oldestAgeSeconds: Double,
+)

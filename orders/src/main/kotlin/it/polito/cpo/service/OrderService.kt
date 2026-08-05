@@ -3,7 +3,9 @@ package it.polito.cpo.service
 import it.polito.cpo.model.IdempotentRequest
 import it.polito.cpo.model.Order
 import it.polito.cpo.repository.IdempotentRequestRepository
+import it.polito.cpo.repository.NonTerminalStateRow
 import it.polito.cpo.repository.OrderRepository
+import kotlinx.coroutines.flow.Flow
 import org.springframework.stereotype.Service
 import java.time.LocalDateTime
 import java.util.UUID
@@ -41,6 +43,8 @@ class OrderService(
     suspend fun markFailedAfterReversal(id: UUID): Long = orderRepository.markFailedAfterReversal(id)
 
     suspend fun cancelIfUnpaid(id: UUID): Long = orderRepository.cancelIfUnpaid(id)
+
+    fun countNonTerminalByState(): Flow<NonTerminalStateRow> = orderRepository.countNonTerminalByState()
 
     suspend fun findIdempotentRequest(key: String): IdempotentRequest? {
         return idempotencyRepository.findById(key)
