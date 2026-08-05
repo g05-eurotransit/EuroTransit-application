@@ -121,6 +121,66 @@ class OrdersSecurityConfigTests @Autowired constructor(
     }
 
     @Test
+    fun `reconciliation redrive accepts only the operations role`() {
+        webTestClient.post()
+            .uri("/api/orders/order-123/reconciliation/redrive")
+            .headers { it.setBearerAuth("operations-token") }
+            .exchange()
+            .expectStatus().isOk
+
+        webTestClient.post()
+            .uri("/api/orders/order-123/reconciliation/redrive")
+            .headers { it.setBearerAuth("customer-token") }
+            .exchange()
+            .expectStatus().isForbidden
+    }
+
+    @Test
+    fun `reconciliation redrive rejects a service credential`() {
+        // The service credential drives every internal money-path call. If it could redrive an
+        // incident, the operator API would not be an operator API.
+        webTestClient.post()
+            .uri("/api/orders/order-123/reconciliation/redrive")
+            .headers { it.setBearerAuth("service-token") }
+            .exchange()
+            .expectStatus().isForbidden
+    }
+
+    @Test
+    fun `reconciliation resolve accepts only the operations role`() {
+        webTestClient.post()
+            .uri("/api/orders/order-123/reconciliation/rec-1/resolve")
+            .headers { it.setBearerAuth("operations-token") }
+            .exchange()
+            .expectStatus().isOk
+
+        webTestClient.post()
+            .uri("/api/orders/order-123/reconciliation/rec-1/resolve")
+            .headers { it.setBearerAuth("service-token") }
+            .exchange()
+            .expectStatus().isForbidden
+    }
+
+    @Test
+    fun `reconciliation endpoints reject anonymous requests`() {
+        webTestClient.post()
+            .uri("/api/orders/order-123/reconciliation/redrive")
+            .exchange()
+            .expectStatus().isUnauthorized
+    }
+
+    @Test
+    fun `a customer read of the reconciliation path is not silently widened by the POST rules`() {
+        // The POST rules use single-segment wildcards; a GET on the same path must still fall through
+        // to the order-read rule rather than to the operator rules.
+        webTestClient.get()
+            .uri("/api/orders/order-123/reconciliation/redrive")
+            .headers { it.setBearerAuth("customer-token") }
+            .exchange()
+            .expectStatus().isOk
+    }
+
+    @Test
     fun `unlisted paths are denied even for authenticated users`() {
         webTestClient.get()
             .uri("/internal/debug")
@@ -151,6 +211,23 @@ class OrdersSecurityConfigTests @Autowired constructor(
 
         @PostMapping("/api/orders/{orderId}/cancel")
         fun cancelOrder(@PathVariable orderId: String): Map<String, String> = mapOf("orderId" to orderId)
+
+        @PostMapping("/api/orders/{orderId}/reconciliation/redrive")
+        fun redrive(@PathVariable orderId: String): Map<String, String> = mapOf("orderId" to orderId)
+
+        @PostMapping("/api/orders/{orderId}/reconciliation/{recordId}/resolve")
+        fun resolve(
+            @PathVariable orderId: String,
+            @PathVariable recordId: String,
+        ): Map<String, String> = mapOf("orderId" to orderId, "recordId" to recordId)
+
+        // Stands in for the order-read route on the same path prefix, so the test can prove the POST
+        // operator rules did not widen GET access.
+        @GetMapping("/api/orders/{orderId}/reconciliation/{action}")
+        fun readReconciliation(
+            @PathVariable orderId: String,
+            @PathVariable action: String,
+        ): Map<String, String> = mapOf("orderId" to orderId, "action" to action)
 
         // Stands in for the actuator health endpoint, which is not booted in this web slice.
         // It lets us verify the SecurityConfig rule that /actuator/health/** is permitAll.
