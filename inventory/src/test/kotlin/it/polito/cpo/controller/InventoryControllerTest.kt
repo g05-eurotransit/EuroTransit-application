@@ -1,5 +1,7 @@
 package it.polito.cpo.controller
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import it.polito.cpo.contracts.inventory.ReservationConfirmationRequest
 import it.polito.cpo.contracts.inventory.ReservationRequest
 import it.polito.cpo.contracts.inventory.ReservationResponse
 import it.polito.cpo.contracts.inventory.ReservationStatus
@@ -32,6 +34,7 @@ import org.springframework.security.test.web.reactive.server.SecurityMockServerC
 import org.springframework.test.web.reactive.server.WebTestClient
 import org.springframework.transaction.reactive.TransactionalOperator
 import tools.jackson.databind.ObjectMapper
+import java.time.Clock
 import java.time.LocalDateTime
 import java.util.UUID
 
@@ -73,7 +76,8 @@ class InventoryControllerTest {
         Mockito.mock(IdempotencyRecordRepository::class.java),
         Mockito.mock(OutboxEventRepository::class.java),
         Mockito.mock(ObjectMapper::class.java),
-        Mockito.mock(TransactionalOperator::class.java)
+        Mockito.mock(TransactionalOperator::class.java),
+        SimpleMeterRegistry()
     ) {
         var lastReserveRequest: ReservationRequest? = null
         var lastIdempotencyKey: String? = null
@@ -82,6 +86,8 @@ class InventoryControllerTest {
         
         var reserveShouldThrow: ApiException? = null
         var lastReleaseReservationId: String? = null
+        var lastConfirmReservationId: String? = null
+        var lastConfirmOrderId: UUID? = null
         var reserveResponseStatus: ReservationStatus = ReservationStatus.HELD
 
         fun reset() {
@@ -91,6 +97,8 @@ class InventoryControllerTest {
             lastPrincipalId = null
             reserveShouldThrow = null
             lastReleaseReservationId = null
+            lastConfirmReservationId = null
+            lastConfirmOrderId = null
             reserveResponseStatus = ReservationStatus.HELD
         }
 
@@ -116,6 +124,16 @@ class InventoryControllerTest {
 
         override suspend fun releaseReservation(reservationId: String) {
             lastReleaseReservationId = reservationId
+        }
+
+        override suspend fun confirmReservation(reservationId: String, orderId: UUID): ReservationResponse {
+            lastConfirmReservationId = reservationId
+            lastConfirmOrderId = orderId
+            return ReservationResponse(
+                reservationId,
+                ReservationStatus.CONFIRMED,
+                LocalDateTime.now().plusMinutes(15)
+            )
         }
     }
 
@@ -340,6 +358,83 @@ class InventoryControllerTest {
             )
             .delete()
             .uri("/api/inventory/reservations/{reservationId}", reservationId)
+            .exchange()
+            .expectStatus().isForbidden
+    }
+
+    @Test
+    fun `deleteReservation succeeds and delegates to service`() {
+        val reservationId = "res-999"
+
+        webClient
+            .mutateWith(
+                mockJwt()
+                    .authorities(SimpleGrantedAuthority(EuroTransitAuthorities.SERVICE))
+            )
+            .delete()
+            .uri("/api/inventory/reservations/{reservationId}", reservationId)
+            .exchange()
+            .expectStatus().isNoContent
+
+        assertEquals(
+            reservationId,
+            fakeService.lastReleaseReservationId,
+            "The service should have been called"
+        )
+    }
+
+    @Test
+    fun `confirmReservation returns 200 OK and delegates to service`() {
+        val reservationId = "res-123"
+        val orderId = UUID.randomUUID()
+        val request = ReservationConfirmationRequest(orderId = orderId)
+
+        webClient
+            .mutateWith(
+                mockJwt()
+                    .authorities(SimpleGrantedAuthority(EuroTransitAuthorities.SERVICE))
+            )
+            .put()
+            .uri("/api/inventory/reservations/{reservationId}/confirmation", reservationId)
+            .contentType(MediaType.APPLICATION_JSON)
+            .bodyValue(request)
+            .exchange()
+            .expectStatus().isOk
+            .expectBody()
+            .jsonPath("$.reservationId").isEqualTo("res-123")
+            .jsonPath("$.status").isEqualTo("CONFIRMED")
+
+        assertEquals(reservationId, fakeService.lastConfirmReservationId)
+        assertEquals(orderId, fakeService.lastConfirmOrderId)
+    }
+
+    @Test
+    fun `confirmReservation returns 401 Unauthorized if JWT is missing`() {
+        val reservationId = "res-123"
+        val request = ReservationConfirmationRequest(orderId = UUID.randomUUID())
+
+        webClient.put()
+            .uri("/api/inventory/reservations/{reservationId}/confirmation", reservationId)
+            .contentType(MediaType.APPLICATION_JSON)
+            .bodyValue(request)
+            .exchange()
+            .expectStatus().isUnauthorized
+    }
+
+    @Test
+    fun `confirmReservation returns 403 Forbidden if JWT lacks ROLE_service authority`() {
+        val reservationId = "res-123"
+        val request = ReservationConfirmationRequest(orderId = UUID.randomUUID())
+
+        webClient
+            .mutateWith(
+                mockJwt()
+                    .authorities(SimpleGrantedAuthority("ROLE_customer"))
+            )
+            .put()
+            .uri("/api/inventory/reservations/{reservationId}/confirmation", reservationId)
+            .contentType(MediaType.APPLICATION_JSON)
+            .bodyValue(request)
             .exchange()
             .expectStatus().isForbidden
     }

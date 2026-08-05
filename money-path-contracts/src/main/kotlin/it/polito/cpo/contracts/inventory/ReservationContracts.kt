@@ -10,7 +10,11 @@ data class ReservationRequest(
     val routeId: String
 )
 
-enum class ReservationStatus { HELD, FAILED }
+enum class ReservationStatus { HELD, FAILED, CONFIRMED, EXPIRED, CANCELLED }
+
+data class ReservationConfirmationRequest(
+    val orderId: UUID
+)
 
 data class ReservationResponse(
     val reservationId: String,

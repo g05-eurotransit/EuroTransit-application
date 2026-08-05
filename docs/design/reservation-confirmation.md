@@ -158,7 +158,6 @@ Orders calls:
 ```http
 PUT /api/inventory/reservations/{reservationId}/confirmation
 Authorization: Bearer <service-token>
-X-User-Id: <customer-principal>
 X-Correlation-Id: <checkout-correlation-id>
 Content-Type: application/json
 
@@ -238,7 +237,11 @@ clocks are not authoritative.
 Each Inventory replica can run the expiration scheduler. Replicas coordinate in
 PostgreSQL, not through leader election or ShedLock:
 
-- the scheduler runs every 60 seconds;
+- the scheduler is off unless `inventory.reservations.expiration.enabled` is `true`,
+  which is how the implementation gate below is enforced at runtime; the idempotency
+  purge is switched separately through `inventory.idempotency.purge.enabled` and stays
+  on, because it does not affect seat availability;
+- the scheduler runs every 30 seconds (configurable via `inventory.reservations.cleanup-interval-ms`);
 - each transaction claims at most 100 `HELD` reservations with
   `expires_at <= CURRENT_TIMESTAMP`;
 - candidates are selected in `expires_at` order using

@@ -10,18 +10,55 @@ import org.springframework.stereotype.Repository
 interface SeatRepository : CoroutineCrudRepository<Seat, String> {
 
     /**
-     * Attempts to atomically update seats to HELD only if they are all AVAILABLE.
-     * Returns the number of modified rows: if it differs from requested seats, an oversale was prevented.
+     * Updates available seats to held for a route and reservation when all seats are available.
      */
     @Modifying
-    @Query("UPDATE seats SET status = 'HELD', reservation_id = :reservationId " +
-            "WHERE route_id = :routeId AND seat_id IN (:seatIds) AND status = 'AVAILABLE'")
-    suspend fun holdSeats(routeId: String, seatIds: List<String>, reservationId: String): Int
+    @Query("""
+        WITH available_seats AS (
+            SELECT seat_id 
+            FROM seats 
+            WHERE route_id = :routeId 
+              AND seat_id IN (:seatIds) 
+              AND status = 'AVAILABLE' 
+            FOR UPDATE
+        )
+        UPDATE seats 
+        SET status = 'HELD', reservation_id = :reservationId 
+        WHERE route_id = :routeId 
+          AND seat_id IN (SELECT seat_id FROM available_seats) 
+          AND (SELECT COUNT(*) FROM available_seats) = :expectedCount
+    """)
+    suspend fun holdSeats(
+        routeId: String,
+        seatIds: List<String>,
+        reservationId: String,
+        expectedCount: Int = seatIds.size
+    ): Int
 
     /**
-     * Releases seats when a hold expires or is canceled.
+     * Updates held seats for a reservation back to available.
      */
     @Modifying
-    @Query("UPDATE seats SET status = 'AVAILABLE', reservation_id = NULL WHERE reservation_id = :reservationId")
+    @Query("UPDATE seats SET status = 'AVAILABLE', reservation_id = NULL WHERE reservation_id = :reservationId AND status = 'HELD'")
     suspend fun releaseSeats(reservationId: String): Int
+
+    /**
+     * Updates held seats for multiple reservations back to available in batch.
+     */
+    @Modifying
+    @Query("UPDATE seats SET status = 'AVAILABLE', reservation_id = NULL WHERE reservation_id IN (:reservationIds) AND status = 'HELD'")
+    suspend fun releaseSeatsForReservations(reservationIds: Collection<String>): Int
+    
+    /**
+     * Updates held seats for a reservation to sold.
+     */
+    @Modifying
+    @Query("UPDATE seats SET status = 'SOLD' WHERE reservation_id = :reservationId AND status = 'HELD'")
+    suspend fun confirmSeats(reservationId: String): Int
+    
+    /**
+     * Counts the number of seats assigned to a reservation.
+     */
+    @Query("SELECT COUNT(*) FROM seats WHERE reservation_id = :reservationId")
+    suspend fun countByReservationId(reservationId: String): Long
 }

@@ -55,3 +55,17 @@ management:
     metrics:
       export:
         enabled: false
+
+inventory:
+  reservations:
+    expiration:
+      # Off by default. Releasing expired holds is only safe once Orders confirms the
+      # reservation synchronously after payment authorization; before that, this sweep
+      # can free seats belonging to a paid order and let them be sold twice.
+      # Release gate: docs/design/reservation-confirmation.md
+      enabled: ${INVENTORY_RESERVATION_EXPIRATION_ENABLED:false}
+  idempotency:
+    purge:
+      # On by default, and independent of the expiration toggle above: this only keeps
+      # idempotency_records within the 30-minute retention in docs/design/api-design.md.
+      enabled: ${INVENTORY_IDEMPOTENCY_PURGE_ENABLED:true}

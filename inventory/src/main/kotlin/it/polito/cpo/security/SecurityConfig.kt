@@ -11,6 +11,9 @@ import org.springframework.security.web.server.SecurityWebFilterChain
 @EnableWebFluxSecurity
 @EnableReactiveMethodSecurity
 class SecurityConfig {
+    /**
+     * Configures the reactive HTTP security filter chain and authorization rules.
+     */
     @Bean
     fun springSecurityFilterChain(http: ServerHttpSecurity): SecurityWebFilterChain =
         http
