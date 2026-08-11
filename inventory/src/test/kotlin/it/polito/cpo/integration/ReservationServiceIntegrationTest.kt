@@ -538,6 +538,9 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
 
         assertEquals(HttpStatus.CONFLICT, ex.status)
         assertEquals("ORDER_ALREADY_RESERVED", ex.code)
+        assertNotNull(ex.details)
+        assertEquals(response1.reservationId, ex.details!!["reservationId"])
+        assertEquals(ReservationStatus.HELD.name, ex.details!!["status"])
     }
 
     @Test

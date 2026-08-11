@@ -177,7 +177,11 @@ class ReservationService(
                 throw ApiException(
                     status = HttpStatus.CONFLICT,
                     code = "ORDER_ALREADY_RESERVED",
-                    message = "A reservation already exists for order ${request.orderId} (status: ${existingReservation.status})"
+                    message = "A reservation already exists for order ${request.orderId} (status: ${existingReservation.status})",
+                    details = mapOf(
+                        "reservationId" to existingReservation.reservationId,
+                        "status" to existingReservation.status
+                    )
                 )
             }
 

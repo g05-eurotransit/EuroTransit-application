@@ -787,6 +787,9 @@ class ReservationServiceTest {
 
         assertEquals(HttpStatus.CONFLICT, exception.status)
         assertEquals("ORDER_ALREADY_RESERVED", exception.code)
+        assertNotNull(exception.details)
+        assertEquals("res-existing-123", exception.details!!["reservationId"])
+        assertEquals("CONFIRMED", exception.details!!["status"])
     }
 
     @Test
