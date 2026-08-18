@@ -102,9 +102,9 @@ These queries are the building blocks for the checkout SLOs in `docs/operations/
 - Sampling is 1.0 for development; production sampling is decided with the SLO owner before the demo.
 - View traces in Grafana (`localhost:3000` → Explore → Tempo → search `service.name`).
 
-## Open Cross-Slice Item: Prometheus Scraping vs. Security Baseline
+## Prometheus Scraping and the Security Baseline
 
-The security baseline (`SecurityConfig` in each service, `it.anyExchange().denyAll()` catch-all) has no permit rule for `/actuator/prometheus` — only `/actuator/health/**` and `GET /api/catalog/**` are allowed. As soon as the security baseline is live on a service, Prometheus scraping (`docker/observability/prometheus.yml`, and later the cluster ServiceMonitor) gets `401` and metrics stop flowing. This needs a decision with the Gateway/Security owner before the demo: either add `/actuator/prometheus` to the permit list (typical for metrics scraping, which isn't usually gated behind customer-facing OAuth2), or issue Prometheus a service credential. See `CatalogApiTests.prometheus endpoint currently requires authentication under the security baseline` (and the same test in `NotificationsApiTests`) for the reproduction.
+The shared security baseline permits `/actuator/prometheus` together with the Kubernetes health endpoints. Other Actuator endpoints remain denied by the `anyExchange().denyAll()` catch-all. The route is reachable by Prometheus on the internal service network, but no Traefik route forwards `/actuator/**` to an application service; backend routes match only `/api/**`. See `docs/operations/slo-observability.md` for the operational boundary.
 
 ## Open Cross-Slice Item: Notifications Consumer ↔ Orders Producer
 

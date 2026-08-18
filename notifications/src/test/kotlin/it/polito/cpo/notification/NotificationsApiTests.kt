@@ -77,13 +77,10 @@ class NotificationsApiTests(
     }
 
     @Test
-    fun `prometheus endpoint currently requires authentication under the security baseline`() {
-        // Same cross-slice gap Catalog documented: SecurityConfig's denyAll() catch-all has no
-        // permit rule for /actuator/prometheus, so Prometheus scraping gets 401 once security is
-        // live. Documented in docs/design/observability-conventions.md, not silently worked around.
+    fun `prometheus endpoint is available to the internal scraper`() {
         client.get().uri("/actuator/prometheus")
             .exchange()
-            .expectStatus().isUnauthorized
+            .expectStatus().isOk
     }
 }
 

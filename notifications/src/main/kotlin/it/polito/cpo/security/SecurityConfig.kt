@@ -17,7 +17,7 @@ class SecurityConfig {
         http
             .applyStatelessApiDefaults()
             .authorizeExchange {
-                it.pathMatchers(*EuroTransitPaths.HEALTH_ENDPOINTS).permitAll()
+                it.pathMatchers(*EuroTransitPaths.UNAUTHENTICATED_ACTUATOR_ENDPOINTS).permitAll()
                 it.pathMatchers(HttpMethod.GET, "/api/notifications/**")
                     .hasAnyAuthority(EuroTransitAuthorities.CUSTOMER, EuroTransitAuthorities.OPERATIONS)
                 it.anyExchange().denyAll()

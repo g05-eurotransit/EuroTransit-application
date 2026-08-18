@@ -37,6 +37,23 @@ class InventorySecurityConfigTests @Autowired constructor(
     }
 
     @Test
+    fun `prometheus endpoint permits an unauthenticated internal scrape`() {
+        webTestClient.get()
+            .uri("/actuator/prometheus")
+            .exchange()
+            .expectStatus().isOk
+    }
+
+    @Test
+    fun `other actuator endpoints remain denied`() {
+        webTestClient.get()
+            .uri("/actuator/env")
+            .headers { it.setBearerAuth("service-token") }
+            .exchange()
+            .expectStatus().isForbidden
+    }
+
+    @Test
     fun `inventory APIs reject anonymous requests`() {
         webTestClient.post()
             .uri("/api/inventory/security-probe")
@@ -84,6 +101,9 @@ class InventorySecurityProbeController {
     // Lets us verify the SecurityConfig rule that /actuator/health/** is permitAll.
     @GetMapping("/actuator/health/liveness")
     fun liveness(): Map<String, String> = mapOf("status" to "UP")
+
+    @GetMapping("/actuator/prometheus")
+    fun prometheus(): String = "test_metric 1"
 }
 
 private fun testJwt(token: String): Jwt {
