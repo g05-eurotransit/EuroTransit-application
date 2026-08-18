@@ -1,0 +1,144 @@
+name: Smoke Tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kind-smoke:
+    name: kind Smoke
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'run-kind-smoke')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Catalog
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          build-args: SERVICE=catalog
+          tags: eurotransit/catalog:smoke
+          load: true
+          cache-from: |
+            type=gha,scope=catalog
+            type=gha,scope=smoke-catalog
+          cache-to: type=gha,mode=max,scope=smoke-catalog
+
+      - name: Build Orders
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          build-args: SERVICE=orders
+          tags: eurotransit/orders:smoke
+          load: true
+          cache-from: |
+            type=gha,scope=orders
+            type=gha,scope=smoke-orders
+          cache-to: type=gha,mode=max,scope=smoke-orders
+
+      - name: Build Inventory
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          build-args: SERVICE=inventory
+          tags: eurotransit/inventory:smoke
+          load: true
+          cache-from: |
+            type=gha,scope=inventory
+            type=gha,scope=smoke-inventory
+          cache-to: type=gha,mode=max,scope=smoke-inventory
+
+      - name: Build Payments
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          build-args: SERVICE=payments
+          tags: eurotransit/payments:smoke
+          load: true
+          cache-from: |
+            type=gha,scope=payments
+            type=gha,scope=smoke-payments
+          cache-to: type=gha,mode=max,scope=smoke-payments
+
+      - name: Build Notifications
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          build-args: SERVICE=notifications
+          tags: eurotransit/notifications:smoke
+          load: true
+          cache-from: |
+            type=gha,scope=notifications
+            type=gha,scope=smoke-notifications
+          cache-to: type=gha,mode=max,scope=smoke-notifications
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: eurotransit-smoke
+
+      - name: Load images into kind
+        run: |
+          kind load docker-image eurotransit/catalog:smoke --name eurotransit-smoke
+          kind load docker-image eurotransit/orders:smoke --name eurotransit-smoke
+          kind load docker-image eurotransit/inventory:smoke --name eurotransit-smoke
+          kind load docker-image eurotransit/payments:smoke --name eurotransit-smoke
+          kind load docker-image eurotransit/notifications:smoke --name eurotransit-smoke
+
+      - name: Apply smoke manifests
+        run: kubectl apply -f k8s/smoke/eurotransit-smoke.yaml
+
+      - name: Wait for rollout
+        run: |
+          for service in catalog orders inventory payments notifications; do
+            kubectl rollout status "deployment/$service" -n eurotransit-smoke --timeout=180s
+          done
+
+      - name: Check health endpoints
+        run: |
+          for service in catalog orders inventory payments notifications; do
+            kubectl run "curl-$service" \
+              --namespace "eurotransit-smoke" \
+              --rm \
+              --attach \
+              --restart=Never \
+              --image=curlimages/curl:8.16.0 \
+              --command -- curl --fail --silent --show-error "http://${service}:8080/actuator/health"
+          done
+
+      - name: Dump smoke diagnostics on failure
+        if: failure()
+        run: |
+          if ! command -v kubectl >/dev/null 2>&1; then
+            echo "kubectl is not available; skipping smoke cluster diagnostics."
+            exit 0
+          fi
+          kubectl get pods -n eurotransit-smoke -o wide || true
+          kubectl get events -n eurotransit-smoke --sort-by=.lastTimestamp || true
+          kubectl describe deployments,pods -n eurotransit-smoke || true
+          kubectl logs -n eurotransit-smoke -l app.kubernetes.io/part-of=eurotransit --all-containers --tail=200 || true

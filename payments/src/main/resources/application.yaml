@@ -1,12 +1,70 @@
 spring:
+  reactor:
+    # Propagate the Reactor context (correlationId) into the logging MDC.
+    context-propagation: auto
   application:
     name: payments
+  kafka:
+    # Default matches the EXTERNAL listener docker-compose exposes to the host (9094).
+    # Inside the compose network, SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:9092 overrides this.
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9094}
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI:http://localhost:8081/realms/eurotransit}
+          jwk-set-uri: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI:http://localhost:8081/realms/eurotransit/protocol/openid-connect/certs}
+  r2dbc:
+    url: r2dbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:eurotransit}
+    username: ${DB_USER:eurotransit}
+    password: ${DB_PASSWORD:password}
+  flyway:
+    enabled: true
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:eurotransit}
+    user: ${DB_USER:eurotransit}
+    password: ${DB_PASSWORD:password}
+    locations: classpath:db/migration
+    baseline-on-migrate: true
 
 server:
   port: 8085
 
+logging:
+  structured:
+    format:
+      # Structured JSON logs (Elastic Common Schema); includes MDC and trace/span ids.
+      console: ecs
+
 management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        # Histogram buckets so Prometheus can compute p95/p99 for the checkout SLOs.
+        http.server.requests: true
+  tracing:
+    sampling:
+      probability: 1.0
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          endpoint: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:http://localhost:4318/v1/traces}
   otlp:
     metrics:
       export:
         enabled: false
+
+payments:
+  provider:
+    sandbox-url: ${STRIPE_SANDBOX_URL:https://api.stripe.com/v1}
+    secret-key: ${STRIPE_SECRET_KEY:sk_test_1234567890}

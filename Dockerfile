@@ -1,19 +1,35 @@
 FROM eclipse-temurin:21-jdk-alpine AS builder
 
-ARG SERVICE
-
 WORKDIR /workspace
+ENV GRADLE_USER_HOME=/gradle-cache
 
 COPY gradle gradle
 COPY gradlew .
 COPY build.gradle.kts settings.gradle.kts ./
 COPY buildSrc buildSrc
-COPY catalog/build.gradle.kts catalog/build.gradle.kts
-COPY inventory/build.gradle.kts inventory/build.gradle.kts
-COPY notifications/build.gradle.kts notifications/build.gradle.kts
-COPY orders/build.gradle.kts orders/build.gradle.kts
-COPY payments/build.gradle.kts payments/build.gradle.kts
-COPY ${SERVICE} ${SERVICE}
+
+# Gradle 9 requires every included project directory to exist, even though only the target
+# service and its shared project dependencies are configured with build scripts at this point.
+RUN mkdir -p catalog observability security-support money-path-contracts \
+    inventory notifications orders payments
+
+COPY observability/build.gradle.kts observability/build.gradle.kts
+COPY security-support/build.gradle.kts security-support/build.gradle.kts
+COPY money-path-contracts/build.gradle.kts money-path-contracts/build.gradle.kts
+
+# Cache the wrapper, plugins, and compiled buildSrc logic independently of the target service.
+RUN ./gradlew --no-daemon help
+
+ARG SERVICE
+COPY ${SERVICE}/build.gradle.kts ${SERVICE}/build.gradle.kts
+
+# Resolve the target service's production artifacts before source changes can invalidate the layer.
+RUN ./gradlew --no-daemon ":${SERVICE}:resolveProductionDependencies"
+
+COPY observability/src observability/src
+COPY security-support/src security-support/src
+COPY money-path-contracts/src money-path-contracts/src
+COPY ${SERVICE}/src ${SERVICE}/src
 
 RUN ./gradlew --no-daemon ":${SERVICE}:bootJar"
 

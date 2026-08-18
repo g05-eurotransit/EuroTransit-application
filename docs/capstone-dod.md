@@ -15,9 +15,12 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
 - [ ] Inventory uses the selected Strong CP / PC-EC consistency model.
 - [ ] The "never oversell" invariant is implemented with atomic 10-minute seat holds or an equivalent reservation state machine.
 - [ ] Payment is attempted only after Inventory creates a valid hold.
+- [ ] After payment authorization, Inventory atomically transitions the still-valid reservation `HELD -> CONFIRMED` and its seats `HELD -> SOLD` before Orders becomes `CONFIRMED`.
 - [ ] Holds expire after 10 minutes or are released when payment fails/cancels.
+- [ ] Concurrent confirmation, expiration, and release prove that exactly one transition wins and that confirmed/sold seats are never released by hold cleanup.
 - [ ] Orders, Inventory, and Payments persist idempotency keys and return stable outcomes for duplicate requests/events.
 - [ ] Duplicate `order-placed` events and retried payment authorizations cannot double-reserve or double-charge.
+- [ ] A delayed hold replay returns the reservation's current state and cannot return stale `HELD` or create a second reservation for the same order.
 
 ## 3. Resilience Engineering
 
@@ -25,6 +28,7 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
 - [ ] Bulkheads isolate checkout resources from unrelated traffic.
 - [ ] Every remote call has timeout and bounded retry policy with backoff and jitter.
 - [ ] Overload is handled with controlled refusal or load shedding rather than unbounded queues.
+- [ ] Unknown confirmation and payment outcomes preserve the durable Orders phase; exhausted Kafka retries create a reconciliation record and can be safely redriven.
 - [ ] Notifications can be killed while checkout still succeeds after reservation and payment.
 - [ ] Kubernetes startup/readiness/liveness probes and PodDisruptionBudgets are deliberately configured.
 - [ ] Liveness probes do not fail because of transient downstream dependency failures.

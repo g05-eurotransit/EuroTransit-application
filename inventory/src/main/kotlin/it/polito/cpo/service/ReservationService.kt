@@ -1,0 +1,399 @@
+package it.polito.cpo.service
+
+import io.r2dbc.postgresql.codec.Json
+import tools.jackson.databind.ObjectMapper
+import it.polito.cpo.contracts.events.InventoryFailedEvent
+import it.polito.cpo.contracts.events.InventoryFailedPayload
+import it.polito.cpo.contracts.events.InventoryReservedEvent
+import it.polito.cpo.contracts.events.InventoryReservedPayload
+import it.polito.cpo.contracts.inventory.ReservationRequest
+import it.polito.cpo.contracts.inventory.ReservationResponse
+import it.polito.cpo.contracts.inventory.ReservationStatus
+import it.polito.cpo.model.IdempotencyRecord
+import it.polito.cpo.model.Reservation
+import it.polito.cpo.observability.ApiException
+import it.polito.cpo.repository.IdempotencyRecordRepository
+import it.polito.cpo.repository.ReservationRepository
+import it.polito.cpo.repository.SeatRepository
+import io.micrometer.core.instrument.MeterRegistry
+import org.springframework.http.HttpStatus
+import org.springframework.stereotype.Service
+import java.security.MessageDigest
+import java.util.UUID
+import it.polito.cpo.model.OutboxEvent
+import it.polito.cpo.repository.OutboxEventRepository
+import org.springframework.transaction.reactive.TransactionalOperator
+import org.springframework.transaction.reactive.executeAndAwait
+import org.slf4j.LoggerFactory
+import org.springframework.dao.DuplicateKeyException
+import kotlinx.coroutines.flow.toList
+
+@Service
+class ReservationService(
+    private val seatRepository: SeatRepository,
+    private val reservationRepository: ReservationRepository,
+    private val idempotencyRecordRepository: IdempotencyRecordRepository,
+    private val outboxEventRepository: OutboxEventRepository,
+    private val objectMapper: ObjectMapper,
+    private val transactionalOperator: TransactionalOperator,
+    private val meterRegistry: MeterRegistry,
+) {
+    private val logger = LoggerFactory.getLogger(ReservationService::class.java)
+
+    /**
+     * Generates the SHA-256 fingerprint of the normalized reservation request payload.
+     */
+    private fun generateFingerprint(request: ReservationRequest): String {
+        // Canonize the seats order and remove duplicates to prevent false conflicts
+        val canonicalRequest = request.copy(seats = request.seats.distinct().sorted())
+        val json = objectMapper.writeValueAsString(canonicalRequest)
+        val digest = MessageDigest.getInstance("SHA-256").digest(json.toByteArray())
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * Holds the requested seats, creates the reservation record, outbox event, and idempotency entry.
+     */
+    suspend fun reserveSeats(
+        idempotencyKey: String,
+        principalId: String,
+        correlationId: String,
+        request: ReservationRequest
+    ): ReservationResponse {
+        
+        val fingerprint = generateFingerprint(request)
+        
+        // Fast-path check
+        val existingRecord = idempotencyRecordRepository.findByKeyAndPrincipal(idempotencyKey, principalId)
+        if (existingRecord != null) {
+            return processExistingRecord(existingRecord, fingerprint, idempotencyKey)
+        }
+
+        // Increment only for logical attempts, not cached retries
+        meterRegistry.counter("inventory.holds.attempted").increment()
+
+        val reservationId = UUID.randomUUID().toString()
+
+        try {
+            val response = transactionalOperator.executeAndAwait {
+                val dbNow = reservationRepository.getCurrentTimestamp()
+                val expiresAt = dbNow.plusMinutes(10)
+
+                val distinctSeats = request.seats.distinct()
+                val rowsUpdated = if (distinctSeats.isEmpty()) {
+                    0
+                } else {
+                    seatRepository.holdSeats(request.routeId, distinctSeats, reservationId, distinctSeats.size)
+                }
+                val success = distinctSeats.isNotEmpty() && rowsUpdated == distinctSeats.size
+                val status = if (success) ReservationStatus.HELD else ReservationStatus.FAILED
+
+                if (success) {
+                    val reservation = Reservation(
+                        reservationId = reservationId,
+                        orderId = request.orderId,
+                        routeId = request.routeId,
+                        status = status.name,
+                        expiresAt = expiresAt
+                    )
+                    reservationRepository.save(reservation)
+                }
+
+                val storedResponse = ReservationResponse(
+                    reservationId = reservationId,
+                    status = status,
+                    expiresAt = expiresAt.toLocalDateTime()
+                )
+
+                val idempotencyRecord = IdempotencyRecord(
+                    idempotencyKey = idempotencyKey,
+                    principalId = principalId,
+                    operation = "RESERVE",
+                    requestFingerprint = fingerprint,
+                    responseStatusCode = if (success) 201 else 409,
+                    responseBody = Json.of(objectMapper.writeValueAsString(storedResponse))
+                )
+                idempotencyRecordRepository.save(idempotencyRecord)
+
+                // 2. Save Outbox Event inside the transaction
+                if (success) {
+                    logger.info("Successfully reserved seats for order: {} by principal: {}", request.orderId, principalId)
+                    val event = InventoryReservedEvent(
+                        correlationId = correlationId,
+                        orderId = request.orderId,
+                        principalId = principalId,
+                        payload = InventoryReservedPayload(
+                            reservationId = reservationId,
+                            routeId = request.routeId,
+                            expiresAt = expiresAt.toLocalDateTime()
+                        )
+                    )
+                    val outboxEvent = OutboxEvent(
+                        aggregateType = "Inventory",
+                        aggregateId = request.orderId.toString(),
+                        type = "inventory-reserved",
+                        payload = Json.of(objectMapper.writeValueAsString(event))
+                    )
+                    outboxEventRepository.save(outboxEvent)
+                } else {
+                    logger.info("Failed to reserve seats for order: {} by principal: {}", request.orderId, principalId)
+                    val event = InventoryFailedEvent(
+                        correlationId = correlationId,
+                        orderId = request.orderId,
+                        principalId = principalId,
+                        payload = InventoryFailedPayload(
+                            reason = "Seats unavailable or already held"
+                        )
+                    )
+                    val outboxEvent = OutboxEvent(
+                        aggregateType = "Inventory",
+                        aggregateId = request.orderId.toString(),
+                        type = "inventory-failed",
+                        payload = Json.of(objectMapper.writeValueAsString(event))
+                    )
+                    outboxEventRepository.save(outboxEvent)
+                }
+
+                storedResponse
+            }
+
+            if (response.status == ReservationStatus.HELD) {
+                meterRegistry.counter("inventory.holds.successful").increment()
+            } else {
+                meterRegistry.counter("inventory.holds.rejected").increment()
+            }
+
+            return response
+        } catch (_: DuplicateKeyException) {
+            val concurrentRecord = idempotencyRecordRepository.findByKeyAndPrincipal(idempotencyKey, principalId)
+            if (concurrentRecord != null) {
+                logger.info("Concurrent request detected for idempotency key: {}. Falling back to cached response.", idempotencyKey)
+                return processExistingRecord(concurrentRecord, fingerprint, idempotencyKey)
+            }
+
+            val existingReservation = reservationRepository.findByOrderId(request.orderId)
+            if (existingReservation != null) {
+                logger.warn("Reservation already exists for order: {} (status: {}). Handled DuplicateKeyException on order_id constraint.", request.orderId, existingReservation.status)
+                throw ApiException(
+                    status = HttpStatus.CONFLICT,
+                    code = "ORDER_ALREADY_RESERVED",
+                    message = "A reservation already exists for order ${request.orderId} (status: ${existingReservation.status})",
+                    details = mapOf(
+                        "reservationId" to existingReservation.reservationId,
+                        "status" to existingReservation.status
+                    )
+                )
+            }
+
+            throw ApiException(
+                HttpStatus.INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Idempotency record lost after DuplicateKeyException"
+            )
+        }
+    }
+
+    /**
+     * Processes a stored idempotency record and returns the cached reservation response.
+     */
+    private suspend fun processExistingRecord(
+        existingRecord: IdempotencyRecord,
+        fingerprint: String,
+        idempotencyKey: String
+    ): ReservationResponse {
+        if (existingRecord.requestFingerprint != fingerprint) {
+            throw ApiException(
+                status = HttpStatus.CONFLICT,
+                code = "IDEMPOTENCY_CONFLICT",
+                message = "Idempotency key reused with a different payload"
+            )
+        }
+
+        meterRegistry.counter("inventory.idempotency.hits").increment()
+        if (existingRecord.responseBody != null) {
+            logger.info("Returning cached reservation response for idempotency key: {}", idempotencyKey)
+            val response = objectMapper.readValue(
+                existingRecord.responseBody.asString(),
+                ReservationResponse::class.java
+            )
+
+            if (response.status == ReservationStatus.HELD) {
+                val currentReservation = reservationRepository.findByReservationId(response.reservationId)
+                if (currentReservation != null) {
+                    if (currentReservation.status == "EXPIRED") {
+                        logger.warn("Idempotency hit for reservation {} but it has expired in DB.", response.reservationId)
+                        throw ApiException(
+                            status = HttpStatus.CONFLICT,
+                            code = "RESERVATION_EXPIRED",
+                            message = "The reservation hold has expired"
+                        )
+                    }
+                    if (currentReservation.status == "CANCELLED") {
+                        logger.warn("Idempotency hit for reservation {} but it was cancelled in DB.", response.reservationId)
+                        throw ApiException(
+                            status = HttpStatus.CONFLICT,
+                            code = "RESERVATION_CANCELLED",
+                            message = "The reservation hold was cancelled"
+                        )
+                    }
+                    if (currentReservation.status == "CONFIRMED") {
+                        logger.info("Idempotency hit for reservation {} but it is already CONFIRMED in DB.", response.reservationId)
+                        return ReservationResponse(
+                            reservationId = currentReservation.reservationId,
+                            status = ReservationStatus.CONFIRMED,
+                            expiresAt = currentReservation.expiresAt.toLocalDateTime()
+                        )
+                    }
+                    if (currentReservation.status == "HELD" && !currentReservation.expiresAt.isAfter(reservationRepository.getCurrentTimestamp())) {
+                        logger.warn("Idempotency hit for reservation {} but it has logically expired.", response.reservationId)
+                        throw ApiException(
+                            status = HttpStatus.CONFLICT,
+                            code = "RESERVATION_EXPIRED",
+                            message = "The reservation hold has expired"
+                        )
+                    }
+                }
+            }
+            
+            return response
+        }
+        throw ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Idempotency record in invalid state")
+    }
+
+    /**
+     * Confirms a held reservation and transitions its seats to sold.
+     */
+    suspend fun confirmReservation(reservationId: String, orderId: UUID): ReservationResponse {
+        var apiExceptionToThrow: ApiException? = null
+        var isNewlyConfirmed = false
+
+        val response = transactionalOperator.executeAndAwait {
+            val reservation = reservationRepository.findByReservationIdForUpdate(reservationId) ?: throw ApiException(
+                HttpStatus.NOT_FOUND,
+                "RESERVATION_NOT_FOUND",
+                "Reservation not found"
+            )
+
+            if (reservation.orderId != orderId) {
+                throw ApiException(HttpStatus.CONFLICT, "RESERVATION_ORDER_CONFLICT", "Reservation belongs to another order")
+            }
+
+            if (reservation.status == ReservationStatus.CONFIRMED.name) {
+                return@executeAndAwait ReservationResponse(
+                    reservationId,
+                    ReservationStatus.CONFIRMED,
+                    reservation.expiresAt.toLocalDateTime()
+                )
+            }
+
+            if (reservation.status == ReservationStatus.EXPIRED.name) {
+                throw ApiException(HttpStatus.CONFLICT, "RESERVATION_EXPIRED", "Reservation has expired")
+            }
+
+            if (reservation.status == ReservationStatus.CANCELLED.name) {
+                throw ApiException(HttpStatus.CONFLICT, "RESERVATION_CANCELLED", "Reservation was cancelled")
+            }
+
+            // It is HELD. Verify expiration in real-time with the DB clock
+            if (!reservation.expiresAt.isAfter(reservationRepository.getCurrentTimestamp())) {
+                val expiredReservation = reservation.copy(status = "EXPIRED", isNewRecord = false)
+                reservationRepository.save(expiredReservation)
+                seatRepository.releaseSeats(reservationId)
+                apiExceptionToThrow = ApiException(HttpStatus.CONFLICT, "RESERVATION_EXPIRED", "Reservation has expired")
+                return@executeAndAwait null
+            }
+
+            val expectedSeats = seatRepository.countByReservationId(reservationId)
+            val updatedSeats = seatRepository.confirmSeats(reservationId)
+
+            if (updatedSeats.toLong() != expectedSeats) {
+                throw ApiException(HttpStatus.CONFLICT, "RESERVATION_SEAT_CONFLICT", "Seat count mismatch during confirmation")
+            }
+
+            val confirmedReservation = reservation.copy(status = "CONFIRMED", isNewRecord = false)
+            reservationRepository.save(confirmedReservation)
+            isNewlyConfirmed = true
+
+            ReservationResponse(
+                reservationId,
+                ReservationStatus.CONFIRMED,
+                reservation.expiresAt.toLocalDateTime()
+            )
+        }
+
+        if (apiExceptionToThrow != null) {
+            meterRegistry.counter("inventory.holds.expired").increment()
+            throw apiExceptionToThrow
+        }
+
+        if (isNewlyConfirmed) {
+            meterRegistry.counter("inventory.holds.confirmed").increment()
+        }
+
+        return response!!
+    }
+
+    /**
+     * Cancels a held reservation and releases its associated seats.
+     */
+    suspend fun releaseReservation(reservationId: String) {
+        var released = false
+        transactionalOperator.executeAndAwait {
+            val rowsUpdated = reservationRepository.cancelIfHeld(reservationId)
+            
+            if (rowsUpdated > 0) {
+                logger.info("Releasing seats for cancelled reservation: {}", reservationId)
+                seatRepository.releaseSeats(reservationId)
+                released = true
+            } else {
+                logger.info("Ignored release request for reservation: {} (not found, already cancelled, or not HELD)", reservationId)
+            }
+        }
+        if (released) {
+            meterRegistry.counter("inventory.holds.released").increment()
+        }
+    }
+
+    /**
+     * Marks expired held reservations as expired and releases their seats.
+     */
+    suspend fun sweepExpiredReservations(): Int {
+        var count = 0
+        try {
+            transactionalOperator.executeAndAwait {
+                val expiredReservations = reservationRepository.expireAndReturn().toList()
+                if (expiredReservations.isNotEmpty()) {
+                    val reservationIds = expiredReservations.map { it.reservationId }
+                    seatRepository.releaseSeatsForReservations(reservationIds)
+                    count = expiredReservations.size
+                    logger.info("Swept and expired {} reservations, seats released in batch: {}", count, reservationIds)
+                }
+            }
+            if (count > 0) {
+                meterRegistry.counter("inventory.holds.expired").increment(count.toDouble())
+            }
+        } catch (e: Exception) {
+            logger.error("Failed during atomic sweepExpiredReservations", e)
+            meterRegistry.counter("inventory.holds.sweep.errors").increment()
+        }
+        return count
+    }
+
+    /**
+     * Deletes idempotency records created before the specified retention cutoff.
+     */
+    suspend fun purgeExpiredIdempotency(retentionMinutes: Long = 30): Int {
+        var count = 0
+        try {
+            val cutoff = reservationRepository.getCurrentTimestamp().minusMinutes(retentionMinutes)
+            count = idempotencyRecordRepository.deleteByCreatedAtBefore(cutoff)
+            if (count > 0) {
+                meterRegistry.counter("inventory.idempotency.purged").increment(count.toDouble())
+            }
+        } catch (e: Exception) {
+            logger.error("Failed during purgeExpiredIdempotency", e)
+            meterRegistry.counter("inventory.idempotency.purge.errors").increment()
+        }
+        return count
+    }
+}

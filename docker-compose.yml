@@ -2,24 +2,243 @@ version: '3.8'
 
 services:
   # ==========================================
+  # Frontend (React SPA, served by nginx behind Traefik at the site root)
+  # ==========================================
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Public, non-secret build config (07b slide 25). Keycloak stays reachable at the
+        # host-facing 8081 for the browser redirect; API is same-origin via the gateway.
+        VITE_KEYCLOAK_ISSUER: http://localhost:8081/realms/eurotransit
+        VITE_KEYCLOAK_CLIENT_ID: eurotransit-frontend
+        VITE_API_BASE: /api
+    image: eurotransit/frontend:local
+    container_name: eurotransit-frontend
+    expose:
+      - "8080"
+    labels:
+      - "traefik.enable=true"
+      # Lowest priority: API routers (/api/*) match first; the SPA catches everything else.
+      - "traefik.http.routers.frontend.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.frontend.priority=1"
+      - "traefik.http.routers.frontend.entrypoints=web"
+      - "traefik.http.services.frontend.loadbalancer.server.port=8080"
+
+  # ==========================================
+  # Application Services
+  # ==========================================
+  catalog:
+    build:
+      context: .
+      args:
+        SERVICE: catalog
+    image: eurotransit/catalog:local
+    container_name: eurotransit-catalog
+    environment:
+      SERVER_PORT: 8080
+      MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: "true"
+      MANAGEMENT_OTLP_METRICS_EXPORT_ENABLED: "false"
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8081/realms/eurotransit
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/eurotransit/protocol/openid-connect/certs
+    expose:
+      - "8080"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.catalog.rule=PathPrefix(`/api/catalog`)"
+      - "traefik.http.routers.catalog.entrypoints=web"
+      - "traefik.http.services.catalog.loadbalancer.server.port=8080"
+
+  orders:
+    build:
+      context: .
+      args:
+        SERVICE: orders
+    image: eurotransit/orders:local
+    container_name: eurotransit-orders
+    environment:
+      SERVER_PORT: 8080
+      MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: "true"
+      MANAGEMENT_HEALTH_R2DBC_ENABLED: "false"
+      MANAGEMENT_OTLP_METRICS_EXPORT_ENABLED: "false"
+      # DB connection parts: application.yaml composes BOTH the R2DBC (runtime) and the
+      # Flyway (startup/JDBC) URLs from these. Setting only SPRING_R2DBC_URL would leave
+      # Flyway on its localhost default and it would fail to connect. See conventions.md.
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: orders_db
+      DB_USER: orders
+      DB_PASSWORD: password
+      # In-network broker (compose PLAINTEXT listener); without it the producer falls back
+      # to localhost, which does not resolve inside a container.
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8081/realms/eurotransit
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/eurotransit/protocol/openid-connect/certs
+      # Service-to-service: obtain the ROLE_service token from the in-network Keycloak.
+      # iss is kept consistent (localhost:8081) by KC_HOSTNAME_URL on the keycloak service.
+      ORDERS_SERVICE_TOKEN_URI: http://keycloak:8080/realms/eurotransit/protocol/openid-connect/token
+      EUROTRANSIT_SERVICES_INVENTORY_URL: http://inventory:8080
+      EUROTRANSIT_SERVICES_PAYMENTS_URL: http://payments:8080
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
+    expose:
+      - "8080"
+    depends_on:
+      postgres-init:
+        condition: service_completed_successfully
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.orders.rule=PathPrefix(`/api/orders`)"
+      - "traefik.http.routers.orders.entrypoints=web"
+      - "traefik.http.routers.orders.middlewares=local-auth-boundary@docker"
+      - "traefik.http.middlewares.local-auth-boundary.headers.customrequestheaders.X-EuroTransit-Auth-Boundary=service-enforced-local-keycloak"
+      - "traefik.http.services.orders.loadbalancer.server.port=8080"
+
+  inventory:
+    build:
+      context: .
+      args:
+        SERVICE: inventory
+    image: eurotransit/inventory:local
+    container_name: eurotransit-inventory
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      SERVER_PORT: 8080
+      MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: "true"
+      MANAGEMENT_HEALTH_R2DBC_ENABLED: "false"
+      MANAGEMENT_OTLP_METRICS_EXPORT_ENABLED: "false"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: inventory_db
+      DB_USER: inventory
+      DB_PASSWORD: password
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8081/realms/eurotransit
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/eurotransit/protocol/openid-connect/certs
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
+    expose:
+      - "8080"
+    depends_on:
+      postgres-init:
+        condition: service_completed_successfully
+    labels:
+      - "traefik.enable=false"
+
+  payments:
+    build:
+      context: .
+      args:
+        SERVICE: payments
+    image: eurotransit/payments:local
+    container_name: eurotransit-payments
+    environment:
+      SERVER_PORT: 8080
+      MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: "true"
+      MANAGEMENT_OTLP_METRICS_EXPORT_ENABLED: "false"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: payments_db
+      DB_USER: payments
+      DB_PASSWORD: password
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8081/realms/eurotransit
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/eurotransit/protocol/openid-connect/certs
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
+      # In-network broker address (compose PLAINTEXT listener). Without it the producer
+      # falls back to localhost, which does not resolve inside a container.
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    expose:
+      - "8080"
+    depends_on:
+      postgres-init:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+    labels:
+      - "traefik.enable=false"
+
+  notifications:
+    build:
+      context: .
+      args:
+        SERVICE: notifications
+    image: eurotransit/notifications:local
+    container_name: eurotransit-notifications
+    environment:
+      SERVER_PORT: 8080
+      MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: "true"
+      MANAGEMENT_OTLP_METRICS_EXPORT_ENABLED: "false"
+      # In-network broker address (the compose PLAINTEXT listener). Without this,
+      # the consumer falls back to localhost, which does not resolve inside a container.
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8081/realms/eurotransit
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/eurotransit/protocol/openid-connect/certs
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
+    expose:
+      - "8080"
+    depends_on:
+      - kafka
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.notifications.rule=PathPrefix(`/api/notifications`)"
+      - "traefik.http.routers.notifications.entrypoints=web"
+      - "traefik.http.services.notifications.loadbalancer.server.port=8080"
+
+  # ==========================================
   # Infrastructure Services
   # ==========================================
   postgres:
     image: postgres:15-alpine
     container_name: eurotransit-postgres
+    command: ["postgres", "-c", "wal_level=logical"]
     environment:
       POSTGRES_USER: eurotransit
       POSTGRES_PASSWORD: password
-      POSTGRES_DB: eurotransit
+      POSTGRES_DB: postgres
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U eurotransit -d eurotransit"]
+      test: ["CMD-SHELL", "pg_isready -U eurotransit -d postgres"]
       interval: 5s
       timeout: 5s
       retries: 5
+
+  postgres-init:
+    image: postgres:15-alpine
+    container_name: eurotransit-postgres-init
+    environment:
+      PGPASSWORD: password
+    command:
+      - sh
+      - -c
+      - |
+        psql -h postgres -U eurotransit -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+        SELECT 'CREATE USER orders WITH PASSWORD ''password'' REPLICATION'
+        WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'orders')\gexec
+
+        SELECT 'CREATE USER inventory WITH PASSWORD ''password'' REPLICATION'
+        WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'inventory')\gexec
+
+        SELECT 'CREATE USER payments WITH PASSWORD ''password'''
+        WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'payments')\gexec
+
+        SELECT 'CREATE DATABASE orders_db OWNER orders'
+        WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'orders_db')\gexec
+
+        SELECT 'CREATE DATABASE inventory_db OWNER inventory'
+        WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'inventory_db')\gexec
+
+        SELECT 'CREATE DATABASE payments_db OWNER payments'
+        WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'payments_db')\gexec
+
+        GRANT ALL PRIVILEGES ON DATABASE orders_db TO orders;
+        GRANT ALL PRIVILEGES ON DATABASE inventory_db TO inventory;
+        GRANT ALL PRIVILEGES ON DATABASE payments_db TO payments;
+        ALTER USER inventory WITH REPLICATION;
+        ALTER USER orders WITH REPLICATION;
+        SQL
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   kafka:
     image: apache/kafka:latest
@@ -47,8 +266,31 @@ services:
     volumes:
       - kafka_data:/var/lib/kafka/data
 
+  debezium:
+    image: quay.io/debezium/connect:2.7.0.Final
+    container_name: eurotransit-debezium
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: 1
+      CONFIG_STORAGE_TOPIC: debezium_configs
+      OFFSET_STORAGE_TOPIC: debezium_offsets
+      STATUS_STORAGE_TOPIC: debezium_statuses
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      # Per comodità di test evitiamo l'uso di schemi espliciti su Kafka
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+    ports:
+      - "8083:8083"
+    depends_on:
+      - kafka
+      - postgres
+
   traefik:
-    image: traefik:v2.10
+    image: traefik:3.6.21
     container_name: eurotransit-traefik
     command:
       - "--api.insecure=true" # Enable dashboard on port 8080
@@ -60,6 +302,64 @@ services:
       - "8080:8080" # Traefik dashboard
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    labels:
+      - "traefik.enable=false"
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: eurotransit-keycloak
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      # Fix the frontend/issuer URL so tokens carry a consistent `iss` regardless of whether
+      # they are obtained via the host (localhost:8081) or the in-network backchannel
+      # (keycloak:8080). Without this, orders' client-credentials token (fetched in-network)
+      # would have iss=keycloak:8080 and be rejected by the resource servers (iss=localhost:8081).
+      KC_HOSTNAME_URL: http://localhost:8081
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./infrastructure/local/keycloak:/opt/keycloak/data/import
+
+
+  # ==========================================
+  # Local Observability Stack
+  # ==========================================
+  prometheus:
+    image: prom/prometheus:v3.4.1
+    container_name: eurotransit-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  tempo:
+    image: grafana/tempo:2.7.2
+    container_name: eurotransit-tempo
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    ports:
+      - "4318:4318" # OTLP HTTP ingest
+      - "3200:3200" # Tempo query API
+    volumes:
+      - ./docker/observability/tempo.yaml:/etc/tempo/tempo.yaml:ro
+
+  grafana:
+    image: grafana/grafana:11.6.1
+    container_name: eurotransit-grafana
+    environment:
+      # Local development only: no login screen.
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./docker/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+      - tempo
 
 volumes:
   postgres_data:

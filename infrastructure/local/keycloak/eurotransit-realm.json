@@ -1,0 +1,89 @@
+{
+  "realm": "eurotransit",
+  "enabled": true,
+  "clients": [
+    {
+      "clientId": "eurotransit-frontend",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "webOrigins": ["*"],
+      "redirectUris": ["*"]
+    },
+    {
+      "clientId": "eurotransit-backend",
+      "enabled": true,
+      "publicClient": false,
+      "bearerOnly": true
+    },
+    {
+      "clientId": "orders-service",
+      "enabled": true,
+      "publicClient": false,
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "secret": "orders-service-secret"
+    }
+  ],
+  "roles": {
+    "realm": [
+      {
+        "name": "customer",
+        "description": "Customer role"
+      },
+      {
+        "name": "operations",
+        "description": "Operations role"
+      },
+      {
+        "name": "service",
+        "description": "Internal service-to-service role"
+      }
+    ]
+  },
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "email": "alice@eurotransit.local",
+      "firstName": "Alice",
+      "lastName": "Customer",
+      "emailVerified": true,
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "alice",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["customer"]
+    },
+    {
+      "username": "admin",
+      "enabled": true,
+      "email": "admin@eurotransit.local",
+      "firstName": "Admin",
+      "lastName": "Operations",
+      "emailVerified": true,
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "admin",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["operations"]
+    },
+    {
+      "username": "service-account-orders-service",
+      "enabled": true,
+      "serviceAccountClientId": "orders-service",
+      "realmRoles": ["service"]
+    }
+  ]
+}

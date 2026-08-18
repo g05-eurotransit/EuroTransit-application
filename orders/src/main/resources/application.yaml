@@ -1,16 +1,106 @@
 spring:
   application:
     name: orders
+  lifecycle:
+    # Bound the graceful-shutdown drain window (api-design.md §Resilience; ADR-007).
+    timeout-per-shutdown-phase: 25s
+  reactor:
+    # Propagate the Reactor context (correlationId) into the logging MDC.
+    context-propagation: auto
+  kafka:
+    # Default matches the EXTERNAL listener docker-compose exposes to the host (9094).
+    # Inside the compose network, SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:9092 overrides this.
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9094}
+    consumer:
+      # Orders consumes its own order-placed event to drive the checkout pipeline durably.
+      group-id: orders
+      auto-offset-reset: earliest
+      # String value + manual parse: decoupled from the producer __TypeId__ header.
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      # Joins the consumer span to the originating checkout trace (money-path tracing).
+      observation-enabled: true
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI:http://localhost:8081/realms/eurotransit}
+          jwk-set-uri: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI:http://localhost:8081/realms/eurotransit/protocol/openid-connect/certs}
+      client:
+        # Service-to-service: obtain a ROLE_service token (client_credentials) to call
+        # inventory/payments. token-uri is set directly (no OIDC discovery at startup).
+        registration:
+          keycloak-service:
+            provider: keycloak
+            authorization-grant-type: client_credentials
+            client-id: ${ORDERS_SERVICE_CLIENT_ID:orders-service}
+            client-secret: ${ORDERS_SERVICE_CLIENT_SECRET:orders-service-secret}
+        provider:
+          keycloak:
+            token-uri: ${ORDERS_SERVICE_TOKEN_URI:http://localhost:8081/realms/eurotransit/protocol/openid-connect/token}
   r2dbc:
-    url: r2dbc:postgresql://localhost:5432/eurotransit
-    username: eurotransit
-    password: password
+    url: r2dbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:eurotransit}
+    username: ${DB_USER:eurotransit}
+    password: ${DB_PASSWORD:password}
+  flyway:
+    enabled: true
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:eurotransit}
+    user: ${DB_USER:eurotransit}
+    password: ${DB_PASSWORD:password}
+    locations: classpath:db/migration
+    baseline-on-migrate: true
 
 server:
   port: 8084
+  # Flip readiness OUT_OF_SERVICE on SIGTERM and drain in-flight work before stopping
+  # (api-design.md §Resilience; ADR-007). The Kafka listener container also stops gracefully.
+  shutdown: graceful
+
+logging:
+  structured:
+    format:
+      console: ecs
 
 management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        # Liveness must NOT depend on downstream (DB/Kafka): only the process itself.
+        liveness:
+          include: livenessState
+        # Readiness reflects ApplicationAvailability; it flips to OUT_OF_SERVICE on graceful shutdown.
+        readiness:
+          include: readinessState
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+        orders.checkout.duration: true
+  tracing:
+    sampling:
+      probability: 1.0
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          endpoint: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:http://localhost:4318/v1/traces}
   otlp:
     metrics:
       export:
         enabled: false
+
+eurotransit:
+  services:
+    inventory:
+      url: http://localhost:8082
+    payments:
+      url: http://localhost:8085

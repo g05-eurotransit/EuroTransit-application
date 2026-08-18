@@ -1,0 +1,23 @@
+:root {
+  font-family: system-ui, -apple-system, sans-serif;
+  color: #1a1a2e;
+  background: #f5f6fa;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+.container { max-width: 880px; margin: 0 auto; padding: 1.5rem; }
+.nav { display: flex; gap: 1rem; align-items: center; padding: 0.75rem 1.5rem; background: #16213e; color: #fff; }
+.nav a { color: #cbd5e1; text-decoration: none; }
+.nav a:hover { color: #fff; }
+.nav .spacer { flex: 1; }
+.card { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem; margin-bottom: 0.75rem; }
+.btn { background: #0f3460; color: #fff; border: 0; border-radius: 6px; padding: 0.5rem 1rem; cursor: pointer; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.status { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.85rem; }
+.status.CONFIRMED { background: #dcfce7; color: #166534; }
+.status.FAILED, .status.CANCELLED { background: #fee2e2; color: #991b1b; }
+.status.ACCEPTED, .status.RESERVING, .status.PAYMENT_PENDING { background: #fef9c3; color: #854d0e; }
+.error { color: #991b1b; }
+.muted { color: #64748b; }
+label { display: block; margin: 0.5rem 0 0.25rem; font-size: 0.9rem; }
+input { width: 100%; padding: 0.4rem; border: 1px solid #cbd5e1; border-radius: 6px; }

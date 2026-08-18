@@ -1,11 +1,72 @@
 spring:
   application:
     name: notifications
+  reactor:
+    # Propagate the Reactor context (correlationId) into the logging MDC.
+    context-propagation: auto
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI:http://localhost:8081/realms/eurotransit}
+          jwk-set-uri: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI:http://localhost:8081/realms/eurotransit/protocol/openid-connect/certs}
+  kafka:
+    # Default matches the EXTERNAL listener docker-compose exposes to the host (9094).
+    # Inside the compose network, SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:9092 overrides this.
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9094}
+    consumer:
+      group-id: notifications
+      auto-offset-reset: earliest
+      # String value: Orders' producer stamps a __TypeId__ header with its own FQCN;
+      # a typed JsonDeserializer would try to load that class and fail. We parse manually.
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      # Joins the consumer span to the originating checkout trace (money-path tracing).
+      observation-enabled: true
 
 server:
   port: 8083
 
+logging:
+  structured:
+    format:
+      # Structured JSON logs (Elastic Common Schema); includes MDC and trace/span ids.
+      console: ecs
+
 management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        # Readiness intentionally does NOT include the Kafka health indicator:
+        # Notifications is best-effort. A Kafka blip must not deroute the pod, or
+        # GET /api/notifications could not serve already-received history from memory.
+        # Liveness stays purely internal (never checks a downstream dependency).
+        readiness:
+          include: readinessState
+        liveness:
+          include: livenessState
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        # Histogram buckets so Prometheus can compute p95/p99.
+        http.server.requests: true
+  tracing:
+    sampling:
+      probability: 1.0
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          endpoint: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:http://localhost:4318/v1/traces}
   otlp:
     metrics:
       export:
