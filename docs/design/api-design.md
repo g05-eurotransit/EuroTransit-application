@@ -224,7 +224,19 @@ Error responses use structured JSON:
 }
 ```
 
-Validation errors may add a machine-readable `details` object, but `code`, `message`, and `correlationId` remain mandatory.
+Validation errors and specific conflicts may add a machine-readable `details` object, but `code`, `message`, and `correlationId` remain mandatory. For example, `ORDER_ALREADY_RESERVED` returns the existing reservation identity:
+
+```json
+{
+  "code": "ORDER_ALREADY_RESERVED",
+  "message": "A reservation already exists for order ord_123 (status: CONFIRMED)",
+  "correlationId": "corr_123",
+  "details": {
+    "reservationId": "res_456",
+    "status": "CONFIRMED"
+  }
+}
+```
 
 ## Money Path
 
