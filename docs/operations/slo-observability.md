@@ -36,6 +36,12 @@ The critical user journey is checkout: client request through gateway, Orders, I
 | InventoryReservationFailures | Reservation failure ratio spikes without matching sold-out signals | Possible inventory consistency or database issue. |
 | KafkaPipelineStalled | Order pipeline consumer lag grows for 15 minutes | Async confirmation/notification is not converging. |
 
+## Metrics Scraping and Network Boundary
+
+Every service permits unauthenticated access to `/actuator/prometheus` and the health probe endpoints so that Prometheus and Kubernetes can reach them without customer OAuth credentials. All other Actuator endpoints remain denied by the shared security baseline.
+
+This does not make service metrics public through the marketplace gateway. No Traefik route forwards `/actuator/**` to an application service: backend routes match `/api/catalog`, `/api/orders`, or `/api/notifications`, while the low-priority host-only fallback targets the frontend. Prometheus scrapes each service endpoint from inside the cluster network.
+
 ## Tracing
 
 Every checkout trace must include:

@@ -19,8 +19,7 @@ class SecurityConfig {
         http
             .applyStatelessApiDefaults()
             .authorizeExchange {
-                it.pathMatchers(*EuroTransitPaths.HEALTH_ENDPOINTS).permitAll()
-                it.pathMatchers("/actuator/prometheus").permitAll()
+                it.pathMatchers(*EuroTransitPaths.UNAUTHENTICATED_ACTUATOR_ENDPOINTS).permitAll()
                 it.pathMatchers("/api/inventory/**").hasAuthority(EuroTransitAuthorities.SERVICE)
                 it.anyExchange().denyAll()
             }

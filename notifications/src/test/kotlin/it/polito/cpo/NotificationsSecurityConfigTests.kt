@@ -46,6 +46,23 @@ class NotificationsSecurityConfigTests @Autowired constructor(
     }
 
     @Test
+    fun `prometheus endpoint permits an unauthenticated internal scrape`() {
+        webTestClient.get()
+            .uri("/actuator/prometheus")
+            .exchange()
+            .expectStatus().isOk
+    }
+
+    @Test
+    fun `other actuator endpoints remain denied`() {
+        webTestClient.get()
+            .uri("/actuator/env")
+            .headers { it.setBearerAuth("operations-token") }
+            .exchange()
+            .expectStatus().isForbidden
+    }
+
+    @Test
     fun `notification APIs reject anonymous requests`() {
         webTestClient.get()
             .uri("/api/notifications")
@@ -93,6 +110,7 @@ class NotificationsSecurityTestConfiguration {
         GET("/api/notifications") { ServerResponse.ok().bodyValue(mapOf("status" to "ok")) }
         // Stands in for the actuator health endpoint, not booted in this web slice.
         GET("/actuator/health/liveness") { ServerResponse.ok().bodyValue(mapOf("status" to "UP")) }
+        GET("/actuator/prometheus") { ServerResponse.ok().bodyValue("test_metric 1") }
     }
 }
 
