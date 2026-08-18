@@ -24,6 +24,14 @@ class SecurityConfig {
                 // widen beyond the cancel action itself. Ownership is enforced in the controller.
                 it.pathMatchers(HttpMethod.POST, "/api/orders/*/cancel")
                     .hasAnyAuthority(EuroTransitAuthorities.CUSTOMER, EuroTransitAuthorities.OPERATIONS)
+                // Internal operator API. hasAuthority(OPERATIONS) and not hasAnyAuthority(..., SERVICE):
+                // a service credential drives automated internal calls and must never be able to
+                // redrive or close a customer's checkout incident. Declared before the GET rule since
+                // these are POSTs and would otherwise fall through to denyAll().
+                it.pathMatchers(HttpMethod.POST, "/api/orders/*/reconciliation/redrive")
+                    .hasAuthority(EuroTransitAuthorities.OPERATIONS)
+                it.pathMatchers(HttpMethod.POST, "/api/orders/*/reconciliation/*/resolve")
+                    .hasAuthority(EuroTransitAuthorities.OPERATIONS)
                 it.pathMatchers(HttpMethod.GET, "/api/orders/**")
                     .hasAnyAuthority(EuroTransitAuthorities.CUSTOMER, EuroTransitAuthorities.OPERATIONS)
                 it.anyExchange().denyAll()

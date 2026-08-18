@@ -22,8 +22,10 @@ import tools.jackson.databind.ObjectMapper
  *   the house style used by the notifications consumer (decoupled from the producer `__TypeId__`).
  * - Seeds the correlation id into both the logging MDC and the Reactor context, so the pipeline's
  *   outbound calls to inventory/payments carry `X-Correlation-Id` and logs stay grep-able by it.
- * - Only unparseable (poison) payloads are swallowed; a processing failure propagates so the
- *   container can retry (recovery). A dead-letter topic is a documented follow-up.
+ * - A processing failure propagates so the container can retry, and an unparseable payload is
+ *   rethrown as a [PoisonEventException], which is classified non-retryable and therefore reaches
+ *   the dead-letter topic immediately. Neither is swallowed: swallowing commits the offset, and a
+ *   committed offset means the record is gone with no trace anywhere.
  * - Emits a low-cardinality counter `orders.events.consumed{topic,result}`.
  */
 @Component
@@ -40,9 +42,11 @@ class OrderPlacedEventListener(
         val event = try {
             objectMapper.readValue(payload, OrderPlacedEvent::class.java)
         } catch (ex: Exception) {
-            log.warn("Discarding unparseable order-placed payload", ex)
-            count("error")
-            return
+            count("poison")
+            // The payload is deliberately not logged: it can carry personal data, and the record key
+            // plus the dead-letter headers are enough to find it again.
+            log.error("Unparseable order-placed payload; routing to the dead-letter topic", ex)
+            throw PoisonEventException("Unparseable order-placed payload", ex)
         }
 
         MDC.putCloseable(CorrelationId.CONTEXT_KEY, event.correlationId).use {

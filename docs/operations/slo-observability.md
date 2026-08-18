@@ -49,6 +49,9 @@ These cover the money-path states introduced by the synchronous Inventory confir
 | InvariantViolation | `increase(orders_reconciliation_required_total{kind="INVARIANT_VIOLATION"}[10m]) > 0` | Inventory reported a state the model says cannot occur. |
 | CheckoutStuckNonTerminal | `max(orders_pipeline_oldest_age_seconds) > checkout recovery SLO` | An order is stranded in `PAYMENT_PENDING`, `CONFIRMING_INVENTORY` or `COMPENSATING`. |
 | InventorySeatConflict | `increase(orders_inventory_confirm_total{code="RESERVATION_SEAT_CONFLICT"}[10m]) > 0` | Seat ownership disagreement between the two services. |
+| ReconciliationAgeHigh | `max(orders_reconciliation_oldest_age_seconds) > incident response SLO` | An incident has been waiting too long, whatever its kind. |
+| PoisonOrderEvent | `increase(orders_events_dlt_total{result="poison"}[10m]) > 0` | A record reached `order-placed-dlt` with a payload that cannot be parsed, so no incident could be attached to an order. |
+| DeadLetterUnknownOrder | `increase(orders_events_dlt_total{result="unknown_order"}[10m]) > 0` | A dead letter referenced an order id that does not exist: producer or data-retention problem. |
 
 **Blocker:** none of these can fire yet. The Orders security chain authorizes only the
 health endpoints and the order APIs, then denies everything else, so

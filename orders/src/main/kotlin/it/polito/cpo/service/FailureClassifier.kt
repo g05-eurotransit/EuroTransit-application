@@ -22,10 +22,30 @@ object FailureClassifier {
     const val CANCELLED = "cancelled"
     const val UNKNOWN = "unknown"
 
+    const val POISON_PAYLOAD = "poison_payload"
+    const val DEPENDENCY_ERROR = "dependency_error"
+
     /**
      * Label for an Inventory business refusal. The enum names are already the frozen SCREAMING_SNAKE
      * codes from the API contract, so lowercasing keeps the label traceable to the wire code with no
      * second mapping table to drift out of sync.
      */
     fun forInventoryRefusal(code: InventoryRefusalCode): String = code.name.lowercase()
+
+    /**
+     * Label for an exhausted delivery, derived from the exception class the dead-letter headers carry.
+     *
+     * Mapped through a closed set rather than passing the class name through: the exception type comes
+     * from a header a producer controls, so using it directly would make the metric cardinality
+     * unbounded and the column unqueryable.
+     */
+    fun forDeadLetter(exceptionFqcn: String?): String = when {
+        exceptionFqcn == null -> UNKNOWN
+        exceptionFqcn.endsWith("PoisonEventException") -> POISON_PAYLOAD
+        exceptionFqcn.endsWith("TimeoutException") -> DEPENDENCY_ERROR
+        exceptionFqcn.contains("WebClient") -> DEPENDENCY_ERROR
+        exceptionFqcn.contains("CallNotPermitted") -> DEPENDENCY_ERROR
+        exceptionFqcn.contains("R2dbc") || exceptionFqcn.contains("DataAccess") -> DEPENDENCY_ERROR
+        else -> UNKNOWN
+    }
 }

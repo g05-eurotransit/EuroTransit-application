@@ -627,14 +627,8 @@ class CheckoutOrchestrator(
         ),
     )
 
-    // Builds an outbox row carrying the serialized event as its JSON payload. Debezium's EventRouter
-    // routes by the `type` column to the matching topic and keys by `aggregate_id` (the order id).
-    private fun outbox(type: String, orderId: UUID, event: Any): OutboxEvent = OutboxEvent(
-        aggregateType = "Order",
-        aggregateId = orderId.toString(),
-        type = type,
-        payload = Json.of(objectMapper.writeValueAsString(event)),
-    )
+    private fun outbox(type: String, orderId: UUID, event: Any): OutboxEvent =
+        orderOutboxRow(objectMapper, type, orderId, event)
 
     // Delivery address for the notification, captured at checkout from the JWT `email` claim. If the
     // token had no email, fall back to a placeholder and warn — the checkout must not fail for this.
