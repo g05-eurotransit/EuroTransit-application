@@ -7,6 +7,7 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.retry.RetryConfig
 import io.github.resilience4j.retry.RetryRegistry
 import io.github.resilience4j.core.IntervalFunction
+import it.polito.cpo.client.DefinitiveRefusal
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.web.reactive.function.client.WebClientRequestException
@@ -19,8 +20,13 @@ import java.util.concurrent.TimeoutException
  * WebClient reactive chains. Deliberately NOT `ofDefaults()`: the defaults (minimumNumberOfCalls=100,
  * 60s open state, retry-on-everything) never trip at checkout volumes and would retry business
  * declines / 4xx. Values are a starting point, tuned per dependency and meant to be adjusted after
- * load testing. Note: a payment *decline* is an HTTP 200 with status=DECLINED (not an exception),
- * so it never counts as a circuit-breaker failure; only transport faults / timeouts / 5xx do.
+ * load testing.
+ *
+ * Business refusals must not count as circuit-breaker failures. That needs saying explicitly because
+ * the money-path services answer them with a 4xx, not a 200: Payments maps DECLINED to 422 and
+ * IDEMPOTENCY_CONFLICT to 409, and Inventory raises 404/409 for the reservation conflicts. The
+ * clients decode those bodies into a [DefinitiveRefusal], so that exception — not the raw
+ * WebClientResponseException — is what the breaker would otherwise see.
  */
 @Configuration
 class ResilienceConfiguration {
@@ -60,8 +66,12 @@ class ResilienceConfiguration {
             .slowCallRateThreshold(50f)
             .waitDurationInOpenState(Duration.ofSeconds(10))
             .permittedNumberOfCallsInHalfOpenState(3)
-            // 4xx means "our request was wrong", not "the dependency is down": don't trip the breaker.
+            // 4xx means "our request was refused on the merits", not "the dependency is down": don't
+            // trip the breaker. DefinitiveRefusal is what the clients actually raise for a decoded
+            // business refusal, so without it a decline storm or a run of seat conflicts would open
+            // the breaker and take the money path down for a reason that is not a fault.
             .ignoreExceptions(
+                DefinitiveRefusal::class.java,
                 WebClientResponseException.BadRequest::class.java,
                 WebClientResponseException.Conflict::class.java,
                 WebClientResponseException.NotFound::class.java,

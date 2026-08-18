@@ -112,15 +112,29 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
   - Returns the current order status: accepted, reserving, payment-pending, confirming-inventory, compensating, confirmed, failed, or cancelled.
   - Requires the authenticated customer to own the order, unless an operator/admin role is used.
   - Returns `404 Not Found` for customer-to-customer access to avoid revealing another customer's order.
+- `POST /api/orders/{orderId}/cancel`
+  - Cancels an order that has not yet started payment authorization, releasing any seat hold.
+  - Requires the authenticated customer to own the order, or an operations role.
+  - Accepted only while the order is `accepted` or `reserving`. From `payment-pending` onward it
+    returns `409 ORDER_NOT_CANCELLABLE`, which is what closes the cancellation race before money
+    moves; post-sale cancellation is a separate business process and cannot use hold release.
 - Orders persists order state in `orders_db`.
 - `POST /api/orders/{orderId}/reconciliation/redrive`
-  - Requires an operations credential and an idempotency key.
-  - Accepts only orders with an open reconciliation record.
+  - Requires an operations credential and an idempotency key. A service credential is refused with
+    `403`: it drives automated internal calls and must not be able to redrive a customer's checkout.
+  - Accepts only orders with an open reconciliation record, otherwise
+    `409 NO_OPEN_RECONCILIATION_RECORD`.
   - Atomically stores the redrive result and writes a new `order-placed` outbox row, then returns `202 Accepted`.
-  - Never modifies Inventory, Payments, or terminal Orders state directly.
+  - A terminal order returns `409 ORDER_ALREADY_TERMINAL` and closes any stale record as it refuses.
+  - Never modifies Inventory, Payments, or terminal Orders state directly. The stored order status is
+    what selects the resume action, so the endpoint holds no knowledge of which stage resumes.
 - `POST /api/orders/{orderId}/reconciliation/{recordId}/resolve`
   - Requires an operations credential, an idempotency key, a terminal order, and an evidence reference.
   - Resolves only an investigated invariant-violation record; it cannot waive payment reversal or change order state.
+  - Refusals: `400 EVIDENCE_REFERENCE_REQUIRED`, `409 ORDER_NOT_TERMINAL`,
+    `404 RECONCILIATION_RECORD_NOT_FOUND` (also when the record belongs to another order, so the API
+    never reveals that one exists elsewhere), `409 RECONCILIATION_KIND_NOT_RESOLVABLE` for a kind that
+    closes automatically, and `409 RECONCILIATION_ALREADY_RESOLVED`.
 
 ### Inventory
 

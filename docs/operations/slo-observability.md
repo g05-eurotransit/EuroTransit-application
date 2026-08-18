@@ -36,11 +36,27 @@ The critical user journey is checkout: client request through gateway, Orders, I
 | InventoryReservationFailures | Reservation failure ratio spikes without matching sold-out signals | Possible inventory consistency or database issue. |
 | KafkaPipelineStalled | Order pipeline consumer lag grows for 15 minutes | Async confirmation/notification is not converging. |
 
-## Metrics Scraping and Network Boundary
+### Reservation confirmation and reconciliation
 
-Every service permits unauthenticated access to `/actuator/prometheus` and the health probe endpoints so that Prometheus and Kubernetes can reach them without customer OAuth credentials. All other Actuator endpoints remain denied by the shared security baseline.
+Proposed for the configuration repository, which owns the `PrometheusRule` objects.
+These cover the money-path states introduced by the synchronous Inventory confirmation
+(`docs/design/reservation-confirmation.md`).
 
-This does not make service metrics public through the marketplace gateway. No Traefik route forwards `/actuator/**` to an application service: backend routes match `/api/catalog`, `/api/orders`, or `/api/notifications`, while the low-priority host-only fallback targets the frontend. Prometheus scrapes each service endpoint from inside the cluster network.
+| Alert | Expression sketch | Why it matters |
+| --- | --- | --- |
+| ReconciliationRecordOpen | `max(orders_reconciliation_open) > 0` for 5m | An incident automatic recovery could not resolve is waiting for an operator. A counter cannot express this: a record open for a week must keep alerting. |
+| PaymentReversalFailure | `increase(orders_reconciliation_required_total{kind="PAYMENT_REVERSAL_FAILURE"}[10m]) > 0` | Money was taken and a reversal definitively failed; the order is deliberately non-terminal. |
+| InvariantViolation | `increase(orders_reconciliation_required_total{kind="INVARIANT_VIOLATION"}[10m]) > 0` | Inventory reported a state the model says cannot occur. |
+| CheckoutStuckNonTerminal | `max(orders_pipeline_oldest_age_seconds) > checkout recovery SLO` | An order is stranded in `PAYMENT_PENDING`, `CONFIRMING_INVENTORY` or `COMPENSATING`. |
+| InventorySeatConflict | `increase(orders_inventory_confirm_total{code="RESERVATION_SEAT_CONFLICT"}[10m]) > 0` | Seat ownership disagreement between the two services. |
+| ReconciliationAgeHigh | `max(orders_reconciliation_oldest_age_seconds) > incident response SLO` | An incident has been waiting too long, whatever its kind. |
+| PoisonOrderEvent | `increase(orders_events_dlt_total{result="poison"}[10m]) > 0` | A record reached `order-placed-dlt` with a payload that cannot be parsed, so no incident could be attached to an order. |
+| DeadLetterUnknownOrder | `increase(orders_events_dlt_total{result="unknown_order"}[10m]) > 0` | A dead letter referenced an order id that does not exist: producer or data-retention problem. |
+
+**Blocker:** none of these can fire yet. The Orders security chain authorizes only the
+health endpoints and the order APIs, then denies everything else, so
+`/actuator/prometheus` is not scrapable. Opening it is a Gateway/Security decision and
+is tracked separately.
 
 ## Tracing
 

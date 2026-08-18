@@ -2,13 +2,15 @@ package it.polito.cpo.service
 
 import io.r2dbc.postgresql.codec.Json
 import tools.jackson.databind.ObjectMapper
+import it.polito.cpo.client.AuthorizationOutcome
+import it.polito.cpo.client.ConfirmReservationOutcome
+import it.polito.cpo.client.HoldOutcome
 import it.polito.cpo.client.InventoryClient
+import it.polito.cpo.client.InventoryRefusalCode
 import it.polito.cpo.client.PaymentClient
+import it.polito.cpo.client.ReversalOutcome
 import it.polito.cpo.contracts.payments.PaymentRequest
-import it.polito.cpo.contracts.payments.PaymentStatus
-import it.polito.cpo.contracts.payments.RefundStatus
 import it.polito.cpo.contracts.inventory.ReservationRequest
-import it.polito.cpo.contracts.inventory.ReservationStatus
 import it.polito.cpo.controller.dtos.CheckoutRequest
 import it.polito.cpo.controller.dtos.CheckoutResponse
 import it.polito.cpo.contracts.events.NotificationRequestedEvent
@@ -31,6 +33,7 @@ import org.springframework.stereotype.Service
 import org.springframework.transaction.reactive.TransactionalOperator
 import org.springframework.transaction.reactive.executeAndAwait
 import java.security.MessageDigest
+import java.time.Duration
 import java.time.LocalDateTime
 import java.util.UUID
 
@@ -41,14 +44,18 @@ import java.util.UUID
  * transaction — persists the order in ACCEPTED, records the caller idempotency record, and writes the
  * `order-placed` outbox row. Debezium relays that outbox row to Kafka, so the DB write and the event
  * are atomic (no dual-write). The reserve -> pay -> confirm pipeline is NOT run inline: it is driven
- * by the `order-placed` Kafka consumer ([processOrderPlaced]) so it survives restarts. Kafka
- * redelivery is at-least-once, so processing is made idempotent by the order state (terminal orders
- * are skipped) and by deriving the downstream idempotency keys from the immutable order id.
+ * by the `order-placed` Kafka consumer ([processOrderPlaced]) so it survives restarts.
  *
- * Forward state transitions in the pipeline use atomic conditional updates guarded by
- * `status <> CANCELLED`, so a concurrent customer cancellation (allowed only while unpaid) can never
- * be clobbered: a cancellation that commits mid-pipeline makes the next transition affect 0 rows,
- * which aborts the pipeline into compensation (release seats + refund if already authorized).
+ * Under at-least-once delivery the pipeline is idempotent because it **dispatches on the durable
+ * order status**, not on where a previous attempt got to in memory. Each phase has exactly one resume
+ * action (docs/design/reservation-confirmation.md:138-144) and the `when` in [runStage] is exhaustive,
+ * so adding a state cannot compile until its resume action is defined.
+ *
+ * The single most important property here is that an **unknown remote outcome never becomes a business
+ * decision** (invariant 8, doc:92). There is deliberately no `catch` around the remote calls: the
+ * clients return sealed outcomes for definitive results only and throw everything else, so a timeout,
+ * a 5xx or an open circuit propagates to the Kafka listener, the offset is not committed, and the
+ * durable phase is left exactly as it was for the next delivery to resume.
  */
 @Service
 class CheckoutOrchestrator(
@@ -56,6 +63,7 @@ class CheckoutOrchestrator(
     private val inventoryClient: InventoryClient,
     private val paymentClient: PaymentClient,
     private val outboxEventRepository: OutboxEventRepository,
+    private val reconciliationService: ReconciliationService,
     private val objectMapper: ObjectMapper,
     private val meterRegistry: MeterRegistry,
     private val txOperator: TransactionalOperator,
@@ -63,7 +71,32 @@ class CheckoutOrchestrator(
     private val logger = LoggerFactory.getLogger(CheckoutOrchestrator::class.java)
 
     private companion object {
-        val TERMINAL_STATES = setOf(OrderStatus.CONFIRMED, OrderStatus.FAILED, OrderStatus.CANCELLED)
+        /**
+         * ACCEPTED -> RESERVING -> PAYMENT_PENDING -> CONFIRMING_INVENTORY -> COMPENSATING -> FAILED
+         * is the longest path. A backstop only: every stage is asserted to advance the state and the
+         * graph is acyclic, so exceeding this is a programming error, and turning it into a loud
+         * exception beats spinning on the consumer thread.
+         */
+        const val MAX_STEPS = 6
+    }
+
+    /** One delivery's working state. [reservationId] is seeded from the row, so a resume needs no lookup. */
+    private class PipelineContext(val order: Order, val correlationId: String) {
+        val orderId: UUID get() = order.id
+        var reservationId: String? = order.reservationId
+        var compensationReason: String? = order.compensationReason
+    }
+
+    /**
+     * The outcome of one stage. Anything not representable here is an exception, which is what keeps
+     * unknown outcomes out of the control flow.
+     */
+    private sealed interface Step {
+        /** A durable transition committed; keep dispatching on [next]. */
+        data class Advance(val next: OrderStatus) : Step
+
+        /** Durable state intentionally left as is. Stop and acknowledge the delivery. */
+        data class Park(val state: OrderStatus, val reason: String) : Step
     }
 
     suspend fun checkout(
@@ -149,9 +182,8 @@ class CheckoutOrchestrator(
     }
 
     /**
-     * Runs the checkout pipeline for one order. Invoked by the `order-placed` consumer.
-     * Idempotent under Kafka at-least-once delivery: terminal orders are skipped, and a
-     * non-terminal order is re-driven from the start relying on the downstream idempotency keys.
+     * Entry point for the `order-placed` consumer. Reads the durable state fresh, so a redelivery
+     * resumes rather than restarting.
      */
     suspend fun processOrderPlaced(event: OrderPlacedEvent) {
         val order = orderService.getOrderById(event.orderId)
@@ -159,205 +191,417 @@ class CheckoutOrchestrator(
             logger.warn("Received order-placed for unknown order: {}", event.orderId)
             return
         }
-        if (order.status in TERMINAL_STATES) {
-            logger.info("Skipping order-placed for order {} already in terminal state {}", event.orderId, order.status)
+        if (order.status.isTerminal) {
+            // doc:144 — acknowledge the duplicate without making any remote call.
+            meterRegistry.counter("orders.checkout.duplicate", "state", order.status.name).increment()
+            logger.info("Skipping order-placed for order {} already terminal in {}", event.orderId, order.status)
             return
         }
-        runPipeline(order, event.correlationId)
+        if (order.status != OrderStatus.ACCEPTED) {
+            meterRegistry.counter("orders.checkout.resumed", "state", order.status.name).increment()
+            logger.info("Resuming checkout for order {} from {}", event.orderId, order.status)
+        }
+        runPipeline(PipelineContext(order, event.correlationId))
     }
 
-    private suspend fun runPipeline(order: Order, correlationId: String) {
-        val orderId = order.id
-        logger.info("Starting checkout pipeline for order: {}", orderId)
-
+    private suspend fun runPipeline(ctx: PipelineContext) {
         val sample = Timer.start(meterRegistry)
-        var outcome = "failed"
-
-        // Step 1: RESERVING. If the order was cancelled before the pipeline picked it up, abort.
-        if (orderService.markReserving(orderId) == 0L) {
-            logger.info("Order {} cancelled before pipeline start; skipping", orderId)
-            sample.stop(meterRegistry.timer("orders.checkout.duration", "outcome", "cancelled"))
-            return
-        }
-
-        var reservationId: String? = null
-        var paymentAuthorized = false
+        val entryState = ctx.order.status
+        var state = entryState
+        var steps = 0
+        logger.info("Running checkout pipeline for order {} from {}", ctx.orderId, entryState)
         try {
-            // Step 2: Call Inventory hold (idempotency key derived from the order id).
-            meterRegistry.counter("orders.inventory.hold.attempt").increment()
-            val reservationResponse = inventoryClient.reserveSeats(
-                ReservationRequest(
-                    orderId = orderId,
-                    seats = order.seats.split(","),
-                    routeId = order.routeId
-                ),
-                idempotencyKey = "inv-$orderId",
-                userId = order.userId
-            )
-
-            if (reservationResponse.status != ReservationStatus.HELD) {
-                throw IllegalStateException("Seat reservation rejected: ${reservationResponse.status}")
-            }
-            reservationId = reservationResponse.reservationId
-
-            // Step 3: PAYMENT_PENDING, persisting the reservation id. Abort if cancelled meanwhile.
-            if (orderService.markPaymentPending(orderId, reservationId) == 0L) {
-                throw IllegalStateException("Order cancelled before payment")
-            }
-
-            // Step 4: Call Payments authorization
-            val paymentToken = order.paymentMethodToken
-                ?: throw IllegalStateException("Missing payment method token for order $orderId")
-            val paymentResponse = paymentClient.authorizePayment(
-                PaymentRequest(
-                    orderId = orderId,
-                    principalId = order.userId,
-                    amount = order.totalAmount,
-                    currency = "EUR",
-                    paymentMethodToken = paymentToken
-                ),
-                idempotencyKey = "pay-$orderId",
-                correlationId = correlationId
-            )
-
-            if (paymentResponse.status != PaymentStatus.AUTHORIZED) {
-                throw IllegalStateException("Payment authorization declined: ${paymentResponse.status}")
-            }
-            paymentAuthorized = true
-
-            // Step 5: CONFIRMED + events, atomically. If the order was cancelled after the payment
-            // was authorized, markConfirmed affects 0 rows -> abort so the catch block refunds.
-            val confirmed = txOperator.executeAndAwait {
-                if (orderService.markConfirmed(orderId) == 0L) {
-                    false
-                } else {
-                    outboxEventRepository.save(
-                        outbox(
-                            "order-confirmed", orderId,
-                            OrderConfirmedEvent(correlationId = correlationId, orderId = orderId, principalId = order.userId),
-                        )
-                    )
-                    outboxEventRepository.save(
-                        outbox(
-                            "notification-requested", orderId,
-                            NotificationRequestedEvent(
-                                correlationId = correlationId,
-                                orderId = orderId,
-                                principalId = order.userId,
-                                payload = NotificationRequestedPayload(
-                                    recipientEmail = recipientEmail(order),
-                                    message = "Your order $orderId has been successfully confirmed!"
-                                )
-                            ),
-                        )
-                    )
-                    true
+            while (!state.isTerminal) {
+                check(steps++ < MAX_STEPS) {
+                    "Checkout pipeline for order ${ctx.orderId} exceeded $MAX_STEPS steps at $state"
                 }
-            }
-            if (confirmed != true) {
-                throw IllegalStateException("Order cancelled before confirmation")
-            }
-
-            outcome = "confirmed"
-            meterRegistry.counter("orders.checkout.completed", "result", "confirmed").increment()
-            logger.info("Successfully confirmed order: {}", orderId)
-
-        } catch (e: Exception) {
-            val reason = classifyFailure(e, paymentAuthorized)
-            outcome = reason
-            meterRegistry.counter("orders.checkout.completed", "result", "failed").increment()
-            meterRegistry.counter("orders.checkout.failed", "reason", reason).increment()
-
-            // Fix #2: money-taken-but-not-confirmed window (incl. a cancellation that landed after
-            // authorization). Issue an automated refund; it is idempotent on the order id, so a Kafka
-            // re-drive is safe. A refund that does not complete is surfaced loudly for reconciliation.
-            if (paymentAuthorized) {
-                try {
-                    val refund = paymentClient.refund(orderId, "refund-$orderId")
-                    if (refund.status == RefundStatus.REFUNDED) {
-                        logger.info("Refund completed for order {} (ref {})", orderId, refund.refundReference)
-                        meterRegistry.counter("orders.refund", "result", "refunded").increment()
-                    } else {
-                        logger.error(
-                            "Refund NOT completed for order {}: {} — manual reconciliation required",
-                            orderId, refund.status,
-                        )
-                        meterRegistry.counter("orders.refund", "result", "failed").increment()
+                when (val step = runStage(state, ctx)) {
+                    is Step.Park -> {
+                        logger.warn("Order {} parked in {}: {}", ctx.orderId, step.state, step.reason)
+                        state = step.state
+                        break
                     }
-                } catch (rex: Exception) {
-                    logger.error("Refund call failed for order {} — manual reconciliation required", orderId, rex)
-                    meterRegistry.counter("orders.refund", "result", "error").increment()
+                    is Step.Advance -> {
+                        // A stage must never return its own input state. With an acyclic state graph
+                        // that is what makes this loop provably terminating.
+                        check(step.next != state) { "Stage $state did not advance order ${ctx.orderId}" }
+                        state = step.next
+                    }
                 }
-            } else {
-                logger.warn("Checkout pipeline failed for order: {}, rolling back. Reason: {}", orderId, e.message)
-            }
-
-            // Compensation: Release Inventory if held (idempotent on inventory; may also be released
-            // by a concurrent cancellation).
-            if (reservationId != null) {
-                try {
-                    logger.info("Executing compensation: releasing seats reservation: {}", reservationId)
-                    inventoryClient.releaseSeats(reservationId, "rel-$orderId")
-                } catch (compEx: Exception) {
-                    logger.error("Failed to release seats for reservation: {} during rollback", reservationId, compEx)
-                }
-            }
-
-            // Mark FAILED + notify, unless the order was cancelled meanwhile (do not clobber CANCELLED).
-            val failed = txOperator.executeAndAwait {
-                if (orderService.markFailed(orderId) == 0L) {
-                    false
-                } else {
-                    outboxEventRepository.save(
-                        outbox(
-                            "notification-requested", orderId,
-                            NotificationRequestedEvent(
-                                correlationId = correlationId,
-                                orderId = orderId,
-                                principalId = order.userId,
-                                payload = NotificationRequestedPayload(
-                                    recipientEmail = recipientEmail(order),
-                                    message = "Your order $orderId failed. Reason: ${e.message}"
-                                )
-                            ),
-                        )
-                    )
-                    true
-                }
-            }
-            if (failed != true) {
-                logger.info("Order {} was cancelled during the pipeline; left CANCELLED after compensation", orderId)
             }
         } finally {
-            sample.stop(meterRegistry.timer("orders.checkout.duration", "outcome", outcome))
+            sample.stop(
+                meterRegistry.timer(
+                    "orders.checkout.duration",
+                    "outcome", state.name.lowercase(),
+                    "entry_state", entryState.name.lowercase(),
+                ),
+            )
+        }
+    }
+
+    private suspend fun runStage(state: OrderStatus, ctx: PipelineContext): Step = when (state) {
+        // doc:140 — ACCEPTED and RESERVING share one resume action: repeat the idempotent hold.
+        OrderStatus.ACCEPTED, OrderStatus.RESERVING -> stageHold(ctx)
+        OrderStatus.PAYMENT_PENDING -> stageAuthorize(ctx)
+        OrderStatus.CONFIRMING_INVENTORY -> stageConfirmInventory(ctx)
+        OrderStatus.COMPENSATING -> stageCompensate(ctx)
+        OrderStatus.CONFIRMED, OrderStatus.FAILED, OrderStatus.CANCELLED ->
+            error("unreachable: terminal states are filtered by the loop")
+    }
+
+    // --- stages -----------------------------------------------------------------------------------
+
+    private suspend fun stageHold(ctx: PipelineContext): Step {
+        if (orderService.markReserving(ctx.orderId) == 0L) {
+            logger.info("Order {} cancelled before the hold; skipping", ctx.orderId)
+            return Step.Advance(OrderStatus.CANCELLED)
+        }
+
+        meterRegistry.counter("orders.inventory.hold.attempt").increment()
+        val outcome = inventoryClient.reserveSeats(
+            ReservationRequest(
+                orderId = ctx.orderId,
+                seats = ctx.order.seats.split(","),
+                routeId = ctx.order.routeId,
+            ),
+            idempotencyKey = "inv-${ctx.orderId}",
+            userId = ctx.order.userId,
+        )
+
+        return when (outcome) {
+            is HoldOutcome.Rejected -> {
+                countHold("rejected", outcome.code.name)
+                // No money exists yet, so there is nothing to reverse and nothing to release.
+                failUnpaid(ctx, FailureClassifier.forInventoryRefusal(outcome.code), releaseHold = false)
+            }
+            is HoldOutcome.Held -> {
+                countHold("held", "none")
+                ctx.reservationId = outcome.reservationId
+                if (orderService.markPaymentPending(ctx.orderId, outcome.reservationId) == 0L) {
+                    // doc:298 — a cancellation won the race while the hold was in flight. The order is
+                    // CANCELLED with no reservation id stored, so the pipeline is the only place that
+                    // can release this hold.
+                    logger.info("Order {} cancelled while the hold was in flight; releasing", ctx.orderId)
+                    releaseHold(ctx, outcome.reservationId)
+                    return Step.Advance(OrderStatus.CANCELLED)
+                }
+                Step.Advance(OrderStatus.PAYMENT_PENDING)
+            }
+        }
+    }
+
+    private suspend fun stageAuthorize(ctx: PipelineContext): Step {
+        val paymentToken = ctx.order.paymentMethodToken
+        if (paymentToken == null) {
+            logger.error("Order {} reached authorization without a payment token", ctx.orderId)
+            return failUnpaid(ctx, FailureClassifier.PAYMENT_TOKEN_MISSING, releaseHold = true)
+        }
+
+        val outcome = paymentClient.authorizePayment(
+            PaymentRequest(
+                orderId = ctx.orderId,
+                principalId = ctx.order.userId,
+                amount = ctx.order.totalAmount,
+                currency = "EUR",
+                paymentMethodToken = paymentToken,
+            ),
+            idempotencyKey = "pay-${ctx.orderId}",
+            correlationId = ctx.correlationId,
+        )
+
+        return when (outcome) {
+            is AuthorizationOutcome.Declined -> {
+                meterRegistry.counter("orders.payment.authorize", "result", "declined").increment()
+                // doc:299 — a definitive decline releases the hold and fails the order.
+                failUnpaid(ctx, FailureClassifier.PAYMENT_DECLINED, releaseHold = true)
+            }
+            is AuthorizationOutcome.Authorized -> {
+                meterRegistry.counter("orders.payment.authorize", "result", "authorized").increment()
+                if (orderService.markConfirmingInventory(ctx.orderId) == 0L) {
+                    // Cancellation is refused from PAYMENT_PENDING onward, so nothing legitimate can
+                    // move the row here. Unknown, not a business failure: leave the money authorized
+                    // and let redelivery converge.
+                    throw IllegalStateException(
+                        "Order ${ctx.orderId}: payment authorized but the order left PAYMENT_PENDING unexpectedly",
+                    )
+                }
+                Step.Advance(OrderStatus.CONFIRMING_INVENTORY)
+            }
+        }
+    }
+
+    private suspend fun stageConfirmInventory(ctx: PipelineContext): Step {
+        val reservationId = ctx.reservationId
+            ?: throw IllegalStateException(
+                "Order ${ctx.orderId}: CONFIRMING_INVENTORY without a stored reservation id",
+            )
+
+        meterRegistry.counter("orders.inventory.confirm.attempt").increment()
+        // An unknown outcome throws out of here. The durable state stays CONFIRMING_INVENTORY, the
+        // offset is not committed, and doc:303 ("do not refund or release") holds structurally
+        // because there is no catch block to do it.
+        val outcome = inventoryClient.confirmReservation(reservationId, ctx.orderId)
+
+        return when (outcome) {
+            is ConfirmReservationOutcome.Confirmed -> {
+                countConfirm("confirmed", "none")
+                commitConfirmed(ctx)
+            }
+            is ConfirmReservationOutcome.Refused -> {
+                countConfirm("refused", outcome.code.name)
+                enterCompensating(ctx, outcome.code, outcome.detail)
+            }
         }
     }
 
     /**
-     * Cancels an order — allowed only while it is unpaid (ACCEPTED/RESERVING/PAYMENT_PENDING). Once
-     * CONFIRMED the order is paid and cannot be cancelled. Ownership is enforced by the controller.
-     * Returns the cancelled order. Throws [ApiException] 409 if the order is not cancellable.
+     * doc:289-291 step 8: the order becomes CONFIRMED and BOTH final outbox rows are written in ONE
+     * transaction, only after Inventory committed CONFIRMED + SOLD.
+     *
+     * Invariant 7 (`order-confirmed` only after the sale) holds structurally: this method is reachable
+     * only from the [ConfirmReservationOutcome.Confirmed] arm above, and that arm has no edge to
+     * compensation.
+     */
+    private suspend fun commitConfirmed(ctx: PipelineContext): Step {
+        val committed = txOperator.executeAndAwait {
+            if (orderService.markConfirmed(ctx.orderId) == 0L) {
+                false
+            } else {
+                outboxEventRepository.save(
+                    outbox(
+                        "order-confirmed", ctx.orderId,
+                        OrderConfirmedEvent(
+                            correlationId = ctx.correlationId,
+                            orderId = ctx.orderId,
+                            principalId = ctx.order.userId,
+                        ),
+                    )
+                )
+                outboxEventRepository.save(
+                    outbox(
+                        "notification-requested", ctx.orderId,
+                        NotificationRequestedEvent(
+                            correlationId = ctx.correlationId,
+                            orderId = ctx.orderId,
+                            principalId = ctx.order.userId,
+                            payload = NotificationRequestedPayload(
+                                recipientEmail = recipientEmail(ctx.order),
+                                message = "Your order ${ctx.orderId} has been successfully confirmed!",
+                            ),
+                        ),
+                    )
+                )
+                reconciliationService.closeAutoResolvable(ctx.orderId)
+                true
+            }
+        }
+
+        if (committed == true) {
+            meterRegistry.counter("orders.checkout.completed", "result", "confirmed").increment()
+            recordEndToEnd(ctx, "confirmed")
+            logger.info("Successfully confirmed order {}", ctx.orderId)
+            return Step.Advance(OrderStatus.CONFIRMED)
+        }
+
+        // markConfirmed has no self-transition, so 0 rows means either a concurrent delivery already
+        // committed this order (idempotent: the outbox rows exist exactly once) or the row is in an
+        // unexpected state, which is unknown and must be redriven rather than compensated.
+        val current = orderService.getOrderById(ctx.orderId)?.status
+        if (current == OrderStatus.CONFIRMED) {
+            meterRegistry.counter("orders.checkout.duplicate", "state", OrderStatus.CONFIRMED.name).increment()
+            return Step.Advance(OrderStatus.CONFIRMED)
+        }
+        throw IllegalStateException(
+            "Order ${ctx.orderId}: Inventory confirmed the sale but the local commit affected 0 rows (state=$current)",
+        )
+    }
+
+    /**
+     * Moves into COMPENSATING, writing an INVARIANT_VIOLATION record in the SAME transaction when the
+     * refusal describes a state that should not be reachable (doc:198-201).
+     */
+    private suspend fun enterCompensating(
+        ctx: PipelineContext,
+        code: InventoryRefusalCode,
+        detail: String?,
+    ): Step {
+        val failureClass = FailureClassifier.forInventoryRefusal(code)
+        val record = txOperator.executeAndAwait {
+            if (orderService.markCompensating(ctx.orderId, code.name) == 0L) {
+                null
+            } else if (code.isInvariantViolation) {
+                reconciliationService.recordInvariantViolation(
+                    orderId = ctx.orderId,
+                    orderState = OrderStatus.COMPENSATING.name,
+                    correlationId = ctx.correlationId,
+                    failureClass = failureClass,
+                    detail = "Inventory confirmation returned $code for reservation ${ctx.reservationId}"
+                        + (detail?.let { ": $it" } ?: ""),
+                )
+            } else {
+                null
+            }
+        }
+
+        if (orderService.getOrderById(ctx.orderId)?.status != OrderStatus.COMPENSATING) {
+            throw IllegalStateException(
+                "Order ${ctx.orderId}: could not enter COMPENSATING after Inventory refused with $code",
+            )
+        }
+
+        // Commit-aware: a record that rolled back must not alert.
+        record?.let { reconciliationService.countRequired(it) }
+
+        ctx.compensationReason = code.name
+        return Step.Advance(OrderStatus.COMPENSATING)
+    }
+
+    private suspend fun stageCompensate(ctx: PipelineContext): Step {
+        // 1. Reverse the money first (doc:143). An unknown reversal throws, keeping COMPENSATING.
+        meterRegistry.counter("orders.refund.attempt").increment()
+        when (val reversal = paymentClient.refund(ctx.orderId, "refund-${ctx.orderId}")) {
+            is ReversalOutcome.Failed -> {
+                meterRegistry.counter("orders.refund", "result", "failed", "code", reversal.code).increment()
+                reconciliationService.recordPaymentReversalFailure(
+                    orderId = ctx.orderId,
+                    orderState = OrderStatus.COMPENSATING.name,
+                    correlationId = ctx.correlationId,
+                    failureClass = FailureClassifier.PAYMENT_REVERSAL_FAILED,
+                    detail = "Payments refused the reversal with ${reversal.code}"
+                        + (reversal.detail?.let { ": $it" } ?: ""),
+                )
+                // doc:306 — do NOT mark the order FAILED: the money is unresolved. Acknowledge the
+                // delivery, because a definitive refusal will not resolve itself on redelivery and
+                // dead-lettering it every time only adds noise to the same alert.
+                return Step.Park(OrderStatus.COMPENSATING, "definitive reversal failure ${reversal.code}")
+            }
+            ReversalOutcome.Reversed ->
+                meterRegistry.counter("orders.refund", "result", "refunded", "code", "none").increment()
+        }
+
+        // 2. Only now release any remaining hold (doc:143).
+        releaseHoldIfSafe(ctx)
+
+        // 3. FAILED only after the reversal succeeded — enforced by SQL, since markFailedAfterReversal
+        //    accepts only COMPENSATING and no statement goes CONFIRMING_INVENTORY -> FAILED.
+        val reason = ctx.compensationReason ?: FailureClassifier.UNKNOWN
+        val failed = txOperator.executeAndAwait {
+            if (orderService.markFailedAfterReversal(ctx.orderId) == 0L) {
+                false
+            } else {
+                outboxEventRepository.save(failureNotification(ctx, reason))
+                reconciliationService.closeAutoResolvable(ctx.orderId)
+                true
+            }
+        }
+        if (failed != true) {
+            val current = orderService.getOrderById(ctx.orderId)?.status
+            if (current == OrderStatus.FAILED) return Step.Advance(OrderStatus.FAILED)
+            throw IllegalStateException(
+                "Order ${ctx.orderId}: reversal succeeded but the terminal commit affected 0 rows (state=$current)",
+            )
+        }
+
+        countFailed(ctx, reason.lowercase())
+        return Step.Advance(OrderStatus.FAILED)
+    }
+
+    // --- shared endings ---------------------------------------------------------------------------
+
+    /**
+     * Terminal FAILED for a checkout that never authorized a payment, so no reversal is due. Optionally
+     * releases the hold first.
+     */
+    private suspend fun failUnpaid(ctx: PipelineContext, reason: String, releaseHold: Boolean): Step {
+        if (releaseHold) {
+            ctx.reservationId?.let { releaseHold(ctx, it) }
+        }
+
+        val failed = txOperator.executeAndAwait {
+            if (orderService.markFailedUnpaid(ctx.orderId) == 0L) {
+                false
+            } else {
+                outboxEventRepository.save(failureNotification(ctx, reason))
+                reconciliationService.closeAutoResolvable(ctx.orderId)
+                true
+            }
+        }
+        if (failed != true) {
+            logger.info("Order {} was cancelled during the pipeline; left CANCELLED", ctx.orderId)
+            return Step.Advance(OrderStatus.CANCELLED)
+        }
+
+        countFailed(ctx, reason)
+        return Step.Advance(OrderStatus.FAILED)
+    }
+
+    /**
+     * Releases the hold during compensation, but only when the stored failure class says it is ours to
+     * release.
+     *
+     * Reading [PipelineContext.compensationReason] — which is persisted — rather than an in-memory flag
+     * is what makes this behave identically on a fresh pass and on a post-crash resume. Skipping
+     * RESERVATION_ORDER_CONFLICT matters: that hold belongs to a different order, and releasing it
+     * would corrupt a stranger's checkout.
+     */
+    private suspend fun releaseHoldIfSafe(ctx: PipelineContext) {
+        val reservationId = ctx.reservationId
+        if (reservationId == null) {
+            meterRegistry.counter("orders.inventory.release", "result", "skipped").increment()
+            return
+        }
+        val code = ctx.compensationReason?.let { runCatching { InventoryRefusalCode.valueOf(it) }.getOrNull() }
+        if (code != null && !code.isReleasable) {
+            logger.info("Not releasing reservation {} for order {}: {}", reservationId, ctx.orderId, code)
+            meterRegistry.counter("orders.inventory.release", "result", "skipped").increment()
+            return
+        }
+        releaseHold(ctx, reservationId)
+    }
+
+    /**
+     * Releases a hold. An unknown release outcome propagates (doc:307): the reversal has already
+     * succeeded and is idempotent, so the next delivery replays it and retries the release.
+     */
+    private suspend fun releaseHold(ctx: PipelineContext, reservationId: String) {
+        logger.info("Releasing reservation {} for order {}", reservationId, ctx.orderId)
+        inventoryClient.releaseSeats(reservationId, "rel-${ctx.orderId}")
+        meterRegistry.counter("orders.inventory.release", "result", "released").increment()
+    }
+
+    /**
+     * Cancels an order. Accepted only while no payment authorization has started, i.e. ACCEPTED or
+     * RESERVING (doc:147-149); from PAYMENT_PENDING onward this is a 409, which is what closes the
+     * cancellation race before the money moves. Ownership is enforced by the controller.
      */
     suspend fun cancel(orderId: UUID): Order {
-        // Atomic conditional cancel: race-free against the async pipeline.
-        if (orderService.cancelIfUnpaid(orderId) == 0L) {
+        val cancelled = txOperator.executeAndAwait {
+            if (orderService.cancelIfUnpaid(orderId) == 0L) {
+                false
+            } else {
+                reconciliationService.closeAutoResolvable(orderId)
+                true
+            }
+        }
+        if (cancelled != true) {
             val current = orderService.getOrderById(orderId)
                 ?: throw ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "Order not found")
             throw ApiException(
                 HttpStatus.CONFLICT,
                 "ORDER_NOT_CANCELLABLE",
-                "Order in state ${current.status} cannot be cancelled (already paid or terminal)",
+                "Order in state ${current.status} cannot be cancelled (payment has started or it is terminal)",
             )
         }
 
         val order = orderService.getOrderById(orderId)
             ?: throw ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "Order not found")
 
-        // Release any held seats (best-effort; release is idempotent, so overlapping with the
-        // pipeline's own compensation is safe).
+        // Best-effort: release is idempotent, so overlapping with the pipeline's own release is safe.
+        // A hold taken but not yet stored is released by the pipeline instead (see stageHold).
         order.reservationId?.let { rid ->
             try {
-                inventoryClient.releaseSeats(rid, "cancel-$orderId")
+                inventoryClient.releaseSeats(rid, "rel-$orderId")
             } catch (e: Exception) {
                 logger.error("Failed to release seats for cancelled order {} (reservation {})", orderId, rid, e)
             }
@@ -368,14 +612,23 @@ class CheckoutOrchestrator(
         return order
     }
 
-    // Builds an outbox row carrying the serialized event as its JSON payload. Debezium's EventRouter
-    // routes by the `type` column to the matching topic and keys by `aggregate_id` (the order id).
-    private fun outbox(type: String, orderId: UUID, event: Any): OutboxEvent = OutboxEvent(
-        aggregateType = "Order",
-        aggregateId = orderId.toString(),
-        type = type,
-        payload = Json.of(objectMapper.writeValueAsString(event)),
+    // --- helpers ----------------------------------------------------------------------------------
+
+    private fun failureNotification(ctx: PipelineContext, reason: String): OutboxEvent = outbox(
+        "notification-requested", ctx.orderId,
+        NotificationRequestedEvent(
+            correlationId = ctx.correlationId,
+            orderId = ctx.orderId,
+            principalId = ctx.order.userId,
+            payload = NotificationRequestedPayload(
+                recipientEmail = recipientEmail(ctx.order),
+                message = "Your order ${ctx.orderId} could not be completed. Reason: $reason",
+            ),
+        ),
     )
+
+    private fun outbox(type: String, orderId: UUID, event: Any): OutboxEvent =
+        orderOutboxRow(objectMapper, type, orderId, event)
 
     // Delivery address for the notification, captured at checkout from the JWT `email` claim. If the
     // token had no email, fall back to a placeholder and warn — the checkout must not fail for this.
@@ -388,13 +641,26 @@ class CheckoutOrchestrator(
         return email
     }
 
-    // Low-cardinality failure reason for metrics/logs.
-    private fun classifyFailure(e: Exception, paymentAuthorized: Boolean): String = when {
-        paymentAuthorized -> "authorized_not_confirmed"
-        e is IllegalStateException && e.message?.contains("cancelled", ignoreCase = true) == true -> "cancelled"
-        e is IllegalStateException && e.message?.contains("reservation rejected", ignoreCase = true) == true -> "reservation_rejected"
-        e is IllegalStateException && e.message?.contains("declined", ignoreCase = true) == true -> "payment_declined"
-        e is IllegalStateException && e.message?.contains("payment method token", ignoreCase = true) == true -> "payment_token_missing"
-        else -> "dependency_error"
+    private fun countHold(result: String, code: String) =
+        meterRegistry.counter("orders.inventory.hold", "result", result, "code", code).increment()
+
+    private fun countConfirm(result: String, code: String) =
+        meterRegistry.counter("orders.inventory.confirm", "result", result, "code", code).increment()
+
+    private fun countFailed(ctx: PipelineContext, reason: String) {
+        meterRegistry.counter("orders.checkout.completed", "result", "failed").increment()
+        meterRegistry.counter("orders.checkout.failed", "reason", reason).increment()
+        recordEndToEnd(ctx, "failed")
+    }
+
+    /**
+     * Time from accepting the order to reaching a terminal state. Unlike the per-delivery timer this
+     * survives redeliveries, which makes it the only correct checkout SLO measurement.
+     */
+    private fun recordEndToEnd(ctx: PipelineContext, outcome: String) {
+        val elapsed = Duration.between(ctx.order.createdAt, LocalDateTime.now())
+        if (!elapsed.isNegative) {
+            meterRegistry.timer("orders.checkout.e2e.duration", "outcome", outcome).record(elapsed)
+        }
     }
 }

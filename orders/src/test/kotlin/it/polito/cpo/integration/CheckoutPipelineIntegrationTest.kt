@@ -1,23 +1,31 @@
 package it.polito.cpo.integration
 
+import io.micrometer.core.instrument.MeterRegistry
+import it.polito.cpo.client.AuthorizationOutcome
+import it.polito.cpo.client.ConfirmReservationOutcome
+import it.polito.cpo.client.HoldOutcome
 import it.polito.cpo.client.InventoryClient
+import it.polito.cpo.client.InventoryRefusalCode
 import it.polito.cpo.client.PaymentClient
-import it.polito.cpo.contracts.payments.PaymentRefundResponse
+import it.polito.cpo.client.ReversalOutcome
+import it.polito.cpo.contracts.events.OrderPlacedEvent
 import it.polito.cpo.contracts.payments.PaymentRequest
-import it.polito.cpo.contracts.payments.PaymentResponse
-import it.polito.cpo.contracts.payments.PaymentStatus
-import it.polito.cpo.contracts.payments.RefundStatus
 import it.polito.cpo.contracts.inventory.ReservationRequest
-import it.polito.cpo.contracts.inventory.ReservationResponse
-import it.polito.cpo.contracts.inventory.ReservationStatus
 import it.polito.cpo.controller.dtos.CheckoutRequest
 import it.polito.cpo.model.Order
 import it.polito.cpo.model.OrderStatus
+import it.polito.cpo.model.ReconciliationKind
+import it.polito.cpo.model.ReconciliationStatus
 import it.polito.cpo.repository.OrderRepository
 import it.polito.cpo.repository.OutboxEventRepository
+import it.polito.cpo.repository.ReconciliationRecordRepository
+import it.polito.cpo.controller.dtos.ResolveReconciliationRequest
+import it.polito.cpo.observability.ApiException
 import it.polito.cpo.service.CheckoutOrchestrator
+import it.polito.cpo.service.ReconciliationOperationsService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.reactor.awaitSingleOrNull
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Test
@@ -27,7 +35,9 @@ import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Import
 import org.springframework.context.annotation.Primary
+import org.apache.kafka.clients.producer.ProducerRecord
 import org.springframework.kafka.core.KafkaTemplate
+import org.springframework.kafka.support.KafkaHeaders
 import org.springframework.kafka.test.context.EmbeddedKafka
 import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder
 import org.springframework.test.context.DynamicPropertyRegistry
@@ -36,13 +46,19 @@ import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import reactor.core.publisher.Mono
+import org.springframework.r2dbc.core.DatabaseClient
+import tools.jackson.databind.ObjectMapper
+import java.io.IOException
 import java.math.BigDecimal
 import java.time.LocalDateTime
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -63,7 +79,10 @@ import kotlin.test.assertTrue
  * asynchronous consumer thread.
  */
 @SpringBootTest(properties = ["spring.kafka.bootstrap-servers=\${spring.embedded.kafka.brokers}"])
-@EmbeddedKafka(partitions = 1, topics = ["order-placed", "order-confirmed", "notification-requested"])
+@EmbeddedKafka(
+    partitions = 1,
+    topics = ["order-placed", "order-placed-dlt", "order-confirmed", "notification-requested"],
+)
 @Testcontainers
 @Import(CheckoutPipelineIntegrationTest.TestDoubles::class)
 class CheckoutPipelineIntegrationTest {
@@ -95,6 +114,11 @@ class CheckoutPipelineIntegrationTest {
     @Autowired private lateinit var kafkaTemplate: KafkaTemplate<String, String>
     @Autowired private lateinit var inventory: ControllableInventoryClient
     @Autowired private lateinit var payment: ControllablePaymentClient
+    @Autowired private lateinit var reconciliationRepository: ReconciliationRecordRepository
+    @Autowired private lateinit var databaseClient: DatabaseClient
+    @Autowired private lateinit var meterRegistry: MeterRegistry
+    @Autowired private lateinit var objectMapper: ObjectMapper
+    @Autowired private lateinit var operations: ReconciliationOperationsService
 
     @Test
     fun `happy path drives the order through the outbox and Kafka to CONFIRMED`() = runBlocking {
@@ -139,9 +163,11 @@ class CheckoutPipelineIntegrationTest {
         assertEquals(OrderStatus.CONFIRMED, order.status)
         assertEquals(1, payment.authorizedOrderIds.count { it == response.orderId })
 
-        // Simulate Kafka at-least-once redelivery of the same order-placed event.
+        // Simulate Kafka at-least-once redelivery of the same order-placed event, and wait until the
+        // consumer has demonstrably handled it before asserting that nothing changed.
+        val before = consumedCount()
         relayOrderPlaced(response.orderId)
-        delay(3_000) // give the consumer time to (not) reprocess
+        awaitEventsConsumed(before + 1)
 
         val reloaded = orderRepository.findById(response.orderId)!!
         assertEquals(OrderStatus.CONFIRMED, reloaded.status)
@@ -157,8 +183,9 @@ class CheckoutPipelineIntegrationTest {
         assertEquals(OrderStatus.CANCELLED, cancelled.status)
 
         // The durable trigger still fires; the pipeline must skip a terminal (cancelled) order.
+        val before = consumedCount()
         relayOrderPlaced(response.orderId)
-        delay(3_000)
+        awaitEventsConsumed(before + 1)
 
         val reloaded = orderRepository.findById(response.orderId)!!
         assertEquals(OrderStatus.CANCELLED, reloaded.status)
@@ -174,6 +201,312 @@ class CheckoutPipelineIntegrationTest {
         assertEquals(first.orderId, second.orderId)
     }
 
+    @Test
+    fun `a confirmation response lost after Inventory committed converges on redelivery`() = runBlocking {
+        val response = orchestrator.checkout(request(), "it-lost-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        val reservationId = "res-${response.orderId}"
+        // Drop the first response, after the sale is already committed on the Inventory side.
+        inventory.loseConfirmResponses[reservationId] = AtomicInteger(1)
+
+        relayOrderPlaced(response.orderId)
+
+        val order = awaitTerminal(response.orderId)
+        assertEquals(OrderStatus.CONFIRMED, order.status)
+        // The replay is what completes it, and it must not have cost a second authorization.
+        assertTrue(inventory.confirmCalls[reservationId]!!.get() >= 2)
+        assertEquals(1, payment.authorizedOrderIds.count { it == response.orderId })
+        // Invariant 8: an unknown outcome never became a compensation.
+        assertFalse(payment.refundedOrderIds.contains(response.orderId))
+        assertFalse(inventory.releasedReservationIds.contains(reservationId))
+    }
+
+    @Test
+    fun `a crash between the Inventory sale and the Orders commit converges without duplicate events`() = runBlocking {
+        val response = orchestrator.checkout(request(), "it-crash-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        val reservationId = "res-${response.orderId}"
+
+        armCommitCrash(response.orderId)
+        try {
+            relayOrderPlaced(response.orderId)
+            val order = awaitTerminal(response.orderId)
+            assertEquals(OrderStatus.CONFIRMED, order.status)
+        } finally {
+            disarmCommitCrash()
+        }
+
+        // The confirmation was replayed, but the completed stages were not restarted.
+        assertTrue(inventory.confirmCalls[reservationId]!!.get() >= 2)
+        assertEquals(1, payment.authorizedOrderIds.count { it == response.orderId })
+        assertFalse(payment.refundedOrderIds.contains(response.orderId))
+        // Only the integration variant can prove this: the rolled-back attempt wrote no events.
+        assertEquals(1, outboxRows(response.orderId, "order-confirmed").size)
+        assertEquals(1, outboxRows(response.orderId, "notification-requested").size)
+    }
+
+    @Test
+    fun `an expired reservation reverses the payment and fails the order`() = runBlocking {
+        val response = orchestrator.checkout(request(), "it-expired-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        inventory.refuseConfirmWith[response.orderId] = InventoryRefusalCode.RESERVATION_EXPIRED
+
+        relayOrderPlaced(response.orderId)
+
+        val order = awaitTerminal(response.orderId)
+        assertEquals(OrderStatus.FAILED, order.status)
+        assertTrue(payment.refundedOrderIds.contains(response.orderId))
+        assertTrue(inventory.releasedReservationIds.contains("res-${response.orderId}"))
+        // An ordinary race against the deadline opens no incident.
+        assertTrue(openRecords(response.orderId).isEmpty())
+    }
+
+    @Test
+    fun `an ownership conflict opens an invariant violation that stays open after the order fails`() = runBlocking {
+        val response = orchestrator.checkout(request(), "it-conflict-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        inventory.refuseConfirmWith[response.orderId] = InventoryRefusalCode.RESERVATION_ORDER_CONFLICT
+
+        relayOrderPlaced(response.orderId)
+
+        val order = awaitTerminal(response.orderId)
+        assertEquals(OrderStatus.FAILED, order.status)
+        assertTrue(payment.refundedOrderIds.contains(response.orderId))
+        // The hold belongs to another order: releasing it would corrupt that checkout.
+        assertFalse(inventory.releasedReservationIds.contains("res-${response.orderId}"))
+
+        val open = openRecords(response.orderId)
+        assertEquals(1, open.size)
+        assertEquals(ReconciliationKind.INVARIANT_VIOLATION.name, open.single().kind)
+        // The terminal transaction must NOT auto-close this kind: it needs an operator.
+        assertEquals(ReconciliationStatus.OPEN.name, open.single().status)
+    }
+
+    @Test
+    fun `a definitive reversal failure keeps the order non-terminal with an open incident`() = runBlocking {
+        val response = orchestrator.checkout(request(), "it-reversal-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        inventory.refuseConfirmWith[response.orderId] = InventoryRefusalCode.RESERVATION_EXPIRED
+        payment.failReversalFor.add(response.orderId)
+
+        relayOrderPlaced(response.orderId)
+
+        val parked = awaitStatus(response.orderId, OrderStatus.COMPENSATING)
+        // Unresolved money must not read as a finished order.
+        assertEquals(OrderStatus.COMPENSATING, parked.status)
+        val open = openRecords(response.orderId)
+        assertEquals(1, open.size)
+        assertEquals(ReconciliationKind.PAYMENT_REVERSAL_FAILURE.name, open.single().kind)
+    }
+
+    // --- dead-letter handling ---------------------------------------------------------------------
+
+    @Test
+    fun `an unparseable order-placed payload reaches the dead-letter topic`() = runBlocking {
+        val before = dltCount("poison")
+        // Scoped to the delta, not to an absolute count: sibling tests in this shared context create
+        // records of their own.
+        val recordsBefore = reconciliationRepository.findAll().toList().size
+
+        // Proves the whole chain end to end: PoisonEventException, the non-retryable classification,
+        // the recoverer, and the dead-letter listener's own poison branch.
+        kafkaTemplate.send("order-placed", "not-an-order", "{broken")
+
+        awaitDltCount("poison", before + 1)
+        // No order id means no incident can be attached to anything.
+        assertEquals(recordsBefore, reconciliationRepository.findAll().toList().size)
+    }
+
+    @Test
+    fun `an exhausted delivery opens a DELIVERY_EXHAUSTED incident without moving the order`() = runBlocking {
+        val response = orchestrator.checkout(request(), "it-dlt-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        seedState(response.orderId, OrderStatus.CONFIRMING_INVENTORY, "res-${response.orderId}")
+        val before = dltCount("recorded")
+
+        sendDeadLetter(response.orderId, "java.util.concurrent.TimeoutException", "simulated")
+
+        awaitDltCount("recorded", before + 1)
+        val open = openRecords(response.orderId)
+        assertEquals(1, open.size)
+        assertEquals(ReconciliationKind.DELIVERY_EXHAUSTED.name, open.single().kind)
+        // The durable phase is what a later redrive resumes from, so the incident must not disturb it.
+        assertEquals(OrderStatus.CONFIRMING_INVENTORY, orderRepository.findById(response.orderId)!!.status)
+        assertEquals(OrderStatus.CONFIRMING_INVENTORY.name, open.single().orderState)
+        // Structurally impossible for this listener, asserted anyway because it is the whole point.
+        assertFalse(payment.refundedOrderIds.contains(response.orderId))
+        assertFalse(inventory.releasedReservationIds.contains("res-${response.orderId}"))
+    }
+
+    @Test
+    fun `a repeated dead letter bumps the attempt count instead of duplicating the incident`() = runBlocking {
+        val response = orchestrator.checkout(request(), "it-dlt2-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        seedState(response.orderId, OrderStatus.PAYMENT_PENDING, "res-${response.orderId}")
+        val before = dltCount("recorded")
+
+        sendDeadLetter(response.orderId, "java.util.concurrent.TimeoutException", "first")
+        awaitDltCount("recorded", before + 1)
+        sendDeadLetter(response.orderId, "java.util.concurrent.TimeoutException", "second")
+        awaitDltCount("recorded", before + 2)
+
+        val open = openRecords(response.orderId)
+        assertEquals(1, open.size)
+        assertEquals(2, open.single().attemptCount)
+    }
+
+    @Test
+    fun `a dead letter for an order that later succeeded opens nothing and closes stale incidents`() = runBlocking {
+        val response = orchestrator.checkout(request(), "it-dlt3-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        relayOrderPlaced(response.orderId)
+        assertEquals(OrderStatus.CONFIRMED, awaitTerminal(response.orderId).status)
+        val before = dltCount("stale_terminal")
+
+        sendDeadLetter(response.orderId, "java.util.concurrent.TimeoutException", "late duplicate")
+
+        awaitDltCount("stale_terminal", before + 1)
+        // Without this branch, healthy orders would accumulate permanently open incidents.
+        assertTrue(openRecords(response.orderId).isEmpty())
+    }
+
+    @Test
+    fun `a dead letter for an unknown order opens no incident`() = runBlocking {
+        val unknown = UUID.randomUUID()
+        val before = dltCount("unknown_order")
+
+        sendDeadLetter(unknown, "java.util.concurrent.TimeoutException", "orphan")
+
+        awaitDltCount("unknown_order", before + 1)
+        assertTrue(openRecords(unknown).isEmpty())
+    }
+
+    // --- operator commands ------------------------------------------------------------------------
+
+    @Test
+    fun `a redrive writes a fresh order-placed row and the pipeline resumes from the stored phase`() = runBlocking {
+        val response = orchestrator.checkout(request(), "it-redrive-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        val orderId = response.orderId
+        seedState(orderId, OrderStatus.CONFIRMING_INVENTORY, "res-$orderId")
+        openIncident(orderId, ReconciliationKind.DELIVERY_EXHAUSTED)
+
+        val accepted = operations.redrive(orderId, "redrive-$orderId", "ops-1")
+
+        // The endpoint reports the phase the resumed pipeline will pick up from; it contains no logic
+        // about which stage that is.
+        assertEquals(OrderStatus.CONFIRMING_INVENTORY, accepted.orderStatus)
+        assertEquals(2, accepted.attemptCount)
+        assertEquals(2, outboxRows(orderId, "order-placed").size)
+
+        relayLatestOrderPlaced(orderId)
+
+        assertEquals(OrderStatus.CONFIRMED, awaitTerminal(orderId).status)
+        // Resumed, not restarted: the hold and the authorization were not repeated.
+        assertEquals(0, inventory.reservedOrderIds.count { it == orderId })
+        assertEquals(0, payment.authorizedOrderIds.count { it == orderId })
+        // Reaching a terminal state closes the incident by itself.
+        assertTrue(openRecords(orderId).isEmpty())
+    }
+
+    @Test
+    fun `repeating a redrive key replays the response without writing a second outbox row`() = runBlocking {
+        val response = orchestrator.checkout(request(), "it-redrive2-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        val orderId = response.orderId
+        seedState(orderId, OrderStatus.CONFIRMING_INVENTORY, "res-$orderId")
+        openIncident(orderId, ReconciliationKind.DELIVERY_EXHAUSTED)
+
+        val first = operations.redrive(orderId, "redrive-dup-$orderId", "ops-1")
+        val replay = operations.redrive(orderId, "redrive-dup-$orderId", "ops-1")
+
+        assertEquals(first, replay)
+        assertEquals(2, outboxRows(orderId, "order-placed").size) // the original plus one redrive
+    }
+
+    @Test
+    fun `a redrive on a terminal order is refused and closes the stale incident`() = runBlocking {
+        val response = orchestrator.checkout(request(), "it-redrive3-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        val orderId = response.orderId
+        relayOrderPlaced(orderId)
+        assertEquals(OrderStatus.CONFIRMED, awaitTerminal(orderId).status)
+        openIncident(orderId, ReconciliationKind.DELIVERY_EXHAUSTED)
+
+        val ex = assertFailsWith<ApiException> { operations.redrive(orderId, "redrive-term-$orderId", "ops-1") }
+
+        assertEquals("ORDER_ALREADY_TERMINAL", ex.code)
+        // Both halves must hold: the refusal AND the committed close. Throwing from inside the
+        // transaction would have rolled the close back and left the record open forever.
+        assertTrue(openRecords(orderId).isEmpty())
+    }
+
+    @Test
+    fun `a redrive without an open incident is refused`() = runBlocking {
+        val response = orchestrator.checkout(request(), "it-redrive4-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        seedState(response.orderId, OrderStatus.CONFIRMING_INVENTORY, "res-${response.orderId}")
+
+        val ex = assertFailsWith<ApiException> {
+            operations.redrive(response.orderId, "redrive-none-${response.orderId}", "ops-1")
+        }
+
+        assertEquals("NO_OPEN_RECONCILIATION_RECORD", ex.code)
+        assertEquals(1, outboxRows(response.orderId, "order-placed").size)
+    }
+
+    @Test
+    fun `resolving an invariant violation requires a terminal order, the right kind, and evidence`() = runBlocking {
+        val response = orchestrator.checkout(request(), "it-resolve-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        val orderId = response.orderId
+        inventory.refuseConfirmWith[orderId] = InventoryRefusalCode.RESERVATION_ORDER_CONFLICT
+
+        relayOrderPlaced(orderId)
+        assertEquals(OrderStatus.FAILED, awaitTerminal(orderId).status)
+        val record = openRecords(orderId).single()
+        assertEquals(ReconciliationKind.INVARIANT_VIOLATION.name, record.kind)
+
+        // Blank evidence: the closure has to be auditable.
+        assertEquals(
+            "EVIDENCE_REFERENCE_REQUIRED",
+            assertFailsWith<ApiException> {
+                operations.resolve(orderId, record.id, "r1-$orderId", ResolveReconciliationRequest("  "), "ops-1")
+            }.code,
+        )
+        // A record belonging to another order reads as missing, never as forbidden.
+        assertEquals(
+            "RECONCILIATION_RECORD_NOT_FOUND",
+            assertFailsWith<ApiException> {
+                operations.resolve(orderId, UUID.randomUUID(), "r2-$orderId", ResolveReconciliationRequest("INC-1"), "ops-1")
+            }.code,
+        )
+
+        val resolved = operations.resolve(orderId, record.id, "r3-$orderId", ResolveReconciliationRequest("INC-1"), "ops-1")
+
+        assertEquals(ReconciliationStatus.RESOLVED.name, resolved.status)
+        assertTrue(openRecords(orderId).isEmpty())
+        // Resolving must not touch business state.
+        assertEquals(OrderStatus.FAILED, orderRepository.findById(orderId)!!.status)
+
+        // Already resolved: repeating with a different key must not reopen it.
+        assertEquals(
+            "RECONCILIATION_ALREADY_RESOLVED",
+            assertFailsWith<ApiException> {
+                operations.resolve(orderId, record.id, "r4-$orderId", ResolveReconciliationRequest("INC-2"), "ops-1")
+            }.code,
+        )
+    }
+
+    @Test
+    fun `an operator cannot resolve a pending payment reversal`() = runBlocking {
+        val response = orchestrator.checkout(request(), "it-resolve2-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        val orderId = response.orderId
+        inventory.refuseConfirmWith[orderId] = InventoryRefusalCode.RESERVATION_EXPIRED
+        payment.failReversalFor.add(orderId)
+
+        relayOrderPlaced(orderId)
+        awaitStatus(orderId, OrderStatus.COMPENSATING)
+        val record = openRecords(orderId).single()
+        assertEquals(ReconciliationKind.PAYMENT_REVERSAL_FAILURE.name, record.kind)
+
+        // Non-terminal order: unresolved money cannot be waived by closing the paperwork.
+        assertEquals(
+            "ORDER_NOT_TERMINAL",
+            assertFailsWith<ApiException> {
+                operations.resolve(orderId, record.id, "r5-$orderId", ResolveReconciliationRequest("INC-1"), "ops-1")
+            }.code,
+        )
+        assertEquals(1, openRecords(orderId).size)
+    }
+
     private fun request(token: String = "tok-123") =
         CheckoutRequest(routeId = "R1", seats = listOf("1A", "1B"), totalAmount = BigDecimal("100.00"), paymentMethodToken = token)
 
@@ -185,13 +518,131 @@ class CheckoutPipelineIntegrationTest {
             .forEach { kafkaTemplate.send("order-placed", it.aggregateId, it.payload.asString()) }
     }
 
-    private suspend fun awaitTerminal(id: UUID): Order = withTimeout(20_000) {
+    /**
+     * Relays only the newest `order-placed` row. Needed once a redrive adds a second one: replaying
+     * both would drive the pipeline twice and make call-count assertions meaningless.
+     */
+    private suspend fun relayLatestOrderPlaced(orderId: UUID) {
+        outboxRows(orderId, "order-placed")
+            .maxByOrNull { it.createdAt }
+            ?.let { kafkaTemplate.send("order-placed", it.aggregateId, it.payload.asString()) }
+    }
+
+    private suspend fun openIncident(orderId: UUID, kind: ReconciliationKind) {
+        reconciliationRepository.upsertOpen(
+            id = UUID.randomUUID(),
+            orderId = orderId,
+            kind = kind.name,
+            orderState = orderRepository.findById(orderId)!!.status.name,
+            correlationId = "corr-seed",
+            failureClass = "dependency_error",
+            failureDetail = "seeded by test",
+        )
+    }
+
+    private suspend fun awaitTerminal(id: UUID): Order = withTimeout(30_000) {
         var order = orderRepository.findById(id)
         while (order == null || order.status !in TERMINAL) {
             delay(200)
             order = orderRepository.findById(id)
         }
         order
+    }
+
+    private suspend fun awaitStatus(id: UUID, status: OrderStatus): Order = withTimeout(30_000) {
+        var order = orderRepository.findById(id)
+        while (order == null || order.status != status) {
+            delay(200)
+            order = orderRepository.findById(id)
+        }
+        order
+    }
+
+    /**
+     * Waits for the consumer to have processed at least [target] events before asserting that nothing
+     * happened. Waiting on a positive signal rather than sleeping is what makes a "must NOT happen"
+     * assertion falsifiable: a fixed delay passes just as happily when the consumer never ran at all.
+     */
+    private suspend fun awaitEventsConsumed(target: Double) = withTimeout(30_000) {
+        while (consumedCount() < target) delay(100)
+    }
+
+    private fun consumedCount(): Double =
+        meterRegistry.find("orders.events.consumed").counters().sumOf { it.count() }
+
+    /** Sends a record to the dead-letter topic with the headers the recoverer would have attached. */
+    private fun sendDeadLetter(orderId: UUID, exceptionFqcn: String, message: String) {
+        val event = OrderPlacedEvent(correlationId = "corr-dlt", orderId = orderId, principalId = "user-1")
+        val record = ProducerRecord<String, String>(
+            "order-placed-dlt",
+            orderId.toString(),
+            objectMapper.writeValueAsString(event),
+        )
+        record.headers().add(KafkaHeaders.DLT_ORIGINAL_TOPIC, "order-placed".toByteArray())
+        record.headers().add(KafkaHeaders.DLT_EXCEPTION_FQCN, exceptionFqcn.toByteArray())
+        record.headers().add(KafkaHeaders.DLT_EXCEPTION_MESSAGE, message.toByteArray())
+        kafkaTemplate.send(record)
+    }
+
+    private fun dltCount(result: String): Double =
+        meterRegistry.find("orders.events.dlt").tag("result", result).counter()?.count() ?: 0.0
+
+    private suspend fun awaitDltCount(result: String, target: Double) = withTimeout(30_000) {
+        while (dltCount(result) < target) delay(100)
+    }
+
+    /** Forces a durable phase so a resume path can be driven directly. */
+    private suspend fun seedState(orderId: UUID, status: OrderStatus, reservationId: String?) {
+        databaseClient.sql("UPDATE orders SET status = :s, reservation_id = :r WHERE id = :id")
+            .bind("s", status.name)
+            .let { if (reservationId == null) it.bindNull("r", String::class.java) else it.bind("r", reservationId) }
+            .bind("id", orderId)
+            .then()
+            .awaitSingleOrNull()
+    }
+
+    private suspend fun outboxRows(orderId: UUID, type: String) =
+        outboxRepository.findAll().toList().filter { it.aggregateId == orderId.toString() && it.type == type }
+
+    private suspend fun openRecords(orderId: UUID) =
+        reconciliationRepository.findAllByOrderIdAndStatus(orderId, ReconciliationStatus.OPEN.name).toList()
+
+    /**
+     * Arms a one-shot failure of the terminal Orders transaction for [orderId], standing in for a crash
+     * after Inventory has committed CONFIRMED/SOLD but before Orders commits.
+     *
+     * A sequence is used deliberately: `nextval()` is explicitly non-transactional in PostgreSQL, so the
+     * counter advances even though the RAISE aborts the transaction. A flag row would be rolled back
+     * with the aborted transaction, the trigger would fire on every retry, and the order would never
+     * converge.
+     */
+    private suspend fun armCommitCrash(orderId: UUID) {
+        exec("CREATE SEQUENCE IF NOT EXISTS test_commit_crash_seq")
+        exec("SELECT setval('test_commit_crash_seq', 1, false)")
+        exec(
+            """
+            CREATE OR REPLACE FUNCTION test_crash_before_confirm() RETURNS trigger AS ${'$'}${'$'}
+            BEGIN
+                IF NEW.status = 'CONFIRMED'
+                   AND NEW.id = '$orderId'::uuid
+                   AND nextval('test_commit_crash_seq') = 1 THEN
+                    RAISE EXCEPTION 'simulated orders crash after inventory confirmation';
+                END IF;
+                RETURN NEW;
+            END; ${'$'}${'$'} LANGUAGE plpgsql
+            """.trimIndent(),
+        )
+        exec("DROP TRIGGER IF EXISTS test_crash_confirm ON orders")
+        exec(
+            "CREATE TRIGGER test_crash_confirm BEFORE UPDATE ON orders " +
+                "FOR EACH ROW EXECUTE FUNCTION test_crash_before_confirm()",
+        )
+    }
+
+    private suspend fun disarmCommitCrash() = exec("DROP TRIGGER IF EXISTS test_crash_confirm ON orders")
+
+    private suspend fun exec(sql: String) {
+        databaseClient.sql(sql).then().awaitSingleOrNull()
     }
 
     private val TERMINAL = setOf(OrderStatus.CONFIRMED, OrderStatus.FAILED, OrderStatus.CANCELLED)
@@ -205,9 +656,37 @@ class CheckoutPipelineIntegrationTest {
         val reservedOrderIds = CopyOnWriteArrayList<UUID>()
         val releasedReservationIds = ConcurrentHashMap.newKeySet<String>()
 
-        override suspend fun reserveSeats(request: ReservationRequest, idempotencyKey: String, userId: String): ReservationResponse {
+        /** Stands in for Inventory's committed state, so a replay observes an already-sold hold. */
+        val confirmedReservationIds = ConcurrentHashMap.newKeySet<String>()
+        val confirmCalls = ConcurrentHashMap<String, AtomicInteger>()
+
+        /** reservationId -> how many responses to drop before answering normally. */
+        val loseConfirmResponses = ConcurrentHashMap<String, AtomicInteger>()
+
+        /** orderId -> a definitive refusal to answer the confirmation with. */
+        val refuseConfirmWith = ConcurrentHashMap<UUID, InventoryRefusalCode>()
+
+        override suspend fun reserveSeats(
+            request: ReservationRequest,
+            idempotencyKey: String,
+            userId: String,
+        ): HoldOutcome {
             reservedOrderIds.add(request.orderId)
-            return ReservationResponse("res-${request.orderId}", ReservationStatus.HELD, LocalDateTime.now().plusMinutes(10))
+            return HoldOutcome.Held("res-${request.orderId}", LocalDateTime.now().plusMinutes(10))
+        }
+
+        override suspend fun confirmReservation(reservationId: String, orderId: UUID): ConfirmReservationOutcome {
+            confirmCalls.computeIfAbsent(reservationId) { AtomicInteger() }.incrementAndGet()
+
+            refuseConfirmWith[orderId]?.let { return ConfirmReservationOutcome.Refused(it, "forced by test") }
+
+            // Inventory commits CONFIRMED + SOLD before it writes the response, exactly as the real
+            // transaction does, so a dropped response must still leave the sale committed.
+            confirmedReservationIds.add(reservationId)
+            if ((loseConfirmResponses[reservationId]?.getAndDecrement() ?: 0) > 0) {
+                throw IOException("simulated connection reset after Inventory committed")
+            }
+            return ConfirmReservationOutcome.Confirmed(reservationId)
         }
 
         override suspend fun releaseSeats(reservationId: String, idempotencyKey: String) {
@@ -219,19 +698,28 @@ class CheckoutPipelineIntegrationTest {
         val authorizedOrderIds = CopyOnWriteArrayList<UUID>()
         val refundedOrderIds = CopyOnWriteArrayList<UUID>()
 
-        override suspend fun authorizePayment(request: PaymentRequest, idempotencyKey: String, correlationId: String): PaymentResponse {
-            val declined = request.paymentMethodToken == DECLINE_TOKEN
-            if (!declined) authorizedOrderIds.add(request.orderId)
-            return PaymentResponse(
-                status = if (declined) PaymentStatus.DECLINED else PaymentStatus.AUTHORIZED,
-                providerReference = "test-ref",
-                errorCode = if (declined) "DECLINED" else null
-            )
+        /** orderId -> answer the reversal with a definitive failure instead of success. */
+        val failReversalFor = ConcurrentHashMap.newKeySet<UUID>()
+
+        override suspend fun authorizePayment(
+            request: PaymentRequest,
+            idempotencyKey: String,
+            correlationId: String,
+        ): AuthorizationOutcome {
+            if (request.paymentMethodToken == DECLINE_TOKEN) {
+                return AuthorizationOutcome.Declined("DECLINED")
+            }
+            authorizedOrderIds.add(request.orderId)
+            return AuthorizationOutcome.Authorized("test-ref")
         }
 
-        override suspend fun refund(orderId: UUID, idempotencyKey: String): PaymentRefundResponse {
+        override suspend fun refund(orderId: UUID, idempotencyKey: String): ReversalOutcome {
             refundedOrderIds.add(orderId)
-            return PaymentRefundResponse(RefundStatus.REFUNDED, "refund-ref", null)
+            return if (orderId in failReversalFor) {
+                ReversalOutcome.Failed("FAILED", "forced by test")
+            } else {
+                ReversalOutcome.Reversed
+            }
         }
     }
 
