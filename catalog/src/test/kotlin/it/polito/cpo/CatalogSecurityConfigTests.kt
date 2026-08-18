@@ -47,6 +47,23 @@ class CatalogSecurityConfigTests @Autowired constructor(
     }
 
     @Test
+    fun `prometheus endpoint permits an unauthenticated internal scrape`() {
+        webTestClient.get()
+            .uri("/actuator/prometheus")
+            .exchange()
+            .expectStatus().isOk
+    }
+
+    @Test
+    fun `other actuator endpoints remain denied`() {
+        webTestClient.get()
+            .uri("/actuator/env")
+            .headers { it.setBearerAuth("customer-token") }
+            .exchange()
+            .expectStatus().isForbidden
+    }
+
+    @Test
     fun `catalog reads are public`() {
         webTestClient.get()
             .uri("/api/catalog/routes")
@@ -78,6 +95,7 @@ class CatalogSecurityTestConfiguration {
         // Stands in for the actuator health endpoint, which is not booted in this web slice.
         // It lets us verify the SecurityConfig rule that /actuator/health/** is permitAll.
         GET("/actuator/health/liveness") { ServerResponse.ok().bodyValue(mapOf("status" to "UP")) }
+        GET("/actuator/prometheus") { ServerResponse.ok().bodyValue("test_metric 1") }
     }
 }
 

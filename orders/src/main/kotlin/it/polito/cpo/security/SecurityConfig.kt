@@ -17,7 +17,7 @@ class SecurityConfig {
         http
             .applyStatelessApiDefaults()
             .authorizeExchange {
-                it.pathMatchers(*EuroTransitPaths.HEALTH_ENDPOINTS).permitAll()
+                it.pathMatchers(*EuroTransitPaths.UNAUTHENTICATED_ACTUATOR_ENDPOINTS).permitAll()
                 it.pathMatchers(HttpMethod.POST, "/api/orders").hasAuthority(EuroTransitAuthorities.CUSTOMER)
                 // Without this rule anyExchange().denyAll() makes the existing cancel endpoint
                 // unreachable for everyone. `*` is a single-segment PathPattern wildcard, so it cannot

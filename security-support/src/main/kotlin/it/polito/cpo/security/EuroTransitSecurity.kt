@@ -19,7 +19,11 @@ object EuroTransitAuthorities {
 }
 
 object EuroTransitPaths {
-    val HEALTH_ENDPOINTS = arrayOf("/actuator/health", "/actuator/health/**")
+    val UNAUTHENTICATED_ACTUATOR_ENDPOINTS = arrayOf(
+        "/actuator/health",
+        "/actuator/health/**",
+        "/actuator/prometheus",
+    )
 }
 
 fun ServerHttpSecurity.applyStatelessApiDefaults(): ServerHttpSecurity =

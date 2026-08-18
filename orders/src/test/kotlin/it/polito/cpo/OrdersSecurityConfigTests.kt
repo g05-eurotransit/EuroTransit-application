@@ -48,6 +48,23 @@ class OrdersSecurityConfigTests @Autowired constructor(
     }
 
     @Test
+    fun `prometheus endpoint permits an unauthenticated internal scrape`() {
+        webTestClient.get()
+            .uri("/actuator/prometheus")
+            .exchange()
+            .expectStatus().isOk
+    }
+
+    @Test
+    fun `other actuator endpoints remain denied`() {
+        webTestClient.get()
+            .uri("/actuator/env")
+            .headers { it.setBearerAuth("customer-token") }
+            .exchange()
+            .expectStatus().isForbidden
+    }
+
+    @Test
     fun `order creation rejects anonymous requests`() {
         webTestClient.post()
             .uri("/api/orders")
@@ -233,6 +250,9 @@ class OrdersSecurityConfigTests @Autowired constructor(
         // It lets us verify the SecurityConfig rule that /actuator/health/** is permitAll.
         @GetMapping("/actuator/health/liveness")
         fun liveness(): Map<String, String> = mapOf("status" to "UP")
+
+        @GetMapping("/actuator/prometheus")
+        fun prometheus(): String = "test_metric 1"
     }
 }
 
