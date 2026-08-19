@@ -83,7 +83,7 @@ class ReservationService(
                 val rowsUpdated = if (distinctSeats.isEmpty()) {
                     0
                 } else {
-                    seatRepository.holdSeats(request.routeId, distinctSeats, reservationId, distinctSeats.size)
+                    seatRepository.holdSeats(request.routeId, request.travelDate, distinctSeats, reservationId, distinctSeats.size)
                 }
                 val success = distinctSeats.isNotEmpty() && rowsUpdated == distinctSeats.size
                 val status = if (success) ReservationStatus.HELD else ReservationStatus.FAILED
@@ -93,6 +93,7 @@ class ReservationService(
                         reservationId = reservationId,
                         orderId = request.orderId,
                         routeId = request.routeId,
+                        travelDate = request.travelDate,
                         status = status.name,
                         expiresAt = expiresAt
                     )
@@ -125,6 +126,7 @@ class ReservationService(
                         payload = InventoryReservedPayload(
                             reservationId = reservationId,
                             routeId = request.routeId,
+                            travelDate = request.travelDate,
                             expiresAt = expiresAt.toLocalDateTime()
                         )
                     )
@@ -142,7 +144,8 @@ class ReservationService(
                         orderId = request.orderId,
                         principalId = principalId,
                         payload = InventoryFailedPayload(
-                            reason = "Seats unavailable or already held"
+                            reason = "Seats unavailable or already held",
+                            travelDate = request.travelDate
                         )
                     )
                     val outboxEvent = OutboxEvent(
