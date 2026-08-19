@@ -35,6 +35,7 @@ import tools.jackson.databind.json.JsonMapper
 import tools.jackson.module.kotlin.kotlinModule
 import java.time.Clock
 import java.time.Instant
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.OffsetDateTime
 import java.util.UUID
@@ -63,7 +64,7 @@ class ReservationServiceTest {
     ) : SeatRepository by delegate {
         var releaseCalledWith: String? = null
         var batchReleaseCalledWith: Collection<String>? = null
-        override suspend fun holdSeats(routeId: String, seatIds: List<String>, reservationId: String, expectedCount: Int): Int {
+        override suspend fun holdSeats(routeId: String, travelDate: LocalDate, seatIds: List<String>, reservationId: String, expectedCount: Int): Int {
             return if (seatsAvailable) seatIds.size else 0
         }
         override suspend fun releaseSeats(reservationId: String): Int {
@@ -187,7 +188,7 @@ class ReservationServiceTest {
         val outboxRepo = FakeOutboxEventRepository()
         val service = buildService(seatRepo, resRepo, idemRepo, outboxRepo)
 
-        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1")
+        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1", LocalDate.now())
         val principalId = "user-1"
         val correlationId = "corr-1"
         val idempotencyKey = "key-success"
@@ -225,7 +226,7 @@ class ReservationServiceTest {
         val outboxRepo = FakeOutboxEventRepository()
         val service = buildService(seatRepo, resRepo, idemRepo, outboxRepo)
 
-        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1")
+        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1", LocalDate.now())
         val principalId = "user-1"
         val correlationId = "corr-1"
         val idempotencyKey = "key-oversell"
@@ -263,7 +264,7 @@ class ReservationServiceTest {
         val outboxRepo = FakeOutboxEventRepository()
         val service = buildService(seatRepo, resRepo, idemRepo, outboxRepo)
 
-        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1")
+        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1", LocalDate.now())
         val principalId = "user-1"
         val correlationId = "corr-1"
         val idempotencyKey = "key-cached"
@@ -305,7 +306,7 @@ class ReservationServiceTest {
         val outboxRepo = FakeOutboxEventRepository()
         val service = buildService(seatRepo, resRepo, idemRepo, outboxRepo)
 
-        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1")
+        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1", LocalDate.now())
         val principalId = "user-1"
         val correlationId = "corr-1"
         val idempotencyKey = "key-cached-expired"
@@ -335,6 +336,7 @@ class ReservationServiceTest {
             reservationId = reservationId,
             orderId = UUID.randomUUID(),
             routeId = "route-1",
+            travelDate = LocalDate.now(),
             status = "EXPIRED",
             expiresAt = OffsetDateTime.now().minusMinutes(5)
         ))
@@ -355,7 +357,7 @@ class ReservationServiceTest {
         val outboxRepo = FakeOutboxEventRepository()
         val service = buildService(seatRepo, resRepo, idemRepo, outboxRepo)
 
-        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1")
+        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1", LocalDate.now())
         val principalId = "user-1"
         val correlationId = "corr-1"
         val idempotencyKey = "key-cached-cancelled"
@@ -385,6 +387,7 @@ class ReservationServiceTest {
             reservationId = reservationId,
             orderId = UUID.randomUUID(),
             routeId = "route-1",
+            travelDate = LocalDate.now(),
             status = "CANCELLED",
             expiresAt = OffsetDateTime.now().minusMinutes(5)
         ))
@@ -409,7 +412,7 @@ class ReservationServiceTest {
             meterRegistry
         )
 
-        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1")
+        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1", LocalDate.now())
         val principalId = "user-1"
         val correlationId = "corr-1"
         val idempotencyKey = "key-conflict"
@@ -448,6 +451,7 @@ class ReservationServiceTest {
             reservationId = reservationId,
             orderId = UUID.randomUUID(),
             routeId = "route-1",
+            travelDate = LocalDate.now(),
             status = ReservationStatus.HELD.name,
             expiresAt = OffsetDateTime.now().plusMinutes(10)
         ))
@@ -475,6 +479,7 @@ class ReservationServiceTest {
             reservationId = "res-past",
             orderId = UUID.randomUUID(),
             routeId = "route-1",
+            travelDate = LocalDate.now(),
             status = "HELD",
             expiresAt = OffsetDateTime.parse("2026-07-30T11:55:00Z")
         ))
@@ -484,6 +489,7 @@ class ReservationServiceTest {
             reservationId = "res-future",
             orderId = UUID.randomUUID(),
             routeId = "route-1",
+            travelDate = LocalDate.now(),
             status = "HELD",
             expiresAt = OffsetDateTime.parse("2026-07-30T12:05:00Z")
         ))
@@ -554,7 +560,7 @@ class ReservationServiceTest {
             mapper, fakeTransactionalOperator, meterRegistry
         )
 
-        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1")
+        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1", LocalDate.now())
         
         val exception = assertThrows<RuntimeException> {
             service.reserveSeats("key-rollback", "user-1", "corr-1", request)
@@ -581,6 +587,7 @@ class ReservationServiceTest {
             reservationId = reservationId,
             orderId = orderId,
             routeId = "route-1",
+            travelDate = LocalDate.now(),
             status = ReservationStatus.HELD.name,
             expiresAt = OffsetDateTime.now().plusMinutes(10)
         ))
@@ -605,6 +612,7 @@ class ReservationServiceTest {
             reservationId = reservationId,
             orderId = UUID.randomUUID(), // Different order ID
             routeId = "route-1",
+            travelDate = LocalDate.now(),
             status = ReservationStatus.HELD.name,
             expiresAt = OffsetDateTime.now().plusMinutes(10)
         ))
@@ -637,6 +645,7 @@ class ReservationServiceTest {
             reservationId = reservationId,
             orderId = orderId,
             routeId = "route-1",
+            travelDate = LocalDate.now(),
             status = ReservationStatus.HELD.name,
             // Expired 5 minutes ago!
             expiresAt = OffsetDateTime.parse("2026-07-30T11:55:00Z")
@@ -672,6 +681,7 @@ class ReservationServiceTest {
             reservationId = reservationId,
             orderId = orderId,
             routeId = "route-1",
+            travelDate = LocalDate.now(),
             status = ReservationStatus.HELD.name,
             expiresAt = OffsetDateTime.now().plusMinutes(10)
         ))
@@ -765,6 +775,7 @@ class ReservationServiceTest {
             reservationId = "res-existing-123",
             orderId = orderId,
             routeId = "route-1",
+            travelDate = LocalDate.now(),
             status = "CONFIRMED",
             expiresAt = OffsetDateTime.now()
         ))
@@ -773,7 +784,8 @@ class ReservationServiceTest {
         val request = ReservationRequest(
             orderId = orderId,
             routeId = "route-1",
-            seats = listOf("seat-1", "seat-2")
+            seats = listOf("seat-1", "seat-2"),
+            travelDate = LocalDate.now()
         )
 
         val exception = assertThrows<ApiException> {
@@ -796,9 +808,9 @@ class ReservationServiceTest {
     fun `generateFingerprint produces identical hash for reordered and duplicate seats`() {
         val service = buildService(FakeSeatRepository(), FakeReservationRepository(), FakeIdempotencyRecordRepository(), FakeOutboxEventRepository())
         val orderId = UUID.randomUUID()
-        val req1 = ReservationRequest(orderId, listOf("1A", "1B", "1C"), "route-1")
-        val req2 = ReservationRequest(orderId, listOf("1C", "1A", "1B"), "route-1")
-        val req3 = ReservationRequest(orderId, listOf("1B", "1A", "1C", "1A", "1B"), "route-1")
+        val req1 = ReservationRequest(orderId, listOf("1A", "1B", "1C"), "route-1", LocalDate.now())
+        val req2 = ReservationRequest(orderId, listOf("1C", "1A", "1B"), "route-1", LocalDate.now())
+        val req3 = ReservationRequest(orderId, listOf("1B", "1A", "1C", "1A", "1B"), "route-1", LocalDate.now())
 
         val method = service.javaClass.getDeclaredMethod("generateFingerprint", ReservationRequest::class.java).apply {
             isAccessible = true
