@@ -22,29 +22,29 @@ EuroTransit is designed as an enterprise-grade system. Public APIs must assume a
 
 ### Endpoint Security Summary
 
-| Endpoint Group | Exposure | Authentication | Authorization |
-| --- | --- | --- | --- |
-| `GET /api/catalog/**` | Public or authenticated depending on offer visibility | Optional for public catalog; required for personalized offers | Public read or customer scope |
-| `POST /api/orders` | External | Required | Customer scope; principal becomes order owner |
-| `GET /api/orders/{orderId}` | External | Required | Order owner or privileged operations scope |
-| `POST /api/orders/{orderId}/reconciliation/redrive` | Internal operations | Required operations credential | Operations role only; redrives an open reconciliation record through the Orders outbox |
-| `POST /api/orders/{orderId}/reconciliation/{recordId}/resolve` | Internal operations | Required operations credential | Operations role only; records evidence-backed resolution of a terminal invariant incident |
-| `POST /api/inventory/reservations` | Internal | Required service credential plus propagated user context | Orders service only; order owner context required |
-| `PUT /api/inventory/reservations/{reservationId}/confirmation` | Internal | Required service credential plus propagated user context | Orders service only; confirms the reservation for its owning order |
-| `DELETE /api/inventory/reservations/{reservationId}` | Internal | Required service credential plus propagated user context | Orders service only; compensation for owned order |
-| `POST /api/payments/authorize` | Internal | Required service credential plus propagated user context | Orders service only; payment belongs to owned order |
-| `POST /api/payments/refund` | Internal | Required service credential plus propagated user context | Orders service only; idempotently reverses payment for a failed checkout |
-| `GET /api/notifications` | External | Required | Authenticated customer can read only their own notifications |
-| `GET /api/notifications/stream` | External | Required | Authenticated customer can receive only their own live notification events |
+| Endpoint Group                                                 | Exposure                                              | Authentication                                                | Authorization                                                                             |
+|----------------------------------------------------------------|-------------------------------------------------------|---------------------------------------------------------------|-------------------------------------------------------------------------------------------|
+| `GET /api/catalog/**`                                          | Public or authenticated depending on offer visibility | Optional for public catalog; required for personalized offers | Public read or customer scope                                                             |
+| `POST /api/orders`                                             | External                                              | Required                                                      | Customer scope; principal becomes order owner                                             |
+| `GET /api/orders/{orderId}`                                    | External                                              | Required                                                      | Order owner or privileged operations scope                                                |
+| `POST /api/orders/{orderId}/reconciliation/redrive`            | Internal operations                                   | Required operations credential                                | Operations role only; redrives an open reconciliation record through the Orders outbox    |
+| `POST /api/orders/{orderId}/reconciliation/{recordId}/resolve` | Internal operations                                   | Required operations credential                                | Operations role only; records evidence-backed resolution of a terminal invariant incident |
+| `POST /api/inventory/reservations`                             | Internal                                              | Required service credential plus propagated user context      | Orders service only; order owner context required                                         |
+| `PUT /api/inventory/reservations/{reservationId}/confirmation` | Internal                                              | Required service credential plus propagated user context      | Orders service only; confirms the reservation for its owning order                        |
+| `DELETE /api/inventory/reservations/{reservationId}`           | Internal                                              | Required service credential plus propagated user context      | Orders service only; compensation for owned order                                         |
+| `POST /api/payments/authorize`                                 | Internal                                              | Required service credential plus propagated user context      | Orders service only; payment belongs to owned order                                       |
+| `POST /api/payments/refund`                                    | Internal                                              | Required service credential plus propagated user context      | Orders service only; idempotently reverses payment for a failed checkout                  |
+| `GET /api/notifications`                                       | External                                              | Required                                                      | Authenticated customer can read only their own notifications                              |
+| `GET /api/notifications/stream`                                | External                                              | Required                                                      | Authenticated customer can receive only their own live notification events                |
 
 ## Shared Request Headers
 
-| Header | Required On | Contract |
-| --- | --- | --- |
-| `Authorization` | Protected external APIs and internal service calls according to the endpoint security summary | Carries a bearer JWT for public APIs or service identity for internal calls. |
-| `X-User-Id` | Internal service-to-service calls (e.g. `POST /api/inventory/reservations`) | Explicitly propagates the original customer identity when the `Authorization` header carries a service account token instead of the user token. |
-| `X-Correlation-Id` | All internal calls, logs, and Kafka events | Public clients may provide it; the gateway generates one if absent; services must propagate it unchanged through one checkout flow. |
-| `Idempotency-Key` | `POST /api/orders`, both `POST /api/orders/{orderId}/reconciliation/**` operations, `POST /api/inventory/reservations`, `POST /api/payments/authorize`, `POST /api/payments/refund` | Identifies one mutating attempt. It is not an authorization credential and must be scoped with caller/user context, operation, and request fingerprint. |
+| Header             | Required On                                                                                                                                                                         | Contract                                                                                                                                                |
+|--------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Authorization`    | Protected external APIs and internal service calls according to the endpoint security summary                                                                                       | Carries a bearer JWT for public APIs or service identity for internal calls.                                                                            |
+| `X-User-Id`        | Internal service-to-service calls (e.g. `POST /api/inventory/reservations`)                                                                                                         | Explicitly propagates the original customer identity when the `Authorization` header carries a service account token instead of the user token.         |
+| `X-Correlation-Id` | All internal calls, logs, and Kafka events                                                                                                                                          | Public clients may provide it; the gateway generates one if absent; services must propagate it unchanged through one checkout flow.                     |
+| `Idempotency-Key`  | `POST /api/orders`, both `POST /api/orders/{orderId}/reconciliation/**` operations, `POST /api/inventory/reservations`, `POST /api/payments/authorize`, `POST /api/payments/refund` | Identifies one mutating attempt. It is not an authorization credential and must be scoped with caller/user context, operation, and request fingerprint. |
 
 Idempotency keys are generated at the caller boundary for the operation they protect:
 
@@ -59,23 +59,23 @@ Idempotency keys are generated at the caller boundary for the operation they pro
 
 Idempotency retention is service-specific:
 
-| Service | Operation | Retention |
-| --- | --- | --- |
-| Orders | Checkout/order placement | 24 hours |
-| Inventory | Seat reservation | 30 minutes |
-| Payments | Payment authorization | 24 hours |
+| Service   | Operation                | Retention  |
+|-----------|--------------------------|------------|
+| Orders    | Checkout/order placement | 24 hours   |
+| Inventory | Seat reservation         | 30 minutes |
+| Payments  | Payment authorization    | 24 hours   |
 
 Inventory seat holds last 10 minutes. The 30-minute idempotency record identifies the original reservation but does not freeze a cached `HELD` response, extend the deadline, or create a replacement hold. A replay resolves the reservation's current state. `reservations.order_id` remains unique after idempotency-record purge, so one order cannot acquire a second reservation.
 
 ## Service Boundaries
 
-| Service | Responsibility | Interaction Style | Why this boundary exists |
-| --- | --- | --- | --- |
-| Catalog | Exposes routes, schedules, products, and offers. | Synchronous read API. | Catalog is read-heavy and tolerant of stale data, so it can be scaled and deployed independently from checkout. |
-| Orders | Owns the customer-facing purchase workflow, order state, idempotent checkout acceptance, and its PostgreSQL database. | Synchronous entry API plus asynchronous pipeline orchestration. | Orders is the money-path coordinator: it accepts checkout requests quickly and records/reports order progress. |
-| Inventory | Owns finite seat availability, time-limited seat holds, and the hold-to-sale transition. | Synchronous hold and confirmation decisions plus reservation events. | Inventory is the contended resource. It must create one strongly consistent hold before payment and atomically confirm the sale before Orders becomes final. Its reservation store is separate from Orders' order-state ownership. |
-| Payments | Owns payment authorization state and integrates with a provider sandbox/test API. | Synchronous idempotent authorization plus payment events. | Payment authorization must not double-charge under retries; an immediate success/failure decision is needed before order confirmation. |
-| Notifications | Sends confirmations and customer updates. | Fully asynchronous event consumer. | Notification failure must not fail checkout. Kafka buffers the work until the service recovers. |
+| Service       | Responsibility                                                                                                        | Interaction Style                                                    | Why this boundary exists                                                                                                                                                                                                           |
+|---------------|-----------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Catalog       | Exposes routes, schedules, products, and offers.                                                                      | Synchronous read API.                                                | Catalog is read-heavy and tolerant of stale data, so it can be scaled and deployed independently from checkout.                                                                                                                    |
+| Orders        | Owns the customer-facing purchase workflow, order state, idempotent checkout acceptance, and its PostgreSQL database. | Synchronous entry API plus asynchronous pipeline orchestration.      | Orders is the money-path coordinator: it accepts checkout requests quickly and records/reports order progress.                                                                                                                     |
+| Inventory     | Owns finite seat availability, time-limited seat holds, and the hold-to-sale transition.                              | Synchronous hold and confirmation decisions plus reservation events. | Inventory is the contended resource. It must create one strongly consistent hold before payment and atomically confirm the sale before Orders becomes final. Its reservation store is separate from Orders' order-state ownership. |
+| Payments      | Owns payment authorization state and integrates with a provider sandbox/test API.                                     | Synchronous idempotent authorization plus payment events.            | Payment authorization must not double-charge under retries; an immediate success/failure decision is needed before order confirmation.                                                                                             |
+| Notifications | Sends confirmations and customer updates.                                                                             | Fully asynchronous event consumer.                                   | Notification failure must not fail checkout. Kafka buffers the work until the service recovers.                                                                                                                                    |
 
 ## Datastore Ownership
 
@@ -203,31 +203,31 @@ Events use a common envelope. `schemaVersion` is the version of the event schema
 
 Consumers must be idempotent because Kafka delivery is treated as at-least-once. Events must not contain bearer tokens, provider secrets, raw payment data, card details, or plaintext credentials.
 
-| Event | Producer | Consumers | Purpose |
-| --- | --- | --- | --- |
-| `order-placed` | Orders | Orders pipeline observers, optional analytics | Durable record that checkout was accepted. |
-| `inventory-reserved` | Inventory | Orders | Indicates that the requested seats are held for 10 minutes and can proceed to payment. Includes the travel date. |
-| `inventory-failed` | Inventory | Orders | Indicates that the hold failed and the order must not proceed to payment. Includes the travel date. |
-| `payment-authorized` | Payments | Orders | Indicates payment authorization succeeded. |
-| `payment-declined` | Payments | Orders | Indicates payment failed and compensation may be needed. |
-| `payment-refunded` | Payments | Orders | Indicates a refund succeeded (compensation completed after a prior authorization). |
-| `payment-refund-failed` | Payments | Orders | Indicates a refund attempt failed and may need manual reconciliation. |
-| `order-confirmed` | Orders | Notifications, observability consumers | Indicates the order is complete and customer notification can be sent. |
-| `notification-requested` | Orders | Notifications | Optional explicit notification command if separated from `order-confirmed`. |
+| Event                    | Producer  | Consumers                                     | Purpose                                                                                                          |
+|--------------------------|-----------|-----------------------------------------------|------------------------------------------------------------------------------------------------------------------|
+| `order-placed`           | Orders    | Orders pipeline observers, optional analytics | Durable record that checkout was accepted.                                                                       |
+| `inventory-reserved`     | Inventory | Orders                                        | Indicates that the requested seats are held for 10 minutes and can proceed to payment. Includes the travel date. |
+| `inventory-failed`       | Inventory | Orders                                        | Indicates that the hold failed and the order must not proceed to payment. Includes the travel date.              |
+| `payment-authorized`     | Payments  | Orders                                        | Indicates payment authorization succeeded.                                                                       |
+| `payment-declined`       | Payments  | Orders                                        | Indicates payment failed and compensation may be needed.                                                         |
+| `payment-refunded`       | Payments  | Orders                                        | Indicates a refund succeeded (compensation completed after a prior authorization).                               |
+| `payment-refund-failed`  | Payments  | Orders                                        | Indicates a refund attempt failed and may need manual reconciliation.                                            |
+| `order-confirmed`        | Orders    | Notifications, observability consumers        | Indicates the order is complete and customer notification can be sent.                                           |
+| `notification-requested` | Orders    | Notifications                                 | Optional explicit notification command if separated from `order-confirmed`.                                      |
 
 ## Error Model
 
 All services use a shared HTTP status mapping:
 
-| Status | Meaning |
-| --- | --- |
-| `400` | Malformed request or required header missing |
-| `401` | Missing or invalid authentication |
-| `403` | Authenticated but not authorized |
-| `404` | Resource missing or intentionally not visible |
-| `409` | Idempotency conflict, reservation conflict, or incompatible state transition |
-| `422` | Valid request shape but invalid business action |
-| `503` | Dependency unavailable, provider unavailable, or circuit breaker open |
+| Status | Meaning                                                                      |
+|--------|------------------------------------------------------------------------------|
+| `400`  | Malformed request or required header missing                                 |
+| `401`  | Missing or invalid authentication                                            |
+| `403`  | Authenticated but not authorized                                             |
+| `404`  | Resource missing or intentionally not visible                                |
+| `409`  | Idempotency conflict, reservation conflict, or incompatible state transition |
+| `422`  | Valid request shape but invalid business action                              |
+| `503`  | Dependency unavailable, provider unavailable, or circuit breaker open        |
 
 Error responses use structured JSON:
 
