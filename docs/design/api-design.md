@@ -143,6 +143,7 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
   - Internal API; callers must be trusted services such as Orders.
   - Requires an Orders-generated idempotency key derived from the order id, operation, and attempt.
   - Uses a strong consistency decision: the same seat cannot have two active holds.
+  - Differentiates holds by route, travel date, and seat, so the same physical seat can be sold for different days.
   - Stores reservation idempotency records for 30 minutes without extending the 10-minute hold.
   - Owns reservation/seat availability state for the no-oversell invariant; this does not replace Orders' ownership of the order-state database.
 - `PUT /api/inventory/reservations/{reservationId}/confirmation`
@@ -205,8 +206,8 @@ Consumers must be idempotent because Kafka delivery is treated as at-least-once.
 | Event | Producer | Consumers | Purpose |
 | --- | --- | --- | --- |
 | `order-placed` | Orders | Orders pipeline observers, optional analytics | Durable record that checkout was accepted. |
-| `inventory-reserved` | Inventory | Orders | Indicates that the requested seats are held for 10 minutes and can proceed to payment. |
-| `inventory-failed` | Inventory | Orders | Indicates that the hold failed and the order must not proceed to payment. |
+| `inventory-reserved` | Inventory | Orders | Indicates that the requested seats are held for 10 minutes and can proceed to payment. Includes the travel date. |
+| `inventory-failed` | Inventory | Orders | Indicates that the hold failed and the order must not proceed to payment. Includes the travel date. |
 | `payment-authorized` | Payments | Orders | Indicates payment authorization succeeded. |
 | `payment-declined` | Payments | Orders | Indicates payment failed and compensation may be needed. |
 | `payment-refunded` | Payments | Orders | Indicates a refund succeeded (compensation completed after a prior authorization). |
