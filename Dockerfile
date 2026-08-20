@@ -50,6 +50,10 @@ COPY --from=builder /workspace/extracted/application/ ./
 USER appuser
 
 ENV SERVER_PORT=8080
+# The AKS demo runs the five Spring/Kotlin services on a fixed, memory-constrained
+# node pool. Keep the JVM heap and native allocations bounded while allowing a
+# deployment to override JAVA_TOOL_OPTIONS when it needs a different profile.
+ENV JAVA_TOOL_OPTIONS="-Xms64m -Xmx160m -XX:MaxMetaspaceSize=128m -XX:MaxDirectMemorySize=32m -XX:ReservedCodeCacheSize=48m -Xss512k"
 
 EXPOSE 8080
 
