@@ -30,7 +30,7 @@ spec:
             - containerPort: 8080
           env:
             - name: JAVA_TOOL_OPTIONS
-              value: "-XX:MaxRAMPercentage=75"
+              value: "-Xms64m -Xmx160m -XX:MaxMetaspaceSize=128m -XX:MaxDirectMemorySize=32m -XX:ReservedCodeCacheSize=48m -Xss512k"
             - name: SERVER_PORT
               value: "8080"
             - name: MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED
@@ -100,7 +100,7 @@ spec:
             - containerPort: 8080
           env:
             - name: JAVA_TOOL_OPTIONS
-              value: "-XX:MaxRAMPercentage=75"
+              value: "-Xms64m -Xmx160m -XX:MaxMetaspaceSize=128m -XX:MaxDirectMemorySize=32m -XX:ReservedCodeCacheSize=48m -Xss512k"
             - name: SERVER_PORT
               value: "8080"
             - name: MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED
@@ -184,7 +184,7 @@ spec:
             - containerPort: 8080
           env:
             - name: JAVA_TOOL_OPTIONS
-              value: "-XX:MaxRAMPercentage=75"
+              value: "-Xms64m -Xmx160m -XX:MaxMetaspaceSize=128m -XX:MaxDirectMemorySize=32m -XX:ReservedCodeCacheSize=48m -Xss512k"
             - name: SERVER_PORT
               value: "8080"
             - name: MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED
@@ -268,7 +268,7 @@ spec:
             - containerPort: 8080
           env:
             - name: JAVA_TOOL_OPTIONS
-              value: "-XX:MaxRAMPercentage=75"
+              value: "-Xms64m -Xmx160m -XX:MaxMetaspaceSize=128m -XX:MaxDirectMemorySize=32m -XX:ReservedCodeCacheSize=48m -Xss512k"
             - name: SERVER_PORT
               value: "8080"
             - name: MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED
@@ -352,7 +352,7 @@ spec:
             - containerPort: 8080
           env:
             - name: JAVA_TOOL_OPTIONS
-              value: "-XX:MaxRAMPercentage=75"
+              value: "-Xms64m -Xmx160m -XX:MaxMetaspaceSize=128m -XX:MaxDirectMemorySize=32m -XX:ReservedCodeCacheSize=48m -Xss512k"
             - name: SERVER_PORT
               value: "8080"
             - name: MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED
