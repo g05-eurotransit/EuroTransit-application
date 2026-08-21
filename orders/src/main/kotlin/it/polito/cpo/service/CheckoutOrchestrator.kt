@@ -34,6 +34,7 @@ import org.springframework.transaction.reactive.TransactionalOperator
 import org.springframework.transaction.reactive.executeAndAwait
 import java.security.MessageDigest
 import java.time.Duration
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.util.UUID
 
@@ -112,6 +113,20 @@ class CheckoutOrchestrator(
             ?.getOrEmpty<String>(CorrelationId.CONTEXT_KEY)?.orElse(null)
             ?: CorrelationId.generate()
 
+        // Syntactic guard only, and deliberately so. Which dates actually have seats is Inventory's
+        // to know (ADR-001), and a date with none becomes a definitive hold rejection the pipeline
+        // already handles. Orders checks just this much because, unlike routeId — picked from a list —
+        // the date is entered by the customer, so a mistake is likely; without the guard they would
+        // only find out from a FAILED order well after the 202.
+        if (request.travelDate.isBefore(LocalDate.now())) {
+            meterRegistry.counter("orders.checkout.rejected", "reason", "travel_date_in_the_past").increment()
+            throw ApiException(
+                HttpStatus.BAD_REQUEST,
+                "TRAVEL_DATE_IN_THE_PAST",
+                "Travel date ${request.travelDate} is in the past",
+            )
+        }
+
         val fingerprint = fingerprint(userId, request)
 
         // 1. Check idempotency. Same key + same payload -> replay the stored result; same key + a
@@ -142,6 +157,7 @@ class CheckoutOrchestrator(
             status = OrderStatus.ACCEPTED,
             routeId = request.routeId,
             seats = request.seats.joinToString(","),
+            travelDate = request.travelDate,
             totalAmount = request.totalAmount,
             createdAt = LocalDateTime.now(),
             paymentMethodToken = request.paymentMethodToken,
@@ -173,6 +189,11 @@ class CheckoutOrchestrator(
             append(userId).append('|')
             append(request.routeId).append('|')
             append(request.seats.sorted().joinToString(",")).append('|')
+            // The travel date is part of what was ordered, so it must be part of the fingerprint.
+            // Omit it and the same idempotency key reused for a different day would look like a
+            // genuine retry: the caller would get a 202 replaying the *other* day's order and
+            // believe it had booked the day it asked for.
+            append(request.travelDate).append('|')
             append(request.totalAmount.stripTrailingZeros().toPlainString()).append('|')
             append(request.paymentMethodToken)
         }
@@ -264,6 +285,7 @@ class CheckoutOrchestrator(
                 orderId = ctx.orderId,
                 seats = ctx.order.seats.split(","),
                 routeId = ctx.order.routeId,
+                travelDate = ctx.order.travelDate,
             ),
             idempotencyKey = "inv-${ctx.orderId}",
             userId = ctx.order.userId,

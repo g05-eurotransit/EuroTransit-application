@@ -79,6 +79,7 @@ class OrderController(
             status = order.status,
             routeId = order.routeId,
             seats = order.seats.split(","),
+            travelDate = order.travelDate,
             totalAmount = order.totalAmount,
             createdAt = order.createdAt
         )

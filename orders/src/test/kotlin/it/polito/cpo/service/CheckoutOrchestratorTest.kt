@@ -37,6 +37,7 @@ import tools.jackson.databind.ObjectMapper
 import tools.jackson.databind.json.JsonMapper
 import tools.jackson.module.kotlin.kotlinModule
 import java.math.BigDecimal
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
@@ -61,6 +62,9 @@ import kotlin.test.assertTrue
  * tests prove control flow, not rollback. Rollback is covered in `CheckoutPipelineIntegrationTest`.
  */
 class CheckoutOrchestratorTest {
+
+    /** A stable future date: the checkout guard rejects anything in the past. */
+    private val TRAVEL_DATE: LocalDate = LocalDate.now().plusDays(7)
 
     private val mapper: ObjectMapper = JsonMapper.builder().addModule(kotlinModule()).build()
 
@@ -239,6 +243,7 @@ class CheckoutOrchestratorTest {
         val releasedReservationIds = CopyOnWriteArrayList<String>()
         val releaseKeys = CopyOnWriteArrayList<String>()
         val reserveCalls = CopyOnWriteArrayList<UUID>()
+        val reservedTravelDates = CopyOnWriteArrayList<LocalDate>()
         val confirmCalls = CopyOnWriteArrayList<String>()
 
         override suspend fun reserveSeats(
@@ -247,6 +252,7 @@ class CheckoutOrchestratorTest {
             userId: String,
         ): HoldOutcome {
             reserveCalls.add(request.orderId)
+            reservedTravelDates.add(request.travelDate)
             duringReserve?.invoke()
             return hold()
         }
@@ -310,12 +316,14 @@ class CheckoutOrchestratorTest {
         token: String? = "test-token",
         reservationId: String? = null,
         compensationReason: String? = null,
+        travelDate: LocalDate = TRAVEL_DATE,
     ) = Order(
         id = id,
         userId = "user-1",
         status = status,
         routeId = "R1",
         seats = "1A,1B",
+        travelDate = travelDate,
         totalAmount = BigDecimal("100.00"),
         createdAt = LocalDateTime.now(),
         paymentMethodToken = token,
@@ -337,7 +345,7 @@ class CheckoutOrchestratorTest {
         val service = FakeOrderService()
 
         val response = orchestratorFor(service).checkout(
-            request = CheckoutRequest(routeId = "R1", seats = listOf("1A", "1B"), totalAmount = BigDecimal("100.00"), paymentMethodToken = "test-token"),
+            request = CheckoutRequest(routeId = "R1", seats = listOf("1A", "1B"), travelDate = TRAVEL_DATE, totalAmount = BigDecimal("100.00"), paymentMethodToken = "test-token"),
             idempotencyKey = "key-123",
             userId = "user-1",
             recipientEmail = "alice@example.com"
@@ -356,7 +364,7 @@ class CheckoutOrchestratorTest {
         service.seeded = IdempotentRequest("key-abc", mapper.writeValueAsString(storedResponse), LocalDateTime.now())
 
         val response = orchestratorFor(service).checkout(
-            request = CheckoutRequest(routeId = "R1", seats = listOf("2A"), totalAmount = BigDecimal("50.00"), paymentMethodToken = "test-token"),
+            request = CheckoutRequest(routeId = "R1", seats = listOf("2A"), travelDate = TRAVEL_DATE, totalAmount = BigDecimal("50.00"), paymentMethodToken = "test-token"),
             idempotencyKey = "key-abc",
             userId = "user-1",
             recipientEmail = "alice@example.com"
@@ -377,7 +385,7 @@ class CheckoutOrchestratorTest {
 
         val ex = assertThrows<ApiException> {
             orchestratorFor(service).checkout(
-                request = CheckoutRequest(routeId = "R9", seats = listOf("9Z"), totalAmount = BigDecimal("999.00"), paymentMethodToken = "other-token"),
+                request = CheckoutRequest(routeId = "R9", seats = listOf("9Z"), travelDate = TRAVEL_DATE, totalAmount = BigDecimal("999.00"), paymentMethodToken = "other-token"),
                 idempotencyKey = "key-x",
                 userId = "user-1",
                 recipientEmail = "alice@example.com"
@@ -387,6 +395,92 @@ class CheckoutOrchestratorTest {
         assertEquals(HttpStatus.CONFLICT, ex.status)
         assertEquals("IDEMPOTENCY_CONFLICT", ex.code)
         assertTrue(service.savedOrderStatuses.isEmpty())
+    }
+
+    // --- travel date (issue #64) ------------------------------------------------------------------
+
+    @Test
+    fun `the travel date reaches the Inventory hold`() = runTest {
+        val service = FakeOrderService()
+        val inventory = StubInventoryClient()
+        val orderId = UUID.randomUUID()
+        val date = LocalDate.now().plusDays(21)
+        service.ordersById[orderId] = order(orderId, travelDate = date)
+
+        orchestratorFor(service, inventory).processOrderPlaced(event(orderId))
+
+        // Without this, Inventory keys the hold by (route, seat) alone and the seat is sold forever.
+        assertEquals(listOf(date), inventory.reservedTravelDates.toList())
+    }
+
+    @Test
+    fun `a checkout for a past travel date is rejected before anything is persisted`() = runTest {
+        val service = FakeOrderService()
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service).checkout(
+                request = CheckoutRequest(
+                    routeId = "R1",
+                    seats = listOf("1A"),
+                    travelDate = LocalDate.now().minusDays(1),
+                    totalAmount = BigDecimal("100.00"),
+                    paymentMethodToken = "test-token",
+                ),
+                idempotencyKey = "key-past",
+                userId = "user-1",
+                recipientEmail = "alice@example.com",
+            )
+        }
+
+        assertEquals(HttpStatus.BAD_REQUEST, ex.status)
+        assertEquals("TRAVEL_DATE_IN_THE_PAST", ex.code)
+        // Rejected before any write: no order, and no idempotency record to poison the key.
+        assertTrue(service.savedOrderStatuses.isEmpty())
+        assertTrue(service.idempotencyStore.isEmpty())
+    }
+
+    @Test
+    fun `today is an acceptable travel date`() = runTest {
+        val service = FakeOrderService()
+
+        val response = orchestratorFor(service).checkout(
+            request = CheckoutRequest(
+                routeId = "R1",
+                seats = listOf("1A"),
+                travelDate = LocalDate.now(),
+                totalAmount = BigDecimal("100.00"),
+                paymentMethodToken = "test-token",
+            ),
+            idempotencyKey = "key-today",
+            userId = "user-1",
+            recipientEmail = "alice@example.com",
+        )
+
+        // The guard rejects the past, not the present: a same-day departure is a real purchase.
+        assertEquals(OrderStatus.ACCEPTED, response.status)
+    }
+
+    @Test
+    fun `the same idempotency key with a different travel date is a conflict`() = runTest {
+        val service = FakeOrderService()
+        val orchestrator = orchestratorFor(service)
+        fun requestFor(date: LocalDate) = CheckoutRequest(
+            routeId = "R1",
+            seats = listOf("1A"),
+            travelDate = date,
+            totalAmount = BigDecimal("100.00"),
+            paymentMethodToken = "test-token",
+        )
+
+        orchestrator.checkout(requestFor(TRAVEL_DATE), "key-dates", "user-1", "alice@example.com")
+
+        // The travel date is part of what was ordered, so it has to be part of the fingerprint. If it
+        // were not, this would replay the first order and the caller would believe it had booked the
+        // second date.
+        val ex = assertThrows<ApiException> {
+            orchestrator.checkout(requestFor(TRAVEL_DATE.plusDays(1)), "key-dates", "user-1", "alice@example.com")
+        }
+        assertEquals("IDEMPOTENCY_CONFLICT", ex.code)
     }
 
     // --- happy path and phase order ---------------------------------------------------------------
