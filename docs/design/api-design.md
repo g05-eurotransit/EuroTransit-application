@@ -103,13 +103,22 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
 ### Orders
 
 - `POST /api/orders`
-  - Accepts a checkout request.
+  - Accepts a checkout request: `routeId`, `seats`, `travelDate`, `totalAmount`, `paymentMethodToken`.
+  - `travelDate` is the ISO day being travelled (`"2026-09-01"`). A route plus a seat does not identify
+    a bookable thing on its own: Inventory keys seats by `(route_id, travel_date, seat_id)`, so the same
+    physical seat is sold separately for each day.
   - Requires an authenticated customer identity.
   - Returns `202 Accepted` with an `orderId` and initial status after the request has been accepted for processing.
+  - Rejects a `travelDate` in the past with `400 TRAVEL_DATE_IN_THE_PAST`. Orders deliberately checks no
+    more than that: which dates actually have seats is Inventory's to answer, and a date without seats
+    becomes a definitive hold rejection that fails the order through the normal path.
   - Requires a public-client-generated `Idempotency-Key` so client retries do not create duplicate orders.
+    The stored request fingerprint includes `travelDate`, so reusing one key for two different days is an
+    `IDEMPOTENCY_CONFLICT` rather than a replay of the wrong day.
   - Stores checkout idempotency records for 24 hours.
 - `GET /api/orders/{orderId}`
   - Returns the current order status: accepted, reserving, payment-pending, confirming-inventory, compensating, confirmed, failed, or cancelled.
+  - Includes `travelDate`, distinct from `createdAt`: the day of travel, not the day of purchase.
   - Requires the authenticated customer to own the order, unless an operator/admin role is used.
   - Returns `404 Not Found` for customer-to-customer access to avoid revealing another customer's order.
 - `POST /api/orders/{orderId}/cancel`
