@@ -34,11 +34,10 @@ import org.springframework.security.test.web.reactive.server.SecurityMockServerC
 import org.springframework.test.web.reactive.server.WebTestClient
 import org.springframework.transaction.reactive.TransactionalOperator
 import tools.jackson.databind.ObjectMapper
-import java.time.Clock
 import java.time.LocalDateTime
 import java.util.UUID
 
-@WebFluxTest(controllers = [InventoryController::class])
+@WebFluxTest(controllers = [ReservationController::class])
 @Import(SecurityConfig::class, GlobalErrorHandler::class, InventoryControllerTest.ControllerTestConfig::class)
 class InventoryControllerTest {
 
