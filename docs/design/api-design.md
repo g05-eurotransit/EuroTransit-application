@@ -29,6 +29,7 @@ EuroTransit is designed as an enterprise-grade system. Public APIs must assume a
 | `GET /api/orders/{orderId}` | External | Required | Order owner or privileged operations scope |
 | `POST /api/orders/{orderId}/reconciliation/redrive` | Internal operations | Required operations credential | Operations role only; redrives an open reconciliation record through the Orders outbox |
 | `POST /api/orders/{orderId}/reconciliation/{recordId}/resolve` | Internal operations | Required operations credential | Operations role only; records evidence-backed resolution of a terminal invariant incident |
+| `GET /api/inventory/routes/{routeId}/seats` | Internal | Required service credential | Trusted services only (e.g. Catalog); no propagated user context required |
 | `POST /api/inventory/reservations` | Internal | Required service credential plus propagated user context | Orders service only; order owner context required |
 | `PUT /api/inventory/reservations/{reservationId}/confirmation` | Internal | Required service credential plus propagated user context | Orders service only; confirms the reservation for its owning order |
 | `DELETE /api/inventory/reservations/{reservationId}` | Internal | Required service credential plus propagated user context | Orders service only; compensation for owned order |
@@ -138,6 +139,10 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
 
 ### Inventory
 
+- `GET /api/inventory/routes/{routeId}/seats`
+  - Returns all seats and their current availability status for a specific route.
+  - Internal API; callers must be trusted services such as Catalog.
+  - Does not require a propagated user context (`X-User-Id`), as it only returns public seat state.
 - `POST /api/inventory/reservations`
   - Attempts to create a 10-minute hold for the requested seats.
   - Internal API; callers must be trusted services such as Orders.
