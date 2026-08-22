@@ -5,9 +5,15 @@ import org.springframework.data.r2dbc.repository.Modifying
 import org.springframework.data.r2dbc.repository.Query
 import org.springframework.data.repository.kotlin.CoroutineCrudRepository
 import org.springframework.stereotype.Repository
+import kotlinx.coroutines.flow.Flow
 
 @Repository
 interface SeatRepository : CoroutineCrudRepository<Seat, String> {
+
+    /**
+     * Retrieves all seats for a specific route.
+     */
+    fun findByRouteId(routeId: String): Flow<Seat>
 
     /**
      * Updates available seats to held for a route and reservation when all seats are available.
