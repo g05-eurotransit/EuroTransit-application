@@ -38,8 +38,8 @@ import java.time.LocalDateTime
 import java.util.UUID
 
 @WebFluxTest(controllers = [ReservationController::class])
-@Import(SecurityConfig::class, GlobalErrorHandler::class, InventoryControllerTest.ControllerTestConfig::class)
-class InventoryControllerTest {
+@Import(SecurityConfig::class, GlobalErrorHandler::class, ReservationControllerTest.ControllerTestConfig::class)
+class ReservationControllerTest {
 
     @Autowired
     lateinit var context: ApplicationContext
