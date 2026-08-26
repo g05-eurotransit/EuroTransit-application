@@ -1,21 +1,47 @@
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
-import { getOrder, isTerminal, type OrderView } from "../api/orders";
+import { Link, useParams } from "react-router-dom";
+import { Alert, Badge, Card, Spinner } from "react-bootstrap";
+import { getOrder, isTerminal, type OrderStatus, type OrderView } from "../api/orders";
+import { getRoute, type Route } from "../api/catalog";
 import { ApiError } from "../api/client";
+import { HAPPY_PATH, OrderStepper } from "../components/OrderStepper";
+import { useCountdown } from "../hooks/useCountdown";
 
-/**
- * Order status view with polling until a terminal state (clear success/failure states,
- * assignment requirement). Polling stops on CONFIRMED/FAILED/CANCELLED.
- */
+const CURRENCY = "EUR";
+
+function formatDate(iso: string): string {
+  return new Date(`${iso}T00:00:00`).toLocaleDateString(undefined, {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+const STATUS_VARIANT: Record<OrderStatus, string> = {
+  CONFIRMED: "success",
+  FAILED: "danger",
+  CANCELLED: "danger",
+  ACCEPTED: "warning",
+  RESERVING: "warning",
+  PAYMENT_PENDING: "warning",
+  CONFIRMING_INVENTORY: "warning",
+  COMPENSATING: "accent",
+};
+
+
 export function OrderStatusPage() {
   const { orderId } = useParams<{ orderId: string }>();
   const [order, setOrder] = useState<OrderView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [route, setRoute] = useState<Route | null>(null);
+  const [lastKnownStepIndex, setLastKnownStepIndex] = useState(0);
 
   useEffect(() => {
     if (!orderId) return;
     let stop = false;
     const ac = new AbortController();
+    setLastKnownStepIndex(0); // new orderId: this session hasn't observed anything about it yet
 
     async function poll() {
       while (!stop) {
@@ -23,7 +49,9 @@ export function OrderStatusPage() {
           const o = await getOrder(orderId!, ac.signal);
           if (stop) return;
           setOrder(o);
-          if (isTerminal(o.status)) return;
+          const idx = HAPPY_PATH.findIndex((s) => s.status === o.status);
+          if (idx >= 0) setLastKnownStepIndex((prev) => Math.max(prev, idx));
+          if (isTerminal(o.status) || o.status === "COMPENSATING") return;
         } catch (e) {
           if (e instanceof ApiError && e.kind === "network") return; // aborted
           if (e instanceof ApiError && e.kind === "not_found") {
@@ -43,28 +71,102 @@ export function OrderStatusPage() {
     };
   }, [orderId]);
 
-  if (error) return <p className="error">{error}</p>;
+  useEffect(() => {
+    if (!order) return;
+    const ac = new AbortController();
+    getRoute(order.routeId, ac.signal)
+      .then(setRoute)
+      .catch(() => {}); // keep showing the raw routeId — see the comment on `route` above
+    return () => ac.abort();
+  }, [order?.routeId]);
+
+  const countdown = useCountdown(
+    order?.reservationExpiresAt ?? null,
+    !!order && !isTerminal(order.status),
+  );
+
+  if (error) return <p className="text-danger">{error}</p>;
   if (!order) return <p>Loading order…</p>;
 
   return (
-    <>
-      <h1>Order</h1>
-      <div className="card">
-        <div>
-          Status: <span className={`status ${order.status}`}>{order.status}</span>
-        </div>
-        <div className="muted">Order {order.orderId}</div>
-        <div>Route: {order.routeId}</div>
-        <div>Seats: {order.seats.join(", ")}</div>
-        <div>
-          Total: {order.totalAmount.toFixed(2)}
-        </div>
-        {!isTerminal(order.status) && <p className="muted">Refreshing…</p>}
-        {order.status === "CONFIRMED" && <p>Your booking is confirmed. 🎉</p>}
-        {(order.status === "FAILED" || order.status === "CANCELLED") && (
-          <p className="error">This order did not complete.</p>
-        )}
+    <div className="mx-auto" style={{ maxWidth: 640 }}>
+      <h1 className="fw-bold mb-4">Order</h1>
+      <Card className="border-0 shadow-sm">
+        <Card.Body className="p-4">
+          <div className="d-flex justify-content-between align-items-center mb-5">
+            <div className="text-secondary-emphasis small">Order #{order.orderId}</div>
+            <div className="d-flex align-items-center gap-3">
+              <Badge bg={STATUS_VARIANT[order.status]} className="fs-6">
+                {order.status}
+              </Badge>
+              {countdown && (
+                <div className="bg-primary text-white rounded-3 px-3 py-2 text-center">
+                  <div className="text-uppercase" style={{ fontSize: "0.6rem", letterSpacing: "0.08em" }}>
+                    Expires in
+                  </div>
+                  <div className="fw-bold fs-5 lh-1">{countdown}</div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <OrderStepper status={order.status} lastKnownStepIndex={lastKnownStepIndex} />
+
+          <div className="d-flex flex-column gap-3 mb-4">
+            <div>
+              <div className="text-uppercase text-secondary-emphasis small fw-semibold">Route</div>
+              <div className="fs-5 fw-bold text-dark">
+                {route ? `${route.origin} → ${route.destination}` : order.routeId}
+              </div>
+            </div>
+            <div>
+              <div className="text-uppercase text-secondary-emphasis small fw-semibold">Travel date</div>
+              <div className="fs-5 fw-bold text-dark">{formatDate(order.travelDate)}</div>
+            </div>
+            <div>
+              <div className="text-uppercase text-secondary-emphasis small fw-semibold">Seats</div>
+              <div className="fs-5 fw-bold text-dark">{order.seats.join(", ")}</div>
+            </div>
+            <div>
+              <div className="text-uppercase text-secondary-emphasis small fw-semibold">Total</div>
+              <div className="fs-5 fw-bold text-dark">
+                {order.totalAmount.toFixed(2)} {CURRENCY}
+              </div>
+            </div>
+          </div>
+
+          {!isTerminal(order.status) && order.status !== "COMPENSATING" && (
+            <div className="text-secondary-emphasis d-flex align-items-center gap-2">
+              <Spinner animation="border" size="sm" /> Refreshing…
+            </div>
+          )}
+          {order.status === "COMPENSATING" && (
+            <Alert variant="accent" className="d-flex align-items-center gap-2 mb-0">
+              <i className="bi bi-hourglass-split fs-5" aria-hidden="true" />
+              <div>
+                We are resolving the payment for this order. This can take a few minutes — no
+                further action is needed from you.
+              </div>
+            </Alert>
+          )}
+          {order.status === "CONFIRMED" && (
+            <Alert variant="success" className="mb-0 fw-semibold">
+              Your booking is confirmed.
+            </Alert>
+          )}
+          {(order.status === "FAILED" || order.status === "CANCELLED") && (
+            <Alert variant="danger" className="mb-0">
+              This order did not complete.
+            </Alert>
+          )}
+        </Card.Body>
+      </Card>
+      <div className="text-center mt-3">
+        <Link to="/" className="btn btn-primary fw-semibold">
+          <i className="bi bi-arrow-left me-2" aria-hidden="true" />
+          Back to routes
+        </Link>
       </div>
-    </>
+    </div>
   );
 }

@@ -1,13 +1,29 @@
-import { useState, useEffect, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { useAuth } from "react-oidc-context";
+import { Card, Col, Form, Row } from "react-bootstrap";
 import { placeOrder } from "../api/orders";
 import { ApiError, newId } from "../api/client";
+import { OrderSummaryCard } from "../components/OrderSummaryCard";
 
 interface CheckoutState {
-  routeId?: string;
-  price?: number;
-  currency?: string;
+  routeId: string;
+  origin: string;
+  destination: string;
+  departureTime: string;
+  arrivalTime: string;
+  trainType: string;
+  fareClass: string;
+  travelDate: string;
+  seats: string[];
+  totalAmount: number;
+  currency: string;
 }
+
+const SANDBOX_METHODS = [
+  { token: "tok_visa", label: "Test card — successful payment" },
+  { token: "tok_chargeDeclined", label: "Test card — declined payment" },
+];
 
 /**
  * Checkout form. Client-side validation is UX only (07b slide 26 — server is the truth).
@@ -17,35 +33,35 @@ interface CheckoutState {
 export function CheckoutPage() {
   const location = useLocation();
   const navigate = useNavigate();
-  const state = (location.state as CheckoutState) ?? {};
+  const auth = useAuth();
+  const state = location.state as CheckoutState | null;
 
-  const [routeId, setRouteId] = useState(state.routeId ?? "");
-  const [seats, setSeats] = useState("1A");
-  const [amount, setAmount] = useState(state.price ?? 0);
-  // Sandbox test token; format to confirm with the Payments slice.
-  const [paymentToken] = useState("tok_visa");
-  const [attemptKey, setAttemptKey] = useState(newId());
+  const [paymentToken, setPaymentToken] = useState(SANDBOX_METHODS[0]!.token);
+  const [attemptKey] = useState(newId());
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setAttemptKey(newId());
-  }, [routeId, seats, amount]);
+    if (!state) navigate("/", { replace: true });
+  }, [state, navigate]);
 
-  const seatList = seats
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const valid = routeId.length > 0 && seatList.length > 0 && amount > 0;
+  if (!state) return null;
+  const order: CheckoutState = state;
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!valid || submitting) return;
+    if (submitting) return;
     setSubmitting(true);
     setError(null);
     try {
       const res = await placeOrder(
-        { routeId, seats: seatList, totalAmount: amount, paymentMethodToken: paymentToken },
+        {
+          routeId: order.routeId,
+          seats: order.seats,
+          travelDate: order.travelDate,
+          totalAmount: order.totalAmount,
+          paymentMethodToken: paymentToken,
+        },
         attemptKey, // reused if the user retries this same attempt
         newId(), // fresh correlation id per action
       );
@@ -71,30 +87,86 @@ export function CheckoutPage() {
 
   return (
     <>
-      <h1>Checkout</h1>
-      <form className="card" onSubmit={onSubmit}>
-        <label htmlFor="routeId">Route</label>
-        <input id="routeId" value={routeId} onChange={(e) => setRouteId(e.target.value)} />
+      <div className="mb-4 pb-3 border-bottom">
+        <h1 className="fw-bold mb-1">Checkout</h1>
+        <p className="text-uppercase text-secondary-emphasis small fw-semibold mb-0">
+          Complete the details to confirm your trip.
+        </p>
+      </div>
 
-        <label htmlFor="seats">Seats (comma-separated)</label>
-        <input id="seats" value={seats} onChange={(e) => setSeats(e.target.value)} />
+      <Form onSubmit={onSubmit}>
+        <Row className="g-4">
+          <Col lg={7} className="d-flex flex-column gap-4">
+            <Card className="border-0 shadow-sm">
+              <Card.Body>
+                <div className="d-flex align-items-center gap-3 mb-3">
+                  <div
+                    className="bg-light text-primary rounded-circle d-flex align-items-center justify-content-center"
+                    style={{ width: 40, height: 40 }}
+                  >
+                    <i className="bi bi-person-fill" aria-hidden="true" />
+                  </div>
+                  <h2 className="fw-bold fs-4 mb-0">Booking</h2>
+                </div>
+                <p className="text-secondary-emphasis mb-0">
+                  Booking as <strong>{auth.user?.profile.email ?? auth.user?.profile.preferred_username}</strong>.
+                  Your tickets will be sent to this address.
+                </p>
+              </Card.Body>
+            </Card>
 
-        <label htmlFor="amount">Total amount</label>
-        <input
-          id="amount"
-          type="number"
-          step="0.01"
-          value={amount}
-          onChange={(e) => setAmount(Number(e.target.value))}
-        />
+            <Card className="border-0 shadow-sm">
+              <Card.Body>
+                <div className="d-flex align-items-center gap-3 mb-3">
+                  <div
+                    className="bg-light text-primary rounded-circle d-flex align-items-center justify-content-center"
+                    style={{ width: 40, height: 40 }}
+                  >
+                    <i className="bi bi-credit-card-fill" aria-hidden="true" />
+                  </div>
+                  <h2 className="fw-bold fs-4 mb-0">Payment method</h2>
+                </div>
+                <p className="text-secondary-emphasis small">
+                  Sandbox environment: no real card is required, just pick a test scenario.
+                </p>
+                <div className="d-flex flex-column gap-2">
+                  {SANDBOX_METHODS.map((m) => (
+                    <Form.Check
+                      key={m.token}
+                      type="radio"
+                      id={`payment-${m.token}`}
+                      name="paymentMethod"
+                      label={m.label}
+                      checked={paymentToken === m.token}
+                      onChange={() => setPaymentToken(m.token)}
+                    />
+                  ))}
+                </div>
+              </Card.Body>
+            </Card>
 
-        <p className="muted">Payment: sandbox test token ({paymentToken})</p>
+            {error && <p className="text-danger">{error}</p>}
+          </Col>
 
-        {error && <p className="error">{error}</p>}
-        <button className="btn" type="submit" disabled={!valid || submitting}>
-          {submitting ? "Placing order…" : "Place order"}
-        </button>
-      </form>
+          <Col lg={5}>
+            <OrderSummaryCard
+              origin={order.origin}
+              destination={order.destination}
+              departureTime={order.departureTime}
+              arrivalTime={order.arrivalTime}
+              trainType={order.trainType}
+              fareClass={order.fareClass}
+              travelDate={order.travelDate}
+              seats={order.seats}
+              totalAmount={order.totalAmount}
+              currency={order.currency}
+              actionLabel={submitting ? "Placing order…" : "Pay now"}
+              actionDisabled={submitting}
+              actionType="submit"
+            />
+          </Col>
+        </Row>
+      </Form>
     </>
   );
 }
