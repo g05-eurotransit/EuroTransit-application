@@ -12,7 +12,7 @@ Orders owns the customer order state and the required PostgreSQL order database 
 
 - Use PostgreSQL atomic updates or a reservation state machine as the Inventory source of truth for seat holds. This is separate from Orders' order-state database ownership.
 - Seat selection in the UI is tentative and does not reserve inventory.
-- Checkout creates a strongly consistent 10-minute hold only if the seat is available.
+- Checkout creates a strongly consistent 10-minute hold only if the seat is available for the given travel date.
 - Payment is attempted only after the hold succeeds.
 - If payment is authorized and Inventory confirms the still-valid hold before it expires, the seat transitions to sold.
 - If payment fails, the order is cancelled, or the 10-minute hold expires, the seat returns to available.

@@ -21,6 +21,7 @@ import org.mockito.Mockito.mock
 import reactor.core.publisher.Mono
 import java.math.BigDecimal
 import java.time.Instant
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.util.UUID
 
@@ -36,6 +37,7 @@ class OrderControllerOwnershipTest @Autowired constructor(
     private val orderService: FakeOrderService,
 ) {
     private val orderId = UUID.randomUUID()
+    private val travelDate: LocalDate = LocalDate.now().plusDays(3)
 
     private fun seedOwnedBy(owner: String) {
         orderService.next = Order(
@@ -44,6 +46,7 @@ class OrderControllerOwnershipTest @Autowired constructor(
             status = OrderStatus.CONFIRMED,
             routeId = "R1",
             seats = "1A",
+            travelDate = travelDate,
             totalAmount = BigDecimal.TEN,
             createdAt = LocalDateTime.now(),
         ).apply { setAsNew(false) }
@@ -57,6 +60,22 @@ class OrderControllerOwnershipTest @Autowired constructor(
             .exchange()
             .expectStatus().isOk
             .expectBody().jsonPath("$.userId").isEqualTo("user-owner")
+    }
+
+    @Test
+    fun `the order view exposes the travel date as an ISO date string`() {
+        seedOwnedBy("user-owner")
+        webTestClient.get().uri("/api/orders/$orderId")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isOk
+            .expectBody()
+            // Asserted through the real Boot-configured mapper, not a locally built one: a LocalDate
+            // serialized as [2026,9,1] instead of "2026-09-01" would still round-trip inside Kotlin
+            // and only break the frontend, which parses the string.
+            .jsonPath("$.travelDate").isEqualTo(travelDate.toString())
+            // And it is not confused with the purchase timestamp, which is a different field.
+            .jsonPath("$.createdAt").exists()
     }
 
     @Test

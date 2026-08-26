@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
+import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
 
@@ -65,16 +66,20 @@ class InventoryIntegrationTest : BaseIntegrationTest() {
             reservationId = "res-expired",
             orderId = java.util.UUID.randomUUID(),
             routeId = "route-1",
+            travelDate = LocalDate.now(),
             status = "HELD",
-            expiresAt = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(5),
+            expiresAt = OffsetDateTime.now(ZoneOffset.UTC
+        ).minusMinutes(5),
             isNewRecord = true
         )
         val valid = it.polito.cpo.model.Reservation(
             reservationId = "res-valid",
             orderId = java.util.UUID.randomUUID(),
             routeId = "route-1",
+            travelDate = LocalDate.now(),
             status = "HELD",
-            expiresAt = OffsetDateTime.now(ZoneOffset.UTC).plusMinutes(5),
+            expiresAt = OffsetDateTime.now(ZoneOffset.UTC
+        ).plusMinutes(5),
             isNewRecord = true
         )
         

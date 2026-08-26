@@ -2,6 +2,7 @@ package it.polito.cpo.controller.dtos
 
 import it.polito.cpo.model.OrderStatus
 import java.math.BigDecimal
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.OffsetDateTime
 import java.util.UUID
@@ -9,6 +10,8 @@ import java.util.UUID
 data class CheckoutRequest(
     val routeId: String,
     val seats: List<String>,
+    /** The day being travelled. A route plus a seat is not a bookable thing on its own (issue #64). */
+    val travelDate: LocalDate,
     val totalAmount: BigDecimal,
     val paymentMethodToken: String
 )
@@ -24,6 +27,8 @@ data class OrderView(
     val status: OrderStatus,
     val routeId: String,
     val seats: List<String>,
+    /** Distinct from [createdAt]: the day of travel, not the day of purchase. */
+    val travelDate: LocalDate,
     val totalAmount: BigDecimal,
     val createdAt: LocalDateTime
 )

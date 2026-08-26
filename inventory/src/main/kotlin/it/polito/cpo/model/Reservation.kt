@@ -5,6 +5,7 @@ import org.springframework.data.annotation.PersistenceCreator
 import org.springframework.data.annotation.Transient
 import org.springframework.data.domain.Persistable
 import org.springframework.data.relational.core.mapping.Table
+import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.util.UUID
 
@@ -16,6 +17,7 @@ data class Reservation(
     
     val orderId: UUID,
     val routeId: String,
+    val travelDate: LocalDate,
     val status: String,
     val expiresAt: OffsetDateTime,
     val createdAt: OffsetDateTime? = null,
@@ -28,6 +30,7 @@ data class Reservation(
         reservationId: String,
         orderId: UUID,
         routeId: String,
+        travelDate: LocalDate,
         status: String,
         expiresAt: OffsetDateTime,
         createdAt: OffsetDateTime?
@@ -35,6 +38,7 @@ data class Reservation(
         reservationId = reservationId,
         orderId = orderId,
         routeId = routeId,
+        travelDate = travelDate,
         status = status,
         expiresAt = expiresAt,
         createdAt = createdAt,

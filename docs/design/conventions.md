@@ -29,7 +29,7 @@ Use the following standard environment variable names across all services to mai
 
 Provide the connection as discrete parts, not as a full URL. A service that persists data needs
 two connection strings for the same database — the reactive runtime URL (R2DBC) and, where Flyway
-manages the schema, a migration URL (JDBC) — and both are composed from these shared parts. The
+manages the schema, a migration URL (JDBC) — and both are composed of these shared parts. The
 parts also map 1:1 to the keys of the CloudNativePG-generated app secret (`host`, `port`, `dbname`,
 `username`, `password`), so they can be wired straight from `secretKeyRef`.
 

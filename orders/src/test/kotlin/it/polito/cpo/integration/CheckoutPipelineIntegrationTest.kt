@@ -50,6 +50,7 @@ import org.springframework.r2dbc.core.DatabaseClient
 import tools.jackson.databind.ObjectMapper
 import java.io.IOException
 import java.math.BigDecimal
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -89,6 +90,9 @@ class CheckoutPipelineIntegrationTest {
 
     companion object {
         const val DECLINE_TOKEN = "DECLINE"
+
+        /** A stable future date: the checkout guard rejects anything in the past. */
+        val TRAVEL_DATE: LocalDate = LocalDate.now().plusDays(7)
 
         @Container
         @JvmStatic
@@ -292,6 +296,55 @@ class CheckoutPipelineIntegrationTest {
         val open = openRecords(response.orderId)
         assertEquals(1, open.size)
         assertEquals(ReconciliationKind.PAYMENT_REVERSAL_FAILURE.name, open.single().kind)
+    }
+
+    // --- travel date (issue #64) ------------------------------------------------------------------
+
+    @Test
+    fun `the same seat on the same route can be sold for two different days`() = runBlocking {
+        val firstDay = TRAVEL_DATE
+        val secondDay = TRAVEL_DATE.plusDays(1)
+        val seat = "7C"
+
+        val first = orchestrator.checkout(
+            request(travelDate = firstDay, seats = listOf(seat)),
+            "it-date-a-${UUID.randomUUID()}", "user-1", "user-1@example.com",
+        )
+        val second = orchestrator.checkout(
+            request(travelDate = secondDay, seats = listOf(seat)),
+            "it-date-b-${UUID.randomUUID()}", "user-1", "user-1@example.com",
+        )
+
+        relayOrderPlaced(first.orderId)
+        relayOrderPlaced(second.orderId)
+
+        // This is the issue: before the travel-date dimension existed, the second purchase could not
+        // succeed, because the seat was keyed by (route, seat) alone and the first sale consumed it
+        // for every future day.
+        assertEquals(OrderStatus.CONFIRMED, awaitTerminal(first.orderId).status)
+        assertEquals(OrderStatus.CONFIRMED, awaitTerminal(second.orderId).status)
+
+        // Two distinct holds, differing only by the day.
+        assertTrue(inventory.heldTriples.contains(Triple("R1", firstDay, seat)))
+        assertTrue(inventory.heldTriples.contains(Triple("R1", secondDay, seat)))
+    }
+
+    @Test
+    fun `the travel date survives the round trip through the database`() = runBlocking {
+        val date = TRAVEL_DATE.plusDays(3)
+
+        val response = orchestrator.checkout(
+            request(travelDate = date), "it-date-rt-${UUID.randomUUID()}", "user-1", "user-1@example.com",
+        )
+
+        // Read back through R2DBC rather than from the in-memory object: a DATE column mapped to the
+        // wrong type is the kind of thing only a real round trip catches.
+        assertEquals(date, orderRepository.findById(response.orderId)!!.travelDate)
+
+        relayOrderPlaced(response.orderId)
+        assertEquals(OrderStatus.CONFIRMED, awaitTerminal(response.orderId).status)
+        // And the pipeline passed the persisted date on, not a recomputed one.
+        assertTrue(inventory.heldTriples.any { it.second == date })
     }
 
     // --- dead-letter handling ---------------------------------------------------------------------
@@ -507,8 +560,17 @@ class CheckoutPipelineIntegrationTest {
         assertEquals(1, openRecords(orderId).size)
     }
 
-    private fun request(token: String = "tok-123") =
-        CheckoutRequest(routeId = "R1", seats = listOf("1A", "1B"), totalAmount = BigDecimal("100.00"), paymentMethodToken = token)
+    private fun request(
+        token: String = "tok-123",
+        travelDate: LocalDate = TRAVEL_DATE,
+        seats: List<String> = listOf("1A", "1B"),
+    ) = CheckoutRequest(
+        routeId = "R1",
+        seats = seats,
+        travelDate = travelDate,
+        totalAmount = BigDecimal("100.00"),
+        paymentMethodToken = token,
+    )
 
     // Stands in for Debezium: reads the committed order-placed outbox row(s) for this order and
     // publishes the JSON payload to Kafka, keyed by aggregate id (the order id).
@@ -654,6 +716,9 @@ class CheckoutPipelineIntegrationTest {
      */
     class ControllableInventoryClient : InventoryClient {
         val reservedOrderIds = CopyOnWriteArrayList<UUID>()
+
+        /** (routeId, travelDate, seat) triples held, i.e. what Inventory is keyed by. */
+        val heldTriples = CopyOnWriteArrayList<Triple<String, LocalDate, String>>()
         val releasedReservationIds = ConcurrentHashMap.newKeySet<String>()
 
         /** Stands in for Inventory's committed state, so a replay observes an already-sold hold. */
@@ -672,6 +737,7 @@ class CheckoutPipelineIntegrationTest {
             userId: String,
         ): HoldOutcome {
             reservedOrderIds.add(request.orderId)
+            request.seats.forEach { heldTriples.add(Triple(request.routeId, request.travelDate, it)) }
             return HoldOutcome.Held("res-${request.orderId}", LocalDateTime.now().plusMinutes(10))
         }
 
