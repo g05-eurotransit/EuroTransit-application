@@ -4,15 +4,17 @@ export type OrderStatus =
   | "ACCEPTED"
   | "RESERVING"
   | "PAYMENT_PENDING"
+  | "CONFIRMING_INVENTORY"
   | "CONFIRMED"
   | "FAILED"
-  | "CANCELLED";
+  | "CANCELLED"
+  | "COMPENSATING";
 
 export interface CheckoutRequest {
   routeId: string;
   seats: string[];
+  travelDate: string;
   totalAmount: number;
-  // Added by the Payments slice: a provider sandbox test token (e.g. "tok_visa").
   paymentMethodToken: string;
 }
 
@@ -27,8 +29,10 @@ export interface OrderView {
   status: OrderStatus;
   routeId: string;
   seats: string[];
+  travelDate: string;
   totalAmount: number;
   createdAt: string;
+  reservationExpiresAt?: string | null;
 }
 
 /**
