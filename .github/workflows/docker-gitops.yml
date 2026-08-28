@@ -6,34 +6,19 @@ on:
       - main
   workflow_dispatch:
     inputs:
-      build_all:
-        description: "Force all service builds"
-        type: boolean
-        default: true
-      build_catalog:
-        description: "Force catalog build"
-        type: boolean
-        default: false
-      build_orders:
-        description: "Force orders build"
-        type: boolean
-        default: false
-      build_inventory:
-        description: "Force inventory build"
-        type: boolean
-        default: false
-      build_payments:
-        description: "Force payments build"
-        type: boolean
-        default: false
-      build_notifications:
-        description: "Force notifications build"
-        type: boolean
-        default: false
-      build_frontend:
-        description: "Force frontend build"
-        type: boolean
-        default: false
+      service:
+        description: "Service to build"
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - catalog
+          - orders
+          - inventory
+          - payments
+          - notifications
+          - frontend
 
 env:
   REGISTRY: eurotransitregistry.azurecr.io
@@ -71,6 +56,7 @@ jobs:
         run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Filter changed paths
+        if: github.event_name == 'push'
         uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -102,9 +88,11 @@ jobs:
     name: Build & push catalog
     needs: detect-changes
     if: |
-      needs.detect-changes.outputs.catalog == 'true' ||
-      needs.detect-changes.outputs.shared == 'true' ||
-      (github.event_name == 'workflow_dispatch' && (inputs.build_all == true || inputs.build_catalog == true))
+      (github.event_name == 'push' && (
+        needs.detect-changes.outputs.catalog == 'true' ||
+        needs.detect-changes.outputs.shared == 'true'
+      )) ||
+      (github.event_name == 'workflow_dispatch' && (inputs.service == 'all' || inputs.service == 'catalog'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -137,9 +125,11 @@ jobs:
     name: Build & push orders
     needs: detect-changes
     if: |
-      needs.detect-changes.outputs.orders == 'true' ||
-      needs.detect-changes.outputs.shared == 'true' ||
-      (github.event_name == 'workflow_dispatch' && (inputs.build_all == true || inputs.build_orders == true))
+      (github.event_name == 'push' && (
+        needs.detect-changes.outputs.orders == 'true' ||
+        needs.detect-changes.outputs.shared == 'true'
+      )) ||
+      (github.event_name == 'workflow_dispatch' && (inputs.service == 'all' || inputs.service == 'orders'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -172,9 +162,11 @@ jobs:
     name: Build & push inventory
     needs: detect-changes
     if: |
-      needs.detect-changes.outputs.inventory == 'true' ||
-      needs.detect-changes.outputs.shared == 'true' ||
-      (github.event_name == 'workflow_dispatch' && (inputs.build_all == true || inputs.build_inventory == true))
+      (github.event_name == 'push' && (
+        needs.detect-changes.outputs.inventory == 'true' ||
+        needs.detect-changes.outputs.shared == 'true'
+      )) ||
+      (github.event_name == 'workflow_dispatch' && (inputs.service == 'all' || inputs.service == 'inventory'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -207,9 +199,11 @@ jobs:
     name: Build & push payments
     needs: detect-changes
     if: |
-      needs.detect-changes.outputs.payments == 'true' ||
-      needs.detect-changes.outputs.shared == 'true' ||
-      (github.event_name == 'workflow_dispatch' && (inputs.build_all == true || inputs.build_payments == true))
+      (github.event_name == 'push' && (
+        needs.detect-changes.outputs.payments == 'true' ||
+        needs.detect-changes.outputs.shared == 'true'
+      )) ||
+      (github.event_name == 'workflow_dispatch' && (inputs.service == 'all' || inputs.service == 'payments'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -242,9 +236,11 @@ jobs:
     name: Build & push notifications
     needs: detect-changes
     if: |
-      needs.detect-changes.outputs.notifications == 'true' ||
-      needs.detect-changes.outputs.shared == 'true' ||
-      (github.event_name == 'workflow_dispatch' && (inputs.build_all == true || inputs.build_notifications == true))
+      (github.event_name == 'push' && (
+        needs.detect-changes.outputs.notifications == 'true' ||
+        needs.detect-changes.outputs.shared == 'true'
+      )) ||
+      (github.event_name == 'workflow_dispatch' && (inputs.service == 'all' || inputs.service == 'notifications'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -277,8 +273,8 @@ jobs:
     name: Build & push frontend
     needs: detect-changes
     if: |
-      needs.detect-changes.outputs.frontend == 'true' ||
-      (github.event_name == 'workflow_dispatch' && (inputs.build_all == true || inputs.build_frontend == true))
+      (github.event_name == 'push' && needs.detect-changes.outputs.frontend == 'true') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.service == 'all' || inputs.service == 'frontend'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -368,12 +364,6 @@ jobs:
         uses: mikefarah/yq@v4.47.2
         with:
           cmd: yq e '.notifications.image.repository = "${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/notifications" | .notifications.image.tag = "${{ needs.detect-changes.outputs.short_sha }}"' -i gitops/${{ env.GITOPS_VALUES_FILE }}
-
-      - name: Update frontend image
-        if: needs.build-frontend.result == 'success'
-        uses: mikefarah/yq@v4.47.2
-        with:
-          cmd: yq e '.frontend.image.repository = "${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/frontend" | .frontend.image.tag = "${{ needs.detect-changes.outputs.short_sha }}"' -i gitops/${{ env.GITOPS_VALUES_FILE }}
 
       - name: Update frontend image
         if: needs.build-frontend.result == 'success'
