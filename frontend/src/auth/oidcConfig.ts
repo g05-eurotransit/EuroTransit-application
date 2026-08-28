@@ -21,6 +21,8 @@ export const oidcConfig: AuthProviderProps = {
   authority: issuer,
   client_id: clientId,
   redirect_uri: `${window.location.origin}/callback`,
+  silent_redirect_uri: `${window.location.origin}/callback`,
+  silentRequestTimeoutInSeconds: 5,
   post_logout_redirect_uri: window.location.origin,
   response_type: "code",
   // The imported local realm exposes only the mandatory OpenID Connect scope.
