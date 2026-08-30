@@ -39,6 +39,7 @@ import tools.jackson.module.kotlin.kotlinModule
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.OffsetDateTime
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeoutException
@@ -235,7 +236,7 @@ class CheckoutOrchestratorTest {
     }
 
     private class StubInventoryClient(
-        private val hold: () -> HoldOutcome = { HoldOutcome.Held("res-1", LocalDateTime.now().plusMinutes(10)) },
+        private val hold: () -> HoldOutcome = { HoldOutcome.Held("res-1", OffsetDateTime.now().plusMinutes(10)) },
         private val confirm: () -> ConfirmReservationOutcome = { ConfirmReservationOutcome.Confirmed("res-1") },
         /** Runs inside reserveSeats, i.e. exactly at the hold suspension point. */
         private val duringReserve: (suspend () -> Unit)? = null,

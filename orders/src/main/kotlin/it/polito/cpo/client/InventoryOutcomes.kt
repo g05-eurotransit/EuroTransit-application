@@ -1,6 +1,6 @@
 package it.polito.cpo.client
 
-import java.time.LocalDateTime
+import java.time.OffsetDateTime
 
 /**
  * The complete set of Inventory business refusals Orders is contractually prepared to act on, as
@@ -86,7 +86,7 @@ sealed interface ConfirmReservationOutcome {
 /** Result of the Inventory hold command. */
 sealed interface HoldOutcome {
 
-    data class Held(val reservationId: String, val expiresAt: LocalDateTime) : HoldOutcome
+    data class Held(val reservationId: String, val expiresAt: OffsetDateTime) : HoldOutcome
 
     /**
      * A definitive refusal before any payment exists, so the order fails with no compensation due

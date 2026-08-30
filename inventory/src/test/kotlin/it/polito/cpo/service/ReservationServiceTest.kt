@@ -276,7 +276,7 @@ class ReservationServiceTest {
         val cachedResponse = it.polito.cpo.contracts.inventory.ReservationResponse(
             "res-cached", 
             ReservationStatus.HELD, 
-            java.time.LocalDateTime.now().plusMinutes(10)
+            java.time.OffsetDateTime.now().plusMinutes(10)
         )
         
         idemRepo.save(IdempotencyRecord(
@@ -319,7 +319,7 @@ class ReservationServiceTest {
         val cachedResponse = ReservationResponse(
             reservationId,
             ReservationStatus.HELD,
-            LocalDateTime.now().plusMinutes(10)
+            OffsetDateTime.now().plusMinutes(10)
         )
         
         idemRepo.save(IdempotencyRecord(
@@ -370,7 +370,7 @@ class ReservationServiceTest {
         val cachedResponse = ReservationResponse(
             reservationId, 
             ReservationStatus.HELD, 
-            LocalDateTime.now().plusMinutes(10)
+            OffsetDateTime.now().plusMinutes(10)
         )
         
         idemRepo.save(IdempotencyRecord(

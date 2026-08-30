@@ -149,6 +149,9 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
 
 - `POST /api/inventory/reservations`
   - Attempts to create a 10-minute hold for the requested seats.
+  - Returns `expiresAt` as an offset-bearing instant. It is derived from the Inventory database clock,
+    which is the only authority for expiry, and it reaches a browser as a countdown; a zone-less
+    wall-clock reading would be re-interpreted in the viewer's own zone.
   - Internal API; callers must be trusted services such as Orders.
   - Requires an Orders-generated idempotency key derived from the order id, operation, and attempt.
   - Uses a strong consistency decision: the same seat cannot have two active holds.

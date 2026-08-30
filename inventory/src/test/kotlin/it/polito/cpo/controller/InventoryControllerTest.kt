@@ -37,6 +37,7 @@ import tools.jackson.databind.ObjectMapper
 import java.time.Clock
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.OffsetDateTime
 import java.util.UUID
 
 @WebFluxTest(controllers = [InventoryController::class])
@@ -119,7 +120,7 @@ class InventoryControllerTest {
             return ReservationResponse(
                 "res-123",
                 reserveResponseStatus,
-                LocalDateTime.now().plusMinutes(15)
+                OffsetDateTime.now().plusMinutes(15)
             )
         }
 
@@ -133,7 +134,7 @@ class InventoryControllerTest {
             return ReservationResponse(
                 reservationId,
                 ReservationStatus.CONFIRMED,
-                LocalDateTime.now().plusMinutes(15)
+                OffsetDateTime.now().plusMinutes(15)
             )
         }
     }

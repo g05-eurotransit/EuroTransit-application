@@ -103,7 +103,7 @@ class ReservationService(
                 val storedResponse = ReservationResponse(
                     reservationId = reservationId,
                     status = status,
-                    expiresAt = expiresAt.toLocalDateTime()
+                    expiresAt = expiresAt
                 )
 
                 val idempotencyRecord = IdempotencyRecord(
@@ -127,7 +127,7 @@ class ReservationService(
                             reservationId = reservationId,
                             routeId = request.routeId,
                             travelDate = request.travelDate,
-                            expiresAt = expiresAt.toLocalDateTime()
+                            expiresAt = expiresAt
                         )
                     )
                     val outboxEvent = OutboxEvent(
@@ -244,7 +244,7 @@ class ReservationService(
                         return ReservationResponse(
                             reservationId = currentReservation.reservationId,
                             status = ReservationStatus.CONFIRMED,
-                            expiresAt = currentReservation.expiresAt.toLocalDateTime()
+                            expiresAt = currentReservation.expiresAt
                         )
                     }
                     if (currentReservation.status == "HELD" && !currentReservation.expiresAt.isAfter(reservationRepository.getCurrentTimestamp())) {
@@ -285,7 +285,7 @@ class ReservationService(
                 return@executeAndAwait ReservationResponse(
                     reservationId,
                     ReservationStatus.CONFIRMED,
-                    reservation.expiresAt.toLocalDateTime()
+                    reservation.expiresAt
                 )
             }
 
@@ -320,7 +320,7 @@ class ReservationService(
             ReservationResponse(
                 reservationId,
                 ReservationStatus.CONFIRMED,
-                reservation.expiresAt.toLocalDateTime()
+                reservation.expiresAt
             )
         }
 
