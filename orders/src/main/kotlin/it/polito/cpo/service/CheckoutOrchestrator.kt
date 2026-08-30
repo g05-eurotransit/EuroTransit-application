@@ -508,11 +508,12 @@ class CheckoutOrchestrator(
         // 3. FAILED only after the reversal succeeded — enforced by SQL, since markFailedAfterReversal
         //    accepts only COMPENSATING and no statement goes CONFIRMING_INVENTORY -> FAILED.
         val reason = ctx.compensationReason ?: FailureClassifier.UNKNOWN
+        val publicCode = CustomerFailureCode.from(reason)
         val failed = txOperator.executeAndAwait {
-            if (orderService.markFailedAfterReversal(ctx.orderId) == 0L) {
+            if (orderService.markFailedAfterReversal(ctx.orderId, publicCode) == 0L) {
                 false
             } else {
-                outboxEventRepository.save(failureNotification(ctx, reason))
+                outboxEventRepository.save(failureNotification(ctx, publicCode))
                 reconciliationService.closeAutoResolvable(ctx.orderId)
                 true
             }
@@ -540,11 +541,14 @@ class CheckoutOrchestrator(
             ctx.reservationId?.let { releaseHold(ctx, it) }
         }
 
+        // The internal label stays on the metric and the reconciliation record; only its public
+        // projection reaches the order row and the customer notification.
+        val publicCode = CustomerFailureCode.from(reason)
         val failed = txOperator.executeAndAwait {
-            if (orderService.markFailedUnpaid(ctx.orderId) == 0L) {
+            if (orderService.markFailedUnpaid(ctx.orderId, publicCode) == 0L) {
                 false
             } else {
-                outboxEventRepository.save(failureNotification(ctx, reason))
+                outboxEventRepository.save(failureNotification(ctx, publicCode))
                 reconciliationService.closeAutoResolvable(ctx.orderId)
                 true
             }
@@ -636,7 +640,14 @@ class CheckoutOrchestrator(
 
     // --- helpers ----------------------------------------------------------------------------------
 
-    private fun failureNotification(ctx: PipelineContext, reason: String): OutboxEvent = outbox(
+    /**
+     * The customer-facing failure notification.
+     *
+     * The message is the [CustomerFailureCode]'s own text and never the internal failure class. It
+     * used to interpolate the latter, which put strings like `reservation_seat_conflict` — and, for
+     * a dependency fault, a wire code — in front of a customer.
+     */
+    private fun failureNotification(ctx: PipelineContext, code: CustomerFailureCode): OutboxEvent = outbox(
         "notification-requested", ctx.orderId,
         NotificationRequestedEvent(
             correlationId = ctx.correlationId,
@@ -644,7 +655,7 @@ class CheckoutOrchestrator(
             principalId = ctx.order.userId,
             payload = NotificationRequestedPayload(
                 recipientEmail = recipientEmail(ctx.order),
-                message = "Your order ${ctx.orderId} could not be completed. Reason: $reason",
+                message = code.customerMessage,
             ),
         ),
     )

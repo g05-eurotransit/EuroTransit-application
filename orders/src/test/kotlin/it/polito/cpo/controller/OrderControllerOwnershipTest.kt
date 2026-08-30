@@ -2,6 +2,7 @@ package it.polito.cpo.controller
 
 import it.polito.cpo.model.Order
 import it.polito.cpo.model.OrderStatus
+import it.polito.cpo.service.CustomerFailureCode
 import it.polito.cpo.repository.IdempotentRequestRepository
 import it.polito.cpo.repository.OrderRepository
 import it.polito.cpo.security.SecurityConfig
@@ -103,6 +104,45 @@ class OrderControllerOwnershipTest @Autowired constructor(
             .headers { it.setBearerAuth("owner") }
             .exchange()
             .expectStatus().isNotFound
+    }
+
+    // --- failure reason ---------------------------------------------------------------------------
+
+    private fun order(owner: String, createdAt: LocalDateTime, status: OrderStatus = OrderStatus.CONFIRMED) =
+        Order(
+            id = UUID.randomUUID(),
+            userId = owner,
+            status = status,
+            routeId = "R1",
+            seats = "1A",
+            travelDate = travelDate,
+            totalAmount = BigDecimal.TEN,
+            createdAt = createdAt,
+        ).apply { setAsNew(false) }
+
+    @Test
+    fun `a failed order exposes its customer-visible reason`() {
+        orderService.next = order("user-owner", LocalDateTime.now(), OrderStatus.FAILED)
+            .apply { failureCode = CustomerFailureCode.SEATS_UNAVAILABLE.name }
+        webTestClient.get().uri("/api/orders/$orderId")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isOk
+            .expectBody()
+            .jsonPath("$.failureCode").isEqualTo("SEATS_UNAVAILABLE")
+            .jsonPath("$.failureMessage").isEqualTo(CustomerFailureCode.SEATS_UNAVAILABLE.customerMessage)
+    }
+
+    @Test
+    fun `a non-failed order carries no failure reason`() {
+        seedOwnedBy("user-owner")
+        webTestClient.get().uri("/api/orders/$orderId")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isOk
+            .expectBody()
+            .jsonPath("$.failureCode").doesNotExist()
+            .jsonPath("$.failureMessage").doesNotExist()
     }
 
     open class FakeOrderService : OrderService(

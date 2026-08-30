@@ -4,6 +4,7 @@ import it.polito.cpo.controller.dtos.CheckoutRequest
 import it.polito.cpo.controller.dtos.CheckoutResponse
 import it.polito.cpo.controller.dtos.OrderView
 import it.polito.cpo.service.CheckoutOrchestrator
+import it.polito.cpo.service.CustomerFailureCode
 import it.polito.cpo.service.OrderService
 import org.springframework.http.HttpStatus
 import org.springframework.security.core.annotation.AuthenticationPrincipal
@@ -72,8 +73,10 @@ class OrderController(
         return toView(checkoutOrchestrator.cancel(orderId))
     }
 
-    private fun toView(order: it.polito.cpo.model.Order): OrderView =
-        OrderView(
+    private fun toView(order: it.polito.cpo.model.Order): OrderView {
+        // Null for every non-FAILED order: the column is written only by the terminal FAILED commit.
+        val failure = CustomerFailureCode.parse(order.failureCode)
+        return OrderView(
             orderId = order.id,
             userId = order.userId,
             status = order.status,
@@ -81,6 +84,11 @@ class OrderController(
             seats = order.seats.split(","),
             travelDate = order.travelDate,
             totalAmount = order.totalAmount,
-            createdAt = order.createdAt
+            createdAt = order.createdAt,
+            failureCode = failure?.name,
+            // Derived, not stored: display text is presentation, and storing it would freeze today's
+            // wording into every historical row.
+            failureMessage = failure?.customerMessage,
         )
+    }
 }

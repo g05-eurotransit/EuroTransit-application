@@ -34,6 +34,11 @@ class Order(
     // the right reconciliation record kind and know whether releasing the hold is safe at all.
     // Null outside COMPENSATING.
     var compensationReason: String? = null,
+    // The customer-visible reason the checkout failed, from the closed CustomerFailureCode set.
+    // Distinct from compensationReason, which is the internal operator vocabulary: this one is
+    // returned by the public API, so it never carries an invariant violation or a provider code.
+    // Set only on the terminal FAILED transition; null in every other state.
+    var failureCode: String? = null,
 ) : Persistable<UUID> {
 
     @Transient

@@ -119,6 +119,12 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
 - `GET /api/orders/{orderId}`
   - Returns the current order status: accepted, reserving, payment-pending, confirming-inventory, compensating, confirmed, failed, or cancelled.
   - Includes `travelDate`, distinct from `createdAt`: the day of travel, not the day of purchase.
+  - On a `failed` order, includes `failureCode` and a ready-to-display `failureMessage`. The code is
+    drawn from a deliberately small closed set — `SEATS_UNAVAILABLE`, `PAYMENT_DECLINED`, and a
+    generic `CHECKOUT_FAILED` — because only the first two describe something a customer can act on.
+    Every other internal classification, including every invariant violation, collapses into the
+    generic code, so an operator-facing failure class or a provider code can never reach a customer.
+    The mapping is an allowlist: a failure class added later collapses by default rather than leaking.
   - Requires the authenticated customer to own the order, unless an operator/admin role is used.
   - Returns `404 Not Found` for customer-to-customer access to avoid revealing another customer's order.
 - `POST /api/orders/{orderId}/cancel`

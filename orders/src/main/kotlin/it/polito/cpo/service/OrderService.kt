@@ -38,9 +38,11 @@ class OrderService(
 
     suspend fun markConfirmed(id: UUID): Long = orderRepository.markConfirmed(id)
 
-    suspend fun markFailedUnpaid(id: UUID): Long = orderRepository.markFailedUnpaid(id)
+    suspend fun markFailedUnpaid(id: UUID, failureCode: CustomerFailureCode): Long =
+        orderRepository.markFailedUnpaid(id, failureCode.name)
 
-    suspend fun markFailedAfterReversal(id: UUID): Long = orderRepository.markFailedAfterReversal(id)
+    suspend fun markFailedAfterReversal(id: UUID, failureCode: CustomerFailureCode): Long =
+        orderRepository.markFailedAfterReversal(id, failureCode.name)
 
     suspend fun cancelIfUnpaid(id: UUID): Long = orderRepository.cancelIfUnpaid(id)
 

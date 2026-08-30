@@ -2,6 +2,7 @@ package it.polito.cpo.repository
 
 import it.polito.cpo.model.Order
 import it.polito.cpo.model.OrderStatus
+import it.polito.cpo.service.CustomerFailureCode
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
@@ -124,7 +125,7 @@ class OrderTransitionsIntegrationTest {
         assertRowsAffected(
             accepting = setOf(OrderStatus.RESERVING, OrderStatus.PAYMENT_PENDING),
             resultingIn = OrderStatus.FAILED,
-        ) { id -> orders.markFailedUnpaid(id) }
+        ) { id -> orders.markFailedUnpaid(id, CustomerFailureCode.CHECKOUT_FAILED.name) }
     }
 
     @Test
@@ -132,7 +133,7 @@ class OrderTransitionsIntegrationTest {
         assertRowsAffected(
             accepting = setOf(OrderStatus.COMPENSATING),
             resultingIn = OrderStatus.FAILED,
-        ) { id -> orders.markFailedAfterReversal(id) }
+        ) { id -> orders.markFailedAfterReversal(id, CustomerFailureCode.CHECKOUT_FAILED.name) }
     }
 
     @Test
@@ -148,11 +149,11 @@ class OrderTransitionsIntegrationTest {
     @Test
     fun `there is no path from CONFIRMING_INVENTORY to FAILED`() = runBlocking {
         val viaUnpaid = seed(OrderStatus.CONFIRMING_INVENTORY)
-        assertEquals(0L, orders.markFailedUnpaid(viaUnpaid))
+        assertEquals(0L, orders.markFailedUnpaid(viaUnpaid, CustomerFailureCode.CHECKOUT_FAILED.name))
         assertEquals(OrderStatus.CONFIRMING_INVENTORY, statusOf(viaUnpaid))
 
         val viaReversal = seed(OrderStatus.CONFIRMING_INVENTORY)
-        assertEquals(0L, orders.markFailedAfterReversal(viaReversal))
+        assertEquals(0L, orders.markFailedAfterReversal(viaReversal, CustomerFailureCode.CHECKOUT_FAILED.name))
         assertEquals(OrderStatus.CONFIRMING_INVENTORY, statusOf(viaReversal))
     }
 

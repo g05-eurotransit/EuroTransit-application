@@ -171,11 +171,17 @@ class CheckoutOrchestratorTest {
             return cas(id, setOf(OrderStatus.CONFIRMING_INVENTORY), OrderStatus.CONFIRMED, clearToken = true)
         }
 
-        override suspend fun markFailedUnpaid(id: UUID): Long =
-            cas(id, setOf(OrderStatus.RESERVING, OrderStatus.PAYMENT_PENDING), OrderStatus.FAILED, clearToken = true)
+        /** The public code the terminal commit stored, so a test can assert what a customer would see. */
+        @Volatile
+        var storedFailureCode: CustomerFailureCode? = null
 
-        override suspend fun markFailedAfterReversal(id: UUID): Long =
+        override suspend fun markFailedUnpaid(id: UUID, failureCode: CustomerFailureCode): Long =
+            cas(id, setOf(OrderStatus.RESERVING, OrderStatus.PAYMENT_PENDING), OrderStatus.FAILED, clearToken = true)
+                .also { if (it > 0) storedFailureCode = failureCode }
+
+        override suspend fun markFailedAfterReversal(id: UUID, failureCode: CustomerFailureCode): Long =
             cas(id, setOf(OrderStatus.COMPENSATING), OrderStatus.FAILED, clearToken = true)
+                .also { if (it > 0) storedFailureCode = failureCode }
 
         override suspend fun cancelIfUnpaid(id: UUID): Long =
             cas(id, setOf(OrderStatus.ACCEPTED, OrderStatus.RESERVING), OrderStatus.CANCELLED, clearToken = true)

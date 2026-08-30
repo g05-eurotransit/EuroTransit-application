@@ -81,11 +81,11 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
     @Modifying
     @Query(
         """
-        UPDATE orders SET status = 'FAILED', payment_method_token = NULL
+        UPDATE orders SET status = 'FAILED', payment_method_token = NULL, failure_code = :failureCode
         WHERE id = :id AND status IN ('RESERVING', 'PAYMENT_PENDING')
         """,
     )
-    suspend fun markFailedUnpaid(id: UUID): Long
+    suspend fun markFailedUnpaid(id: UUID, failureCode: String): Long
 
     // FAILED after authorization, reachable only from COMPENSATING, and the orchestrator calls it
     // only once the reversal has definitively succeeded. There is deliberately NO SQL path from
@@ -95,11 +95,11 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
     @Modifying
     @Query(
         """
-        UPDATE orders SET status = 'FAILED', payment_method_token = NULL
+        UPDATE orders SET status = 'FAILED', payment_method_token = NULL, failure_code = :failureCode
         WHERE id = :id AND status = 'COMPENSATING'
         """,
     )
-    suspend fun markFailedAfterReversal(id: UUID): Long
+    suspend fun markFailedAfterReversal(id: UUID, failureCode: String): Long
 
     // Customer cancellation is accepted only while no payment authorization has started
     // (reservation-confirmation.md:147-149). From PAYMENT_PENDING onward the controller answers
