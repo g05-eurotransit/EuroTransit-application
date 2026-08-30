@@ -13,6 +13,7 @@ import {
 } from "@stripe/react-stripe-js";
 import { placeOrder } from "../api/orders";
 import { ApiError, newId } from "../api/client";
+import { getRuntimeConfig } from "../config/runtimeConfig";
 import { BackButton } from "../components/BackButton";
 import { OrderSummaryCard } from "../components/OrderSummaryCard";
 
@@ -30,7 +31,13 @@ interface CheckoutState {
   currency: string;
 }
 
-const stripePromise = loadStripe((import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY as string) ?? "");
+let stripePromise: ReturnType<typeof loadStripe> | undefined;
+function getStripePromise() {
+  if (!stripePromise) {
+    stripePromise = loadStripe(getRuntimeConfig().stripePublishableKey);
+  }
+  return stripePromise;
+}
 
 const CARD_ELEMENT_OPTIONS = {
   style: {
@@ -58,7 +65,7 @@ export function CheckoutPage() {
   if (!state) return null;
 
   return (
-    <Elements stripe={stripePromise}>
+    <Elements stripe={getStripePromise()}>
       <CheckoutForm order={state} />
     </Elements>
   );
