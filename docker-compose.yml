@@ -10,7 +10,7 @@ services:
     image: eurotransit/frontend:local
     container_name: eurotransit-frontend
     volumes:
-      - ./frontend/public/config/config.json:/usr/share/nginx/html/config/config.json:ro
+      - ./frontend/public/config/config.json:/usr/share/nginx/html/config/config.json:ro,Z
     expose:
       - "8080"
     labels:
