@@ -40,16 +40,26 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
     // replay (inv-{orderId}) always resolves the original reservation, so a *different* id means the
     // hold contract was violated: 0 rows, and the caller treats it as an invariant violation rather
     // than silently rebinding the order to another hold.
+    // The deadline is written in the SAME statement as the id, not in a follow-up update: they are
+    // two halves of one fact, and a crash between two writes would leave an order holding seats with
+    // no visible expiry, or an expiry belonging to a hold it no longer has.
     @Modifying
     @Query(
         """
-        UPDATE orders SET status = 'PAYMENT_PENDING', reservation_id = :reservationId
+        UPDATE orders
+           SET status = 'PAYMENT_PENDING',
+               reservation_id = :reservationId,
+               reservation_expires_at = :reservationExpiresAt
         WHERE id = :id
           AND (status = 'RESERVING'
                OR (status = 'PAYMENT_PENDING' AND reservation_id = :reservationId))
         """,
     )
-    suspend fun markPaymentPending(id: UUID, reservationId: String): Long
+    suspend fun markPaymentPending(
+        id: UUID,
+        reservationId: String,
+        reservationExpiresAt: OffsetDateTime,
+    ): Long
 
     @Modifying
     @Query(

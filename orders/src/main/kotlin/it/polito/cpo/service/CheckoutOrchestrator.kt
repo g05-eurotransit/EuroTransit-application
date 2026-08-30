@@ -300,7 +300,7 @@ class CheckoutOrchestrator(
             is HoldOutcome.Held -> {
                 countHold("held", "none")
                 ctx.reservationId = outcome.reservationId
-                if (orderService.markPaymentPending(ctx.orderId, outcome.reservationId) == 0L) {
+                if (orderService.markPaymentPending(ctx.orderId, outcome.reservationId, outcome.expiresAt) == 0L) {
                     // doc:298 — a cancellation won the race while the hold was in flight. The order is
                     // CANCELLED with no reservation id stored, so the pipeline is the only place that
                     // can release this hold.

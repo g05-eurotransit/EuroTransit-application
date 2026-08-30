@@ -133,6 +133,12 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
 - `GET /api/orders/{orderId}`
   - Returns the current order status: accepted, reserving, payment-pending, confirming-inventory, compensating, confirmed, failed, or cancelled.
   - Includes `travelDate`, distinct from `createdAt`: the day of travel, not the day of purchase.
+  - Once seats are held, includes `reservationExpiresAt`: the Inventory hold deadline, carried as an
+    offset-bearing instant because it is produced by the Inventory database clock and consumed by a
+    browser in an unknown zone. It is the deadline for the *checkout* to converge — covering crash,
+    retry, and Kafka lag — and **not** a payment window: the payment token arrives with the checkout
+    request and the pipeline runs server-side with no user interaction. Clients must not present it
+    as "you have ten minutes to pay". A customer-driven payment step is issue #72, deferred.
   - On a `failed` order, includes `failureCode` and a ready-to-display `failureMessage`. The code is
     drawn from a deliberately small closed set — `SEATS_UNAVAILABLE`, `PAYMENT_DECLINED`, and a
     generic `CHECKOUT_FAILED` — because only the first two describe something a customer can act on.

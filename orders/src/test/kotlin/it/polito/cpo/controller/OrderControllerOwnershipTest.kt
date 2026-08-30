@@ -26,6 +26,7 @@ import java.math.BigDecimal
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.OffsetDateTime
 import java.util.UUID
 
 /**
@@ -113,6 +114,18 @@ class OrderControllerOwnershipTest @Autowired constructor(
     private fun seedHistory(vararg orders: Order) {
         orderService.historyRows = orders.toList()
     }
+
+    private fun order(owner: String, createdAt: LocalDateTime, status: OrderStatus = OrderStatus.CONFIRMED) =
+        Order(
+            id = UUID.randomUUID(),
+            userId = owner,
+            status = status,
+            routeId = "R1",
+            seats = "1A",
+            travelDate = travelDate,
+            totalAmount = BigDecimal.TEN,
+            createdAt = createdAt,
+        ).apply { setAsNew(false) }
 
     @Test
     fun `the list is scoped to the caller`() {
@@ -222,19 +235,52 @@ class OrderControllerOwnershipTest @Autowired constructor(
         assertEquals(now.minusMinutes(1), OrderHistoryCursor.decode(cursor)!!.createdAt)
     }
 
-    // --- failure reason ---------------------------------------------------------------------------
+    // --- hold deadline ----------------------------------------------------------------------------
 
-    private fun order(owner: String, createdAt: LocalDateTime, status: OrderStatus = OrderStatus.CONFIRMED) =
-        Order(
-            id = UUID.randomUUID(),
-            userId = owner,
-            status = status,
-            routeId = "R1",
-            seats = "1A",
-            travelDate = travelDate,
-            totalAmount = BigDecimal.TEN,
-            createdAt = createdAt,
-        ).apply { setAsNew(false) }
+    /**
+     * The field the SPA has been coded against since before it existed: `frontend/src/api/orders.ts`
+     * declares `reservationExpiresAt` and `OrderStatusPage` feeds it to `useCountdown`, so until now
+     * the countdown simply never rendered.
+     *
+     * Asserted through the real Boot-configured mapper, because the serialised shape is the contract:
+     * an instant written without an offset is re-interpreted in the browser's own zone, which is the
+     * bug the whole change exists to remove.
+     */
+    @Test
+    fun `an order holding seats exposes the deadline as an offset-carrying instant`() {
+        val deadline = OffsetDateTime.parse("2026-08-05T12:00:00+02:00")
+        orderService.next = order("user-owner", LocalDateTime.now(), OrderStatus.PAYMENT_PENDING)
+            .apply { reservationExpiresAt = deadline }
+
+        val body = webTestClient.get().uri("/api/orders/$orderId")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isOk
+            .expectBody()
+            .jsonPath("$.reservationExpiresAt").exists()
+            .returnResult()
+
+        val json = String(body.responseBody!!)
+        val serialized = Regex("\"reservationExpiresAt\":\"([^\"]+)\"").find(json)!!.groupValues[1]
+        assertEquals(
+            deadline.toInstant(),
+            OffsetDateTime.parse(serialized).toInstant(),
+            "the deadline did not survive serialization as the same instant",
+        )
+    }
+
+    @Test
+    fun `an order that never held seats carries no deadline`() {
+        seedOwnedBy("user-owner")
+        webTestClient.get().uri("/api/orders/$orderId")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isOk
+            .expectBody()
+            .jsonPath("$.reservationExpiresAt").doesNotExist()
+    }
+
+    // --- failure reason ---------------------------------------------------------------------------
 
     @Test
     fun `a failed order exposes its customer-visible reason`() {

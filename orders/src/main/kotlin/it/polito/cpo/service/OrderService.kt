@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.toList
 import org.springframework.stereotype.Service
 import java.time.LocalDateTime
+import java.time.OffsetDateTime
 import java.util.UUID
 
 @Service
@@ -31,8 +32,11 @@ class OrderService(
     // order was cancelled concurrently (forward transitions) or is not cancellable (cancelIfUnpaid).
     suspend fun markReserving(id: UUID): Long = orderRepository.markReserving(id)
 
-    suspend fun markPaymentPending(id: UUID, reservationId: String): Long =
-        orderRepository.markPaymentPending(id, reservationId)
+    suspend fun markPaymentPending(
+        id: UUID,
+        reservationId: String,
+        reservationExpiresAt: OffsetDateTime,
+    ): Long = orderRepository.markPaymentPending(id, reservationId, reservationExpiresAt)
 
     suspend fun markConfirmingInventory(id: UUID): Long = orderRepository.markConfirmingInventory(id)
 

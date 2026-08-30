@@ -139,7 +139,15 @@ class CheckoutOrchestratorTest {
         override suspend fun markReserving(id: UUID): Long =
             cas(id, setOf(OrderStatus.ACCEPTED, OrderStatus.RESERVING), OrderStatus.RESERVING)
 
-        override suspend fun markPaymentPending(id: UUID, reservationId: String): Long {
+        /** What the pipeline stored alongside the reservation id, so a test can assert the pair. */
+        @Volatile
+        var storedExpiresAt: OffsetDateTime? = null
+
+        override suspend fun markPaymentPending(
+            id: UUID,
+            reservationId: String,
+            reservationExpiresAt: OffsetDateTime,
+        ): Long {
             val o = ordersById[id] ?: return 0
             // The self-transition is pinned to the same reservation id, exactly as the SQL is.
             val accepted = o.status == OrderStatus.RESERVING ||
@@ -147,6 +155,8 @@ class CheckoutOrchestratorTest {
             if (!accepted) return 0
             o.status = OrderStatus.PAYMENT_PENDING
             o.reservationId = reservationId
+            o.reservationExpiresAt = reservationExpiresAt
+            storedExpiresAt = reservationExpiresAt
             savedOrderStatuses.add(OrderStatus.PAYMENT_PENDING)
             return 1
         }

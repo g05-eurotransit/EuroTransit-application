@@ -137,6 +137,7 @@ class OrderController(
             travelDate = order.travelDate,
             totalAmount = order.totalAmount,
             createdAt = order.createdAt,
+            reservationExpiresAt = order.reservationExpiresAt,
             failureCode = failure?.name,
             // Derived, not stored: display text is presentation, and storing it would freeze today's
             // wording into every historical row.

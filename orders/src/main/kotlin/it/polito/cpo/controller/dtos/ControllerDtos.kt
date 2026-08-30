@@ -32,6 +32,15 @@ data class OrderView(
     val totalAmount: BigDecimal,
     val createdAt: LocalDateTime,
     /**
+     * When the Inventory seat hold expires, as an instant. Non-null once seats are held.
+     *
+     * This is the deadline for the *checkout* to converge — it covers crash, retry and Kafka lag —
+     * and NOT a payment window: the payment token arrives with the checkout request and the whole
+     * pipeline runs server-side with no user interaction. A client must not present it as "you have
+     * ten minutes to pay".
+     */
+    val reservationExpiresAt: OffsetDateTime? = null,
+    /**
      * Why the checkout failed, from the closed `CustomerFailureCode` set. Non-null only on `FAILED`.
      *
      * Deliberately not the internal failure class: everything except "the seats were taken" and
