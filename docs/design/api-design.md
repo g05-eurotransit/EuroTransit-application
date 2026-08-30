@@ -26,6 +26,7 @@ EuroTransit is designed as an enterprise-grade system. Public APIs must assume a
 |----------------------------------------------------------------|-------------------------------------------------------|---------------------------------------------------------------|-------------------------------------------------------------------------------------------|
 | `GET /api/catalog/**`                                          | Public or authenticated depending on offer visibility | Optional for public catalog; required for personalized offers | Public read or customer scope                                                             |
 | `POST /api/orders`                                             | External                                              | Required                                                      | Customer scope; principal becomes order owner                                             |
+| `GET /api/orders`                                              | External                                              | Required                                                      | Customer scope; always scoped to the caller's own orders, with no operations widening     |
 | `GET /api/orders/{orderId}`                                    | External                                              | Required                                                      | Order owner or privileged operations scope                                                |
 | `POST /api/orders/{orderId}/reconciliation/redrive`            | Internal operations                                   | Required operations credential                                | Operations role only; redrives an open reconciliation record through the Orders outbox    |
 | `POST /api/orders/{orderId}/reconciliation/{recordId}/resolve` | Internal operations                                   | Required operations credential                                | Operations role only; records evidence-backed resolution of a terminal invariant incident |
@@ -116,6 +117,19 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     The stored request fingerprint includes `travelDate`, so reusing one key for two different days is an
     `IDEMPOTENCY_CONFLICT` rather than a replay of the wrong day.
   - Stores checkout idempotency records for 24 hours.
+- `GET /api/orders`
+  - Returns the authenticated customer's own order history, newest first.
+  - Accepts an optional `status` filter, so a "my tickets" view is `?status=CONFIRMED` while the
+    unfiltered list stays reachable and a customer can still find a failed attempt.
+  - Paginates by keyset, not offset: `limit` (default 20, capped at 100) plus an opaque `cursor`
+    returned as `nextCursor`, null on the last page. Offset paging would shift under the concurrent
+    inserts that happen precisely while a customer is reading this list.
+  - **Unlike `GET /api/orders/{orderId}`, the operations role does not widen this endpoint.** That
+    role exists so support can read one order it was given the id of; dropping the principal filter
+    on a collection would return every customer's orders in one call. The filter is applied in the
+    SQL predicate rather than in the controller, so it cannot be bypassed by a later edit.
+  - A malformed cursor is `400`, not a silent restart from the first page, which would make a paging
+    client loop over the same page forever.
 - `GET /api/orders/{orderId}`
   - Returns the current order status: accepted, reserving, payment-pending, confirming-inventory, compensating, confirmed, failed, or cancelled.
   - Includes `travelDate`, distinct from `createdAt`: the day of travel, not the day of purchase.

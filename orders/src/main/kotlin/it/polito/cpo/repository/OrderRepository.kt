@@ -5,6 +5,8 @@ import kotlinx.coroutines.flow.Flow
 import org.springframework.data.r2dbc.repository.Modifying
 import org.springframework.data.r2dbc.repository.Query
 import org.springframework.data.repository.kotlin.CoroutineCrudRepository
+import java.time.LocalDateTime
+import java.time.OffsetDateTime
 import java.util.UUID
 
 interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
@@ -113,6 +115,49 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
         """,
     )
     suspend fun cancelIfUnpaid(id: UUID): Long
+
+    // --- Customer order history ------------------------------------------------------------------
+    // Ownership is enforced HERE, in the predicate, and not in the controller. `getOrder` and
+    // `cancel` let the `operations` role bypass their ownership check, which is right for a single
+    // order a support agent was given the id of; reusing that shape on a list would hand every
+    // customer's orders to any operator holding the role. A privileged search, if it is ever wanted,
+    // is a separate endpoint with its own authorization.
+    //
+    // Pagination is keyset, not offset: an offset page shifts under concurrent inserts, and orders
+    // are inserted exactly while a customer is looking at this list. The sort key is
+    // (created_at, id) because created_at is not unique.
+    //
+    // The status filter is optional. `CAST(:status AS VARCHAR)` is what makes a null bind legal:
+    // without the cast Postgres cannot infer the type of the parameter in `IS NULL`.
+
+    @Query(
+        """
+        SELECT * FROM orders
+         WHERE user_id = :userId
+           AND (CAST(:status AS VARCHAR) IS NULL OR status = CAST(:status AS VARCHAR))
+         ORDER BY created_at DESC, id DESC
+         LIMIT :limit
+        """,
+    )
+    fun findHistoryFirstPage(userId: String, status: String?, limit: Int): Flow<Order>
+
+    @Query(
+        """
+        SELECT * FROM orders
+         WHERE user_id = :userId
+           AND (CAST(:status AS VARCHAR) IS NULL OR status = CAST(:status AS VARCHAR))
+           AND (created_at, id) < (:cursorCreatedAt, :cursorId)
+         ORDER BY created_at DESC, id DESC
+         LIMIT :limit
+        """,
+    )
+    fun findHistoryAfter(
+        userId: String,
+        status: String?,
+        cursorCreatedAt: LocalDateTime,
+        cursorId: UUID,
+        limit: Int,
+    ): Flow<Order>
 
     /**
      * Feeds the non-terminal pipeline gauges. An order stranded in one of these phases is the failure

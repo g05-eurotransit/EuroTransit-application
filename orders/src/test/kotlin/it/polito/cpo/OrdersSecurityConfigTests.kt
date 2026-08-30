@@ -90,6 +90,31 @@ class OrdersSecurityConfigTests @Autowired constructor(
             .expectStatus().isOk
     }
 
+    // The collection path, not a sub-resource. The GET rule in SecurityConfig is written against the
+    // `/api/orders` prefix with a trailing double wildcard, and a PathPattern double wildcard is
+    // documented to match zero trailing segments — but "documented" is not "asserted". If that ever
+    // stopped holding, `anyExchange().denyAll()` would make the customer order history unreachable
+    // for everyone, rather than failing loudly here.
+    //
+    // (Line comments, not KDoc: Kotlin block comments nest, so a literal path pattern containing a
+    // slash-star sequence would open a nested comment that never closes.)
+    @Test
+    fun `the order list is reachable for the customer role`() {
+        webTestClient.get()
+            .uri("/api/orders")
+            .headers { it.setBearerAuth("customer-token") }
+            .exchange()
+            .expectStatus().isOk
+    }
+
+    @Test
+    fun `the order list rejects anonymous requests`() {
+        webTestClient.get()
+            .uri("/api/orders")
+            .exchange()
+            .expectStatus().isUnauthorized
+    }
+
     @Test
     fun `order creation rejects tokens without the customer role`() {
         webTestClient.post()
@@ -222,6 +247,9 @@ class OrdersSecurityConfigTests @Autowired constructor(
     class OrdersSecurityProbeController {
         @PostMapping("/api/orders")
         fun createOrder(): Map<String, String> = mapOf("status" to "accepted")
+
+        @GetMapping("/api/orders")
+        fun listOrders(): Map<String, String> = mapOf("orders" to "[]")
 
         @GetMapping("/api/orders/{orderId}")
         fun readOrder(@PathVariable orderId: String): Map<String, String> = mapOf("orderId" to orderId)
