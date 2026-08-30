@@ -1,8 +1,7 @@
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import { apiFetch } from "./client";
 import { getAccessToken } from "../auth/tokenHolder";
-
-const API_BASE = (import.meta.env.VITE_API_BASE as string) ?? "/api";
+import { getRuntimeConfig } from "../config/runtimeConfig";
 
 export interface NotificationView {
   id: string;
@@ -36,10 +35,11 @@ export interface StreamHandlers {
  * `listNotifications` (api-design.md: SSE is an enhancement over history).
  */
 export function subscribeNotifications(handlers: StreamHandlers): () => void {
+  const { apiBase } = getRuntimeConfig();
   const controller = new AbortController();
   const token = getAccessToken();
 
-  void fetchEventSource(`${API_BASE}/notifications/stream`, {
+  void fetchEventSource(`${apiBase}/notifications/stream`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
     signal: controller.signal,
     openWhenHidden: true,

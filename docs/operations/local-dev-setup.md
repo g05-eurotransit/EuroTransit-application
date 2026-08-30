@@ -17,6 +17,11 @@ To start the infrastructure:
 docker compose up -d
 ```
 
+The frontend reads its public, environment-specific settings at runtime from
+`frontend/public/config/config.json`. Docker Compose mounts this file read-only into nginx;
+the production image deliberately contains no fallback configuration. Keep secrets out of
+this file because browsers can retrieve it directly.
+
 ## Configuring the Transactional Outbox Pattern (Debezium)
 
 EuroTransit relies on the Transactional Outbox Pattern to provide a durable outbox / at-least-once delivery without distributed transactions. Locally, we use Debezium running in Kafka Connect to read the `outbox_events` table and forward events to Kafka.

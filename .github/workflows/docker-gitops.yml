@@ -295,10 +295,6 @@ jobs:
         with:
           context: ./frontend
           file: ./frontend/Dockerfile
-          build-args: |
-            VITE_KEYCLOAK_ISSUER=https://g05.cpo2026.it/realms/eurotransit
-            VITE_KEYCLOAK_CLIENT_ID=eurotransit-frontend
-            VITE_API_BASE=/api
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/frontend:${{ needs.detect-changes.outputs.short_sha }}
