@@ -1,8 +1,6 @@
 import { WebStorageStateStore, InMemoryWebStorage } from "oidc-client-ts";
 import type { AuthProviderProps } from "react-oidc-context";
-
-const issuer = import.meta.env.VITE_KEYCLOAK_ISSUER as string;
-const clientId = import.meta.env.VITE_KEYCLOAK_CLIENT_ID as string;
+import type { RuntimeConfig } from "../config/runtimeConfig";
 
 /**
  * OIDC configuration for the EuroTransit SPA.
@@ -17,25 +15,27 @@ const clientId = import.meta.env.VITE_KEYCLOAK_CLIENT_ID as string;
  *   restores the session without persisting the JWT).
  * - `state` param (default in oidc-client-ts) guards the callback against CSRF (slide 15).
  */
-export const oidcConfig: AuthProviderProps = {
-  authority: issuer,
-  client_id: clientId,
-  redirect_uri: `${window.location.origin}/callback`,
-  silent_redirect_uri: `${window.location.origin}/callback`,
-  silentRequestTimeoutInSeconds: 5,
-  post_logout_redirect_uri: window.location.origin,
-  response_type: "code",
-  // The imported local realm exposes only the mandatory OpenID Connect scope.
-  // Keep this request aligned with that contract; profile and email claims are
-  // optional in the UI and their unavailable scopes make Keycloak reject login.
-  scope: "openid",
-  // In-memory token store — the JWT never touches localStorage/sessionStorage.
-  userStore: new WebStorageStateStore({ store: new InMemoryWebStorage() }),
-  // Renew the access token silently before it expires, using the Keycloak SSO session
-  // cookie, so reloads don't force a full redirect and the token stays short-lived.
-  automaticSilentRenew: true,
-  // Clean the ?code=&state= params out of the URL after a successful login.
-  onSigninCallback: () => {
-    window.history.replaceState({}, document.title, window.location.pathname);
-  },
-};
+export function createOidcConfig(config: RuntimeConfig): AuthProviderProps {
+  return {
+    authority: config.keycloakIssuer,
+    client_id: config.keycloakClientId,
+    redirect_uri: `${window.location.origin}/callback`,
+    silent_redirect_uri: `${window.location.origin}/callback`,
+    silentRequestTimeoutInSeconds: 5,
+    post_logout_redirect_uri: window.location.origin,
+    response_type: "code",
+    // The imported local realm exposes only the mandatory OpenID Connect scope.
+    // Keep this request aligned with that contract; profile and email claims are
+    // optional in the UI and their unavailable scopes make Keycloak reject login.
+    scope: "openid",
+    // In-memory token store — the JWT never touches localStorage/sessionStorage.
+    userStore: new WebStorageStateStore({ store: new InMemoryWebStorage() }),
+    // Renew the access token silently before it expires, using the Keycloak SSO session
+    // cookie, so reloads don't force a full redirect and the token stays short-lived.
+    automaticSilentRenew: true,
+    // Clean the ?code=&state= params out of the URL after a successful login.
+    onSigninCallback: () => {
+      window.history.replaceState({}, document.title, window.location.pathname);
+    },
+  };
+}

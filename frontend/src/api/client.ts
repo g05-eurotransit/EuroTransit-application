@@ -1,6 +1,5 @@
 import { getAccessToken } from "../auth/tokenHolder";
-
-const API_BASE = (import.meta.env.VITE_API_BASE as string) ?? "/api";
+import { getRuntimeConfig } from "../config/runtimeConfig";
 
 /**
  * Frozen error model from api-design.md: `{ code, message, correlationId }`.
@@ -65,6 +64,7 @@ export interface RequestOptions {
  * - Relative same-origin path (no CORS wildcard — 07b slide 12).
  */
 export async function apiFetch<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+  const { apiBase } = getRuntimeConfig();
   const headers: Record<string, string> = { Accept: "application/json" };
 
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
@@ -77,7 +77,7 @@ export async function apiFetch<T>(path: string, opts: RequestOptions = {}): Prom
 
   let res: Response;
   try {
-    res = await fetch(`${API_BASE}${path}`, {
+    res = await fetch(`${apiBase}${path}`, {
       method: opts.method ?? "GET",
       headers,
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,

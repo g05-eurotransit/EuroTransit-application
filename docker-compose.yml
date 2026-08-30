@@ -7,14 +7,10 @@ services:
   frontend:
     build:
       context: ./frontend
-      args:
-        # Public, non-secret build config (07b slide 25). Keycloak stays reachable at the
-        # host-facing 8081 for the browser redirect; API is same-origin via the gateway.
-        VITE_KEYCLOAK_ISSUER: http://localhost:8081/realms/eurotransit
-        VITE_KEYCLOAK_CLIENT_ID: eurotransit-frontend
-        VITE_API_BASE: /api
     image: eurotransit/frontend:local
     container_name: eurotransit-frontend
+    volumes:
+      - ./frontend/public/config/config.json:/usr/share/nginx/html/config/config.json:ro
     expose:
       - "8080"
     labels:

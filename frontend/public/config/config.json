@@ -1,0 +1,5 @@
+{
+  "keycloakIssuer": "http://localhost:8081/realms/eurotransit",
+  "keycloakClientId": "eurotransit-frontend",
+  "apiBase": "/api"
+}
