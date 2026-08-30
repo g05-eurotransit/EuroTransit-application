@@ -13,6 +13,7 @@ import {
 } from "@stripe/react-stripe-js";
 import { placeOrder } from "../api/orders";
 import { ApiError, newId } from "../api/client";
+import { BackButton } from "../components/BackButton";
 import { OrderSummaryCard } from "../components/OrderSummaryCard";
 
 interface CheckoutState {
@@ -137,8 +138,14 @@ function CheckoutForm({ order }: { order: CheckoutState }) {
   return (
     <>
       <div className="mb-4 pb-3 border-bottom">
-        <h1 className="fw-bold mb-1">Checkout</h1>
-        <p className="text-uppercase text-secondary-emphasis small fw-semibold mb-0">
+        <div className="d-flex align-items-center gap-3">
+          <BackButton />
+          <h1 className="fw-bold mb-1">Checkout</h1>
+        </div>
+        <p
+          className="text-uppercase text-secondary-emphasis small fw-semibold mb-0"
+          style={{ marginLeft: "3.5rem" }}
+        >
           Complete the details to confirm your trip.
         </p>
       </div>
