@@ -1,8 +1,7 @@
 package it.polito.cpo.controller
 
-import it.polito.cpo.contracts.inventory.RouteSeatsResponse
+import it.polito.cpo.contracts.inventory.SeatAvailabilityResponse
 import it.polito.cpo.contracts.inventory.SeatDto
-import it.polito.cpo.contracts.inventory.SeatStatus
 import it.polito.cpo.observability.GlobalErrorHandler
 import it.polito.cpo.security.EuroTransitAuthorities
 import it.polito.cpo.security.SecurityConfig
@@ -20,6 +19,7 @@ import org.springframework.security.core.authority.SimpleGrantedAuthority
 import org.springframework.security.test.web.reactive.server.SecurityMockServerConfigurers.mockJwt
 import org.springframework.security.test.web.reactive.server.SecurityMockServerConfigurers.springSecurity
 import org.springframework.test.web.reactive.server.WebTestClient
+import java.time.LocalDate
 
 @WebFluxTest(controllers = [SeatController::class])
 @Import(SecurityConfig::class, GlobalErrorHandler::class, SeatControllerTest.Config::class)
@@ -37,31 +37,35 @@ class SeatControllerTest {
         fun seatService(): SeatService = Mockito.mock(SeatService::class.java)
     }
 
+    private val travelDate = LocalDate.now().plusDays(1)
+
     @Test
-    fun `getRouteSeats returns 200 OK and seats with ROLE_service`() {
+    fun `getAvailability returns 200 OK and privacy-safe seats with ROLE_service`() {
         val client = WebTestClient.bindToApplicationContext(context)
             .apply(springSecurity())
             .configureClient().build()
 
-        val response = RouteSeatsResponse("route-1", listOf(SeatDto("1A", SeatStatus.AVAILABLE)))
+        val response = SeatAvailabilityResponse("route-1", travelDate, listOf(SeatDto("1A", true)))
         runBlocking {
-            Mockito.`when`(seatService.getSeatsForRoute("route-1")).thenReturn(response)
+            Mockito.`when`(seatService.getAvailability("route-1", travelDate)).thenReturn(response)
         }
 
         client.mutateWith(
             mockJwt().authorities(SimpleGrantedAuthority(EuroTransitAuthorities.SERVICE))
         )
             .get()
-            .uri("/api/inventory/routes/route-1/seats")
+            .uri("/api/inventory/availability?routeId=route-1&travelDate=$travelDate")
             .exchange()
             .expectStatus().isOk
             .expectBody()
             .jsonPath("$.routeId").isEqualTo("route-1")
+            .jsonPath("$.travelDate").isEqualTo(travelDate.toString())
             .jsonPath("$.seats[0].seatId").isEqualTo("1A")
+            .jsonPath("$.seats[0].isAvailable").isEqualTo(true)
     }
 
     @Test
-    fun `getRouteSeats returns 403 Forbidden if JWT lacks ROLE_service authority`() {
+    fun `getAvailability returns 403 Forbidden if JWT lacks ROLE_service authority`() {
         val client = WebTestClient.bindToApplicationContext(context)
             .apply(springSecurity())
             .configureClient().build()
@@ -70,19 +74,19 @@ class SeatControllerTest {
             mockJwt().authorities(SimpleGrantedAuthority("ROLE_customer"))
         )
             .get()
-            .uri("/api/inventory/routes/route-1/seats")
+            .uri("/api/inventory/availability?routeId=route-1&travelDate=$travelDate")
             .exchange()
             .expectStatus().isForbidden
     }
     
     @Test
-    fun `getRouteSeats returns 401 Unauthorized if JWT is missing`() {
+    fun `getAvailability returns 401 Unauthorized if JWT is missing`() {
         val client = WebTestClient.bindToApplicationContext(context)
             .apply(springSecurity())
             .configureClient().build()
 
         client.get()
-            .uri("/api/inventory/routes/route-1/seats")
+            .uri("/api/inventory/availability?routeId=route-1&travelDate=$travelDate")
             .exchange()
             .expectStatus().isUnauthorized
     }
