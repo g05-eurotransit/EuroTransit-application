@@ -1,17 +1,14 @@
 package it.polito.cpo.contracts.inventory
 
-enum class SeatStatus { 
-    AVAILABLE, 
-    HELD, 
-    SOLD 
-}
+import java.time.LocalDate
 
 data class SeatDto(
     val seatId: String,
-    val status: SeatStatus
+    val isAvailable: Boolean
 )
 
-data class RouteSeatsResponse(
+data class SeatAvailabilityResponse(
     val routeId: String,
+    val travelDate: LocalDate,
     val seats: List<SeatDto>
 )
