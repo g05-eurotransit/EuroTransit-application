@@ -1,6 +1,5 @@
 package it.polito.cpo.service
 
-import it.polito.cpo.contracts.inventory.SeatStatus
 import it.polito.cpo.model.Seat
 import it.polito.cpo.observability.ApiException
 import it.polito.cpo.repository.SeatRepository
@@ -8,44 +7,56 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito
 import org.springframework.http.HttpStatus
+import java.time.LocalDate
 
 class SeatServiceTest {
 
+    private val travelDate = LocalDate.now().plusDays(1)
+
     @Test
-    fun `getSeatsForRoute returns mapped seats when route exists`() = runBlocking {
+    fun `getAvailability returns mapped privacy-safe seats when route and date exist`() = runBlocking {
         val repository = Mockito.mock(SeatRepository::class.java)
-        Mockito.`when`(repository.findByRouteId("route-1"))
+        Mockito.`when`(repository.findByRouteIdAndTravelDate("route-1", travelDate))
             .thenReturn(flowOf(
-                Seat("route-1", "1A", "AVAILABLE"),
-                Seat("route-1", "1B", "HELD")
+                Seat("route-1", travelDate, "1A", "AVAILABLE"),
+                Seat("route-1", travelDate, "1B", "HELD"),
+                Seat("route-1", travelDate, "1C", "SOLD")
             ))
 
         val service = SeatService(repository)
-        val response = service.getSeatsForRoute("route-1")
+        val response = service.getAvailability("route-1", travelDate)
 
         assertEquals("route-1", response.routeId)
-        assertEquals(2, response.seats.size)
+        assertEquals(travelDate, response.travelDate)
+        assertEquals(3, response.seats.size)
+        
         assertEquals("1A", response.seats[0].seatId)
-        assertEquals(SeatStatus.AVAILABLE, response.seats[0].status)
+        assertTrue(response.seats[0].isAvailable)
+        
         assertEquals("1B", response.seats[1].seatId)
-        assertEquals(SeatStatus.HELD, response.seats[1].status)
+        assertFalse(response.seats[1].isAvailable)
+
+        assertEquals("1C", response.seats[2].seatId)
+        assertFalse(response.seats[2].isAvailable)
     }
 
     @Test
-    fun `getSeatsForRoute throws ApiException 404 when no seats found`(): Unit = runBlocking {
+    fun `getAvailability throws ApiException 404 when no seats found`(): Unit = runBlocking {
         val repository = Mockito.mock(SeatRepository::class.java)
-        Mockito.`when`(repository.findByRouteId("invalid-route"))
+        Mockito.`when`(repository.findByRouteIdAndTravelDate("invalid-route", travelDate))
             .thenReturn(emptyFlow())
 
         val service = SeatService(repository)
         
         val exception = assertThrows(ApiException::class.java) {
             runBlocking {
-                service.getSeatsForRoute("invalid-route")
+                service.getAvailability("invalid-route", travelDate)
             }
         }
         
