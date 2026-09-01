@@ -110,6 +110,7 @@ services:
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8081/realms/eurotransit
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/eurotransit/protocol/openid-connect/certs
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
+      INVENTORY_RESERVATION_EXPIRATION_ENABLED: "true"
     expose:
       - "8080"
     depends_on:
