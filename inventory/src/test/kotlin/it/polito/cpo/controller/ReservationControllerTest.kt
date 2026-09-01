@@ -34,6 +34,8 @@ import org.springframework.security.test.web.reactive.server.SecurityMockServerC
 import org.springframework.test.web.reactive.server.WebTestClient
 import org.springframework.transaction.reactive.TransactionalOperator
 import tools.jackson.databind.ObjectMapper
+import java.time.Clock
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.util.UUID
 
@@ -138,7 +140,7 @@ class ReservationControllerTest {
 
     @Test
     fun `createReservation returns 201 Created and delegates to service with correct parameters`() {
-        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1")
+        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1", LocalDate.now())
         val idempotencyKey = "test-idem-key"
         val correlationId = "test-corr-id"
         val userId = "user-123"
@@ -171,7 +173,7 @@ class ReservationControllerTest {
 
     @Test
     fun `createReservation returns 409 Conflict if reservation fails due to oversell`() {
-        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1")
+        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1", LocalDate.now())
         val idempotencyKey = "test-idem-key"
         val correlationId = "test-corr-id"
         val userId = "user-123"
@@ -202,7 +204,7 @@ class ReservationControllerTest {
 
     @Test
     fun `createReservation returns 400 Bad Request if Idempotency-Key header is missing`() {
-        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1")
+        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1", LocalDate.now())
         val userId = "user-123"
 
         webClient
@@ -225,7 +227,7 @@ class ReservationControllerTest {
 
     @Test
     fun `createReservation returns 400 Bad Request if X-Correlation-Id header is missing`() {
-        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1")
+        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1", LocalDate.now())
         val userId = "user-123"
 
         webClient
@@ -248,7 +250,7 @@ class ReservationControllerTest {
 
     @Test
     fun `createReservation returns 401 Unauthorized if JWT is missing`() {
-        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1")
+        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1", LocalDate.now())
 
         webClient.post()
             .uri("/api/inventory/reservations")
@@ -263,7 +265,7 @@ class ReservationControllerTest {
 
     @Test
     fun `createReservation returns 403 Forbidden if JWT lacks ROLE_service authority`() {
-        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1")
+        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1", LocalDate.now())
         val userId = "user-123"
 
         webClient
@@ -285,7 +287,7 @@ class ReservationControllerTest {
 
     @Test
     fun `createReservation returns 409 Conflict if idempotency key is already in use for a different order`() {
-        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1")
+        val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1", LocalDate.now())
         val userId = "user-123"
 
         fakeService.reserveShouldThrow = ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT", "Conflict")

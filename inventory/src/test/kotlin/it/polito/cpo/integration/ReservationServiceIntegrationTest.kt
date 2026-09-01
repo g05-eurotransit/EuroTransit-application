@@ -23,6 +23,7 @@ import org.springframework.dao.DataAccessException
 import it.polito.cpo.observability.ApiException
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
+import java.time.LocalDate
 import java.util.UUID
 import kotlinx.coroutines.reactor.awaitSingleOrNull
 import kotlinx.coroutines.async
@@ -61,9 +62,10 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         meterRegistry.clear()
     }
 
-    private fun insertSeat(routeId: String, seatId: String, status: String) {
-        databaseClient.sql("INSERT INTO seats (route_id, seat_id, status) VALUES (:routeId, :seatId, :status)")
+    private fun insertSeat(routeId: String, travelDate: LocalDate, seatId: String, status: String) {
+        databaseClient.sql("INSERT INTO seats (route_id, travel_date, seat_id, status) VALUES (:routeId, :travelDate, :seatId, :status)")
             .bind("routeId", routeId)
+            .bind("travelDate", LocalDate.now())
             .bind("seatId", seatId)
             .bind("status", status)
             .fetch().rowsUpdated().block()
@@ -74,12 +76,13 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         // Arrange
         val routeId = "route-1"
         val seatId = "seat-1"
-        insertSeat(routeId, seatId, "AVAILABLE")
+        insertSeat(routeId, LocalDate.now(), seatId, "AVAILABLE")
         
         val request = ReservationRequest(
             orderId = UUID.randomUUID(),
             routeId = routeId,
-            seats = listOf(seatId)
+            seats = listOf(seatId),
+            travelDate = LocalDate.now()
         )
 
         // Act
@@ -105,8 +108,9 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
     }
 
     private fun getSeatStatus(routeId: String, seatId: String): String? {
-        val row = databaseClient.sql("SELECT status FROM seats WHERE route_id = :routeId AND seat_id = :seatId")
+        val row = databaseClient.sql("SELECT status FROM seats WHERE route_id = :routeId AND travel_date = :travelDate AND seat_id = :seatId")
             .bind("routeId", routeId)
+            .bind("travelDate", LocalDate.now())
             .bind("seatId", seatId)
             .fetch().first().block()
         return row?.get("status") as String?
@@ -117,12 +121,13 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         // Arrange
         val routeId = "route-2"
         val seatId = "seat-2"
-        insertSeat(routeId, seatId, "AVAILABLE")
+        insertSeat(routeId, LocalDate.now(), seatId, "AVAILABLE")
         
         val request = ReservationRequest(
             orderId = UUID.randomUUID(),
             routeId = routeId,
-            seats = listOf(seatId)
+            seats = listOf(seatId),
+            travelDate = LocalDate.now()
         )
 
         // Force an exception during transaction by using an excessively long idempotency key
@@ -162,12 +167,13 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         // Arrange
         val routeId = "route-concurrent"
         val seatId = "seat-concurrent"
-        insertSeat(routeId, seatId, "AVAILABLE")
+        insertSeat(routeId, LocalDate.now(), seatId, "AVAILABLE")
 
         val request = ReservationRequest(
             orderId = UUID.randomUUID(),
             routeId = routeId,
-            seats = listOf(seatId)
+            seats = listOf(seatId),
+            travelDate = LocalDate.now()
         )
 
         // Act
@@ -214,17 +220,19 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         // Arrange
         val routeId = "route-confirm-ok"
         val seatId = "seat-confirm-ok"
-        insertSeat(routeId, seatId, "AVAILABLE")
+        insertSeat(routeId, LocalDate.now(), seatId, "AVAILABLE")
         val reservationId = "res-confirm-ok-1"
-        seatRepository.holdSeats(routeId, listOf(seatId), reservationId)
+        seatRepository.holdSeats(routeId, LocalDate.now(), listOf(seatId), reservationId)
 
         val orderId = UUID.randomUUID()
         val held = Reservation(
             reservationId = reservationId,
             orderId = orderId,
             routeId = routeId,
+            travelDate = LocalDate.now(),
             status = "HELD",
-            expiresAt = OffsetDateTime.now(ZoneOffset.UTC).plusMinutes(10),
+            expiresAt = OffsetDateTime.now(ZoneOffset.UTC
+        ).plusMinutes(10),
             isNewRecord = true
         )
         reservationRepository.save(held)
@@ -246,16 +254,18 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         // Arrange
         val routeId = "route-exp"
         val seatId = "seat-exp"
-        insertSeat(routeId, seatId, "AVAILABLE")
-        seatRepository.holdSeats(routeId, listOf(seatId), "res-exp-123")
+        insertSeat(routeId, LocalDate.now(), seatId, "AVAILABLE")
+        seatRepository.holdSeats(routeId, LocalDate.now(), listOf(seatId), "res-exp-123")
         
         val orderId = UUID.randomUUID()
         val expired = Reservation(
             reservationId = "res-exp-123",
             orderId = orderId,
             routeId = routeId,
+            travelDate = LocalDate.now(),
             status = "HELD",
-            expiresAt = java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).minusMinutes(5),
+            expiresAt = java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC
+        ).minusMinutes(5),
             isNewRecord = true
         )
         reservationRepository.save(expired)
@@ -284,16 +294,18 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         // Arrange
         val routeId = "route-race"
         val seatId = "seat-race"
-        insertSeat(routeId, seatId, "AVAILABLE")
+        insertSeat(routeId, LocalDate.now(), seatId, "AVAILABLE")
         val reservationId = "res-race-1"
-        seatRepository.holdSeats(routeId, listOf(seatId), reservationId)
+        seatRepository.holdSeats(routeId, LocalDate.now(), listOf(seatId), reservationId)
         val orderId = UUID.randomUUID()
         val held = Reservation(
             reservationId = reservationId,
             orderId = orderId,
             routeId = routeId,
+            travelDate = LocalDate.now(),
             status = "HELD",
-            expiresAt = OffsetDateTime.now(ZoneOffset.UTC).plusMinutes(10),
+            expiresAt = OffsetDateTime.now(ZoneOffset.UTC
+        ).plusMinutes(10),
             isNewRecord = true
         )
         reservationRepository.save(held)
@@ -346,49 +358,55 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         val seat1 = "seat-sweep-1"
         val seat2 = "seat-sweep-2"
         val seat3 = "seat-sweep-3"
-        insertSeat(routeId, seat1, "AVAILABLE")
-        insertSeat(routeId, seat2, "AVAILABLE")
-        insertSeat(routeId, seat3, "AVAILABLE")
+        insertSeat(routeId, LocalDate.now(), seat1, "AVAILABLE")
+        insertSeat(routeId, LocalDate.now(), seat2, "AVAILABLE")
+        insertSeat(routeId, LocalDate.now(), seat3, "AVAILABLE")
 
         val resOld = "res-old"
         val resNew = "res-new"
         val resFuture = "res-future"
 
-        seatRepository.holdSeats(routeId, listOf(seat1), resOld)
-        seatRepository.holdSeats(routeId, listOf(seat2), resNew)
-        seatRepository.holdSeats(routeId, listOf(seat3), resFuture)
+        seatRepository.holdSeats(routeId, LocalDate.now(), listOf(seat1), resOld)
+        seatRepository.holdSeats(routeId, LocalDate.now(), listOf(seat2), resNew)
+        seatRepository.holdSeats(routeId, LocalDate.now(), listOf(seat3), resFuture)
 
         val now = OffsetDateTime.now(ZoneOffset.UTC)
         // resOld: expired 10 minutes ago
         reservationRepository.save(
             Reservation(
-                reservationId = resOld,
-                orderId = UUID.randomUUID(),
-                routeId = routeId,
-                status = "HELD",
-                expiresAt = now.minusMinutes(10),
+            reservationId = resOld,
+            orderId = UUID.randomUUID(),
+            routeId = routeId,
+            travelDate = LocalDate.now(),
+            status = "HELD",
+            expiresAt = now.minusMinutes(10
+        ),
                 isNewRecord = true
             )
         )
         // resNew: expired 1 minute ago
         reservationRepository.save(
             Reservation(
-                reservationId = resNew,
-                orderId = UUID.randomUUID(),
-                routeId = routeId,
-                status = "HELD",
-                expiresAt = now.minusMinutes(1),
+            reservationId = resNew,
+            orderId = UUID.randomUUID(),
+            routeId = routeId,
+            travelDate = LocalDate.now(),
+            status = "HELD",
+            expiresAt = now.minusMinutes(1
+        ),
                 isNewRecord = true
             )
         )
         // resFuture: expires in 10 minutes
         reservationRepository.save(
             Reservation(
-                reservationId = resFuture,
-                orderId = UUID.randomUUID(),
-                routeId = routeId,
-                status = "HELD",
-                expiresAt = now.plusMinutes(10),
+            reservationId = resFuture,
+            orderId = UUID.randomUUID(),
+            routeId = routeId,
+            travelDate = LocalDate.now(),
+            status = "HELD",
+            expiresAt = now.plusMinutes(10
+        ),
                 isNewRecord = true
             )
         )
@@ -418,15 +436,16 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         val routeId = "route-atomic-fail"
         val seatAvail = "seat-avail-1"
         val seatSold = "seat-sold-1"
-        insertSeat(routeId, seatAvail, "AVAILABLE")
-        insertSeat(routeId, seatSold, "SOLD")
+        insertSeat(routeId, LocalDate.now(), seatAvail, "AVAILABLE")
+        insertSeat(routeId, LocalDate.now(), seatSold, "SOLD")
 
         val orderId = UUID.randomUUID()
         val idempotencyKey = "key-atomic-fail-${UUID.randomUUID()}"
         val request = ReservationRequest(
             orderId = orderId,
             routeId = routeId,
-            seats = listOf(seatAvail, seatSold)
+            seats = listOf(seatAvail, seatSold),
+            travelDate = LocalDate.now()
         )
 
         // Act
@@ -461,15 +480,16 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         val routeId = "route-atomic-ok"
         val seat1 = "seat-ok-1"
         val seat2 = "seat-ok-2"
-        insertSeat(routeId, seat1, "AVAILABLE")
-        insertSeat(routeId, seat2, "AVAILABLE")
+        insertSeat(routeId, LocalDate.now(), seat1, "AVAILABLE")
+        insertSeat(routeId, LocalDate.now(), seat2, "AVAILABLE")
 
         val orderId = UUID.randomUUID()
         val idempotencyKey = "key-atomic-ok-${UUID.randomUUID()}"
         val request = ReservationRequest(
             orderId = orderId,
             routeId = routeId,
-            seats = listOf(seat1, seat2)
+            seats = listOf(seat1, seat2),
+            travelDate = LocalDate.now()
         )
 
         // Act
@@ -497,15 +517,16 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         val routeId = "route-dup-order"
         val seat1 = "seat-dup-1"
         val seat2 = "seat-dup-2"
-        insertSeat(routeId, seat1, "AVAILABLE")
-        insertSeat(routeId, seat2, "AVAILABLE")
+        insertSeat(routeId, LocalDate.now(), seat1, "AVAILABLE")
+        insertSeat(routeId, LocalDate.now(), seat2, "AVAILABLE")
 
         val orderId = UUID.randomUUID()
         val idempotencyKey1 = "key-first-${UUID.randomUUID()}"
         val request = ReservationRequest(
             orderId = orderId,
             routeId = routeId,
-            seats = listOf(seat1)
+            seats = listOf(seat1),
+            travelDate = LocalDate.now()
         )
 
         // First reservation succeeds
@@ -524,7 +545,8 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         val request2 = ReservationRequest(
             orderId = orderId,
             routeId = routeId,
-            seats = listOf(seat2)
+            seats = listOf(seat2),
+            travelDate = LocalDate.now()
         )
         val idempotencyKey2 = "key-second-${UUID.randomUUID()}"
         val ex = assertThrows<ApiException> {
@@ -552,12 +574,13 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         val reservationId = "res-conflict-rollback"
         val orderId = UUID.randomUUID()
 
-        insertSeat(routeId, seat1, "HELD")
-        insertSeat(routeId, seat2, "AVAILABLE") // Inconsistent DB state: assigned reservation_id below, but status is AVAILABLE
+        insertSeat(routeId, LocalDate.now(), seat1, "HELD")
+        insertSeat(routeId, LocalDate.now(), seat2, "AVAILABLE") // Inconsistent DB state: assigned reservation_id below, but status is AVAILABLE
 
-        databaseClient.sql("UPDATE seats SET reservation_id = :resId WHERE route_id = :routeId AND seat_id IN (:s1, :s2)")
+        databaseClient.sql("UPDATE seats SET reservation_id = :resId WHERE route_id = :routeId AND travel_date = :travelDate AND seat_id IN (:s1, :s2)")
             .bind("resId", reservationId)
             .bind("routeId", routeId)
+            .bind("travelDate", LocalDate.now())
             .bind("s1", seat1)
             .bind("s2", seat2)
             .fetch().rowsUpdated().block()
@@ -566,8 +589,10 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
             reservationId = reservationId,
             orderId = orderId,
             routeId = routeId,
+            travelDate = LocalDate.now(),
             status = "HELD",
-            expiresAt = OffsetDateTime.now(ZoneOffset.UTC).plusMinutes(10),
+            expiresAt = OffsetDateTime.now(ZoneOffset.UTC
+        ).plusMinutes(10),
             isNewRecord = true
         )
         reservationRepository.save(reservation)

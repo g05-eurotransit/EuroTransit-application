@@ -6,6 +6,7 @@ import org.springframework.data.r2dbc.repository.Query
 import org.springframework.data.repository.kotlin.CoroutineCrudRepository
 import org.springframework.stereotype.Repository
 import kotlinx.coroutines.flow.Flow
+import java.time.LocalDate
 
 @Repository
 interface SeatRepository : CoroutineCrudRepository<Seat, String> {
@@ -16,7 +17,7 @@ interface SeatRepository : CoroutineCrudRepository<Seat, String> {
     fun findByRouteId(routeId: String): Flow<Seat>
 
     /**
-     * Updates available seats to held for a route and reservation when all seats are available.
+     * Updates available seats to held for a route, date and reservation when all seats are available.
      */
     @Modifying
     @Query("""
@@ -24,6 +25,7 @@ interface SeatRepository : CoroutineCrudRepository<Seat, String> {
             SELECT seat_id 
             FROM seats 
             WHERE route_id = :routeId 
+              AND travel_date = :travelDate
               AND seat_id IN (:seatIds) 
               AND status = 'AVAILABLE' 
             FOR UPDATE
@@ -31,11 +33,13 @@ interface SeatRepository : CoroutineCrudRepository<Seat, String> {
         UPDATE seats 
         SET status = 'HELD', reservation_id = :reservationId 
         WHERE route_id = :routeId 
+          AND travel_date = :travelDate
           AND seat_id IN (SELECT seat_id FROM available_seats) 
           AND (SELECT COUNT(*) FROM available_seats) = :expectedCount
     """)
     suspend fun holdSeats(
         routeId: String,
+        travelDate: LocalDate,
         seatIds: List<String>,
         reservationId: String,
         expectedCount: Int = seatIds.size

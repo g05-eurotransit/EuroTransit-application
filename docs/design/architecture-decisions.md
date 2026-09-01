@@ -12,7 +12,7 @@ Orders owns the customer order state and the required PostgreSQL order database 
 
 - Use PostgreSQL atomic updates or a reservation state machine as the Inventory source of truth for seat holds. This is separate from Orders' order-state database ownership.
 - Seat selection in the UI is tentative and does not reserve inventory.
-- Checkout creates a strongly consistent 10-minute hold only if the seat is available.
+- Checkout creates a strongly consistent 10-minute hold only if the seat is available for the given travel date.
 - Payment is attempted only after the hold succeeds.
 - If payment is authorized and Inventory confirms the still-valid hold before it expires, the seat transitions to sold.
 - If payment fails, the order is cancelled, or the 10-minute hold expires, the seat returns to available.
@@ -178,7 +178,8 @@ This gives the team clear service ownership, permission isolation, migration bou
 
 ### Selected Option: Embedded Flyway
 
-- Versioned SQL migrations live with the code in `src/main/resources/db/migration` (`V1__init.sql`, `V2__…`), tracked in the `flyway_schema_history` table.
+- Versioned SQL migrations live with the code in `src/main/resources/db/migration` (`V1__init.sql`, `V2__…`), tracked in the `flyway_schema_history` table. Demo data is not assigned a synthetic high migration version: Docker Compose loads its idempotent repeatable script from `db/local-seed`, while Kubernetes runs an ordered bootstrap Job after Inventory has completed its schema migrations.
+- Existing developer volumes that already recorded the retired V999/V1000 seed migrations must be recreated once (`docker compose down -v`) before starting the updated Inventory image. This is intentionally a development-only reset; versioned schema migrations are never repaired or reordered in place.
 - Flyway runs during startup, before WebFlux accepts requests; there is no separate migration Job or init container.
 - Connection parts are externalized as env vars (see the Database conventions), so Flyway (JDBC) and R2DBC (runtime) build their URLs from the same source.
 

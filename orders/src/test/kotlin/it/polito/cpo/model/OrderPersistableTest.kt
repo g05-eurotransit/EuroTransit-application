@@ -2,6 +2,7 @@ package it.polito.cpo.model
 
 import org.junit.jupiter.api.Test
 import java.math.BigDecimal
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.util.UUID
 import kotlin.test.assertEquals
@@ -22,6 +23,7 @@ class OrderPersistableTest {
         status = OrderStatus.ACCEPTED,
         routeId = "R1",
         seats = "1A,1B",
+        travelDate = LocalDate.now().plusDays(3),
         totalAmount = BigDecimal("100.00"),
         createdAt = LocalDateTime.now()
     )

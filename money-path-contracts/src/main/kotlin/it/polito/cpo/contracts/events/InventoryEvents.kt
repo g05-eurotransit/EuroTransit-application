@@ -1,5 +1,6 @@
 package it.polito.cpo.contracts.events
 
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.util.UUID
 
@@ -17,6 +18,7 @@ data class InventoryReservedEvent(
 data class InventoryReservedPayload(
     val reservationId: String,
     val routeId: String,
+    val travelDate: LocalDate,
     val expiresAt: LocalDateTime
 )
 
@@ -32,5 +34,6 @@ data class InventoryFailedEvent(
 )
 
 data class InventoryFailedPayload(
-    val reason: String
+    val reason: String,
+    val travelDate: LocalDate? = null
 )

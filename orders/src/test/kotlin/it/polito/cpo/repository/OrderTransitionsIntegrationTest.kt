@@ -18,6 +18,7 @@ import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import reactor.core.publisher.Mono
 import java.math.BigDecimal
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.util.UUID
 import kotlin.test.assertEquals
@@ -247,6 +248,7 @@ class OrderTransitionsIntegrationTest {
                 status = status,
                 routeId = "route-1",
                 seats = "A1",
+                travelDate = LocalDate.now().plusDays(3),
                 totalAmount = BigDecimal("10.00"),
                 createdAt = LocalDateTime.now(),
                 paymentMethodToken = paymentMethodToken,

@@ -5,6 +5,7 @@ import org.springframework.data.annotation.Transient
 import org.springframework.data.domain.Persistable
 import org.springframework.data.relational.core.mapping.Table
 import java.math.BigDecimal
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.util.UUID
 
@@ -15,6 +16,9 @@ class Order(
     var status: OrderStatus,
     val routeId: String,
     val seats: String, // comma-separated seats
+    // The day being travelled, which together with routeId and seats identifies what was bought.
+    // Without it a seat is sold once and for all rather than for one run (issue #64).
+    val travelDate: LocalDate,
     val totalAmount: BigDecimal,
     val createdAt: LocalDateTime,
     // Sandbox payment reference kept only until the order reaches a terminal state, so the
