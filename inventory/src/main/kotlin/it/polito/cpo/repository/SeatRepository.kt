@@ -12,9 +12,9 @@ import java.time.LocalDate
 interface SeatRepository : CoroutineCrudRepository<Seat, String> {
 
     /**
-     * Retrieves all seats for a specific route.
+     * Retrieves all seats for a specific route and travel date.
      */
-    fun findByRouteId(routeId: String): Flow<Seat>
+    fun findByRouteIdAndTravelDate(routeId: String, travelDate: LocalDate): Flow<Seat>
 
     /**
      * Updates available seats to held for a route, date and reservation when all seats are available.
