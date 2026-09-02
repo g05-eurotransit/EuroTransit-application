@@ -612,4 +612,119 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         val seat1Status = getSeatStatus(routeId, seat1)
         assertEquals("HELD", seat1Status)
     }
+
+    @Test
+    fun `refundReservation should transition CONFIRMED reservation to REFUNDED, seats to AVAILABLE, and clear reservation_id`() = runBlocking {
+        // Arrange
+        val routeId = "route-refund-ok"
+        val seatId = "seat-refund-ok"
+        insertSeat(routeId, LocalDate.now(), seatId, "SOLD")
+        val reservationId = "res-refund-1"
+        // Set reservation_id on the SOLD seat
+        databaseClient.sql("UPDATE seats SET reservation_id = :resId WHERE route_id = :routeId AND seat_id = :seatId")
+            .bind("resId", reservationId)
+            .bind("routeId", routeId)
+            .bind("seatId", seatId)
+            .fetch().rowsUpdated().block()
+
+        val orderId = UUID.randomUUID()
+        val confirmedRes = Reservation(
+            reservationId = reservationId,
+            orderId = orderId,
+            routeId = routeId,
+            travelDate = LocalDate.now(),
+            status = "CONFIRMED",
+            expiresAt = OffsetDateTime.now(ZoneOffset.UTC).plusMinutes(10),
+            isNewRecord = true
+        )
+        reservationRepository.save(confirmedRes)
+
+        // Act
+        val response = reservationService.refundReservation(reservationId, orderId)
+
+        // Assert
+        assertEquals(ReservationStatus.REFUNDED, response.status)
+        
+        val updatedRes = reservationRepository.findById(reservationId)
+        assertEquals("REFUNDED", updatedRes?.status)
+        
+        val seatStatus = getSeatStatus(routeId, seatId)
+        assertEquals("AVAILABLE", seatStatus)
+        
+        // Assert reservation_id was cleared
+        val seatResId = databaseClient.sql("SELECT reservation_id FROM seats WHERE route_id = :routeId AND seat_id = :seatId")
+            .bind("routeId", routeId)
+            .bind("seatId", seatId)
+            .fetch().first().block()?.get("reservation_id")
+        assertNull(seatResId)
+
+        assertEquals(1.0, meterRegistry.counter("inventory.holds.refunded").count())
+    }
+
+    @Test
+    fun `refundReservation should be idempotent and return success without modifying DB again`() = runBlocking {
+        // Arrange
+        val routeId = "route-refund-idem"
+        val seatId = "seat-refund-idem"
+        insertSeat(routeId, LocalDate.now(), seatId, "AVAILABLE")
+        val reservationId = "res-refund-idem-1"
+        val orderId = UUID.randomUUID()
+
+        val refundedRes = Reservation(
+            reservationId = reservationId,
+            orderId = orderId,
+            routeId = routeId,
+            travelDate = LocalDate.now(),
+            status = "REFUNDED",
+            expiresAt = OffsetDateTime.now(ZoneOffset.UTC).plusMinutes(10),
+            isNewRecord = true
+        )
+        reservationRepository.save(refundedRes)
+
+        // Act
+        val response = reservationService.refundReservation(reservationId, orderId)
+
+        // Assert
+        assertEquals(ReservationStatus.REFUNDED, response.status)
+        assertEquals("AVAILABLE", getSeatStatus(routeId, seatId))
+        // Should not have incremented metric again because it's a cached idempotent response
+        val counter = meterRegistry.find("inventory.holds.refunded").counter()
+        assertTrue(counter == null || counter.count() == 0.0)
+    }
+
+    @Test
+    fun `releaseReservation MUST NOT touch a CONFIRMED reservation or SOLD seats (Invariant 5)`() = runBlocking {
+        // Arrange
+        val routeId = "route-invariant"
+        val seatId = "seat-invariant"
+        insertSeat(routeId, LocalDate.now(), seatId, "SOLD")
+        val reservationId = "res-invariant-1"
+        
+        databaseClient.sql("UPDATE seats SET reservation_id = :resId WHERE route_id = :routeId AND seat_id = :seatId")
+            .bind("resId", reservationId)
+            .bind("routeId", routeId)
+            .bind("seatId", seatId)
+            .fetch().rowsUpdated().block()
+
+        val orderId = UUID.randomUUID()
+        val confirmedRes = Reservation(
+            reservationId = reservationId,
+            orderId = orderId,
+            routeId = routeId,
+            travelDate = LocalDate.now(),
+            status = "CONFIRMED",
+            expiresAt = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(5), // logically expired too
+            isNewRecord = true
+        )
+        reservationRepository.save(confirmedRes)
+
+        // Act - this happens during a delayed or erroneous checkout compensation
+        reservationService.releaseReservation(reservationId)
+
+        // Assert - INVARIANT 5: The reservation and seat must remain completely untouched
+        val updatedRes = reservationRepository.findById(reservationId)
+        assertEquals("CONFIRMED", updatedRes?.status)
+        
+        assertEquals("SOLD", getSeatStatus(routeId, seatId))
+    }
 }
