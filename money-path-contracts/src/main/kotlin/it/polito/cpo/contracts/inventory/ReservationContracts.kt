@@ -23,3 +23,7 @@ data class ReservationResponse(
     val status: ReservationStatus,
     val expiresAt: LocalDateTime
 )
+
+data class ReservationRefundRequest(
+    val orderId: UUID
+)
