@@ -337,6 +337,65 @@ class ReservationService(
     }
 
     /**
+     * Refunds a confirmed reservation and transitions its seats back to available.
+     * This is a dedicated post-sale transition (SOLD -> AVAILABLE).
+     */
+    suspend fun refundReservation(reservationId: String, orderId: UUID): ReservationResponse {
+        var isNewlyRefunded = false
+
+        val response = transactionalOperator.executeAndAwait {
+            val reservation = reservationRepository.findByReservationIdForUpdate(reservationId) ?: throw ApiException(
+                HttpStatus.NOT_FOUND,
+                "RESERVATION_NOT_FOUND",
+                "Reservation not found"
+            )
+
+            if (reservation.orderId != orderId) {
+                throw ApiException(HttpStatus.CONFLICT, "RESERVATION_ORDER_CONFLICT", "Reservation belongs to another order")
+            }
+
+            if (reservation.status == ReservationStatus.REFUNDED.name) {
+                return@executeAndAwait ReservationResponse(
+                    reservationId,
+                    ReservationStatus.REFUNDED,
+                    reservation.expiresAt.toLocalDateTime()
+                )
+            }
+
+            if (reservation.status != ReservationStatus.CONFIRMED.name) {
+                throw ApiException(
+                    HttpStatus.CONFLICT, 
+                    "RESERVATION_NOT_CONFIRMED", 
+                    "Only confirmed reservations can be refunded (current status: ${reservation.status})"
+                )
+            }
+
+            val expectedSeats = seatRepository.countByReservationId(reservationId)
+            val updatedSeats = seatRepository.refundSeats(reservationId)
+
+            if (updatedSeats.toLong() != expectedSeats) {
+                throw ApiException(HttpStatus.CONFLICT, "RESERVATION_SEAT_CONFLICT", "Seat count mismatch during refund")
+            }
+
+            val refundedReservation = reservation.copy(status = ReservationStatus.REFUNDED.name, isNewRecord = false)
+            reservationRepository.save(refundedReservation)
+            isNewlyRefunded = true
+
+            ReservationResponse(
+                reservationId,
+                ReservationStatus.REFUNDED,
+                reservation.expiresAt.toLocalDateTime()
+            )
+        }
+
+        if (isNewlyRefunded) {
+            meterRegistry.counter("inventory.holds.refunded").increment()
+        }
+
+        return response!!
+    }
+
+    /**
      * Cancels a held reservation and releases its associated seats.
      */
     suspend fun releaseReservation(reservationId: String) {
