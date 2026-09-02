@@ -23,7 +23,7 @@ import org.springframework.stereotype.Component
     matchIfMissing = false,
 )
 class ReservationExpirationJob(
-    private val reservationService: ReservationService,
+    private val inventoryMaintenanceService: InventoryMaintenanceService,
 ) {
     private val log = LoggerFactory.getLogger(ReservationExpirationJob::class.java)
 
@@ -35,7 +35,7 @@ class ReservationExpirationJob(
         fixedDelayString = "\${inventory.reservations.cleanup-interval-ms:30000}",
     )
     fun sweepExpiredReservations() = runBlocking {
-        val expired = reservationService.sweepExpiredReservations()
+        val expired = inventoryMaintenanceService.sweepExpiredReservations()
         if (expired > 0) {
             log.info("Swept {} expired reservations", expired)
         }

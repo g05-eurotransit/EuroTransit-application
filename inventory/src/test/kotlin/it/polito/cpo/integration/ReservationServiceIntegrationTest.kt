@@ -30,10 +30,15 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 
+import it.polito.cpo.service.InventoryMaintenanceService
+
 class ReservationServiceIntegrationTest : BaseIntegrationTest() {
 
     @Autowired
     lateinit var reservationService: ReservationService
+
+    @Autowired
+    lateinit var inventoryMaintenanceService: InventoryMaintenanceService
 
     @Autowired
     lateinit var seatRepository: SeatRepository
@@ -412,7 +417,7 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         )
 
         // Act
-        val expiredCount = reservationService.sweepExpiredReservations()
+        val expiredCount = inventoryMaintenanceService.sweepExpiredReservations()
 
         // Assert
         assertEquals(2, expiredCount)

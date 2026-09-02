@@ -12,9 +12,11 @@ import it.polito.cpo.model.OutboxEvent
 import it.polito.cpo.repository.OutboxEventRepository
 import it.polito.cpo.model.IdempotencyRecord
 import it.polito.cpo.model.Reservation
+import it.polito.cpo.observability.ApiException
 import it.polito.cpo.repository.IdempotencyRecordRepository
 import it.polito.cpo.repository.ReservationRepository
 import it.polito.cpo.repository.SeatRepository
+import it.polito.cpo.service.InventoryMaintenanceService
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
@@ -22,7 +24,6 @@ import org.junit.jupiter.api.assertThrows
 import org.mockito.Mockito
 import org.springframework.http.HttpStatus
 import org.springframework.dao.DuplicateKeyException
-import it.polito.cpo.observability.ApiException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import org.springframework.transaction.ReactiveTransaction
@@ -494,7 +495,16 @@ class ReservationServiceTest {
             expiresAt = OffsetDateTime.parse("2026-07-30T12:05:00Z")
         ))
 
-        val count = service.sweepExpiredReservations()
+        val meterRegistry = SimpleMeterRegistry()
+        val maintenanceService = InventoryMaintenanceService(
+            seatRepository = seatRepo,
+            reservationRepository = resRepo,
+            idempotencyRecordRepository = FakeIdempotencyRecordRepository(),
+            transactionalOperator = fakeTransactionalOperator,
+            meterRegistry = meterRegistry
+        )
+
+        val count = maintenanceService.sweepExpiredReservations()
 
         assertEquals(1, count, "Only one reservation should have expired")
         assertEquals(listOf("res-past"), seatRepo.batchReleaseCalledWith?.toList(), "Seats for res-past should be released in batch")
@@ -516,17 +526,15 @@ class ReservationServiceTest {
             override fun <T : Any> transactional(mono: Mono<T>): Mono<T> = mono
         }
 
-        val service = ReservationService(
+        val maintenanceService = InventoryMaintenanceService(
             seatRepository = seatRepo,
             reservationRepository = resRepo,
             idempotencyRecordRepository = FakeIdempotencyRecordRepository(),
-            objectMapper = mapper,
-            outboxEventRepository = FakeOutboxEventRepository(),
             transactionalOperator = failingTransactionalOperator,
             meterRegistry = meterRegistry
         )
 
-        val count = service.sweepExpiredReservations()
+        val count = maintenanceService.sweepExpiredReservations()
 
         assertEquals(0, count)
         assertEquals(1.0, meterRegistry.counter("inventory.holds.sweep.errors").count())
@@ -733,7 +741,14 @@ class ReservationServiceTest {
             createdAt = fixedDbTime.minusMinutes(10)
         ))
 
-        val deleted = service.purgeExpiredIdempotency()
+        val maintenanceService = InventoryMaintenanceService(
+            seatRepository = FakeSeatRepository(),
+            reservationRepository = resRepo,
+            idempotencyRecordRepository = idemRepo,
+            transactionalOperator = fakeTransactionalOperator,
+            meterRegistry = meterRegistry
+        )
+        val deleted = maintenanceService.purgeExpiredIdempotency()
 
         assertEquals(1, deleted)
         assertNull(idemRepo.findByKeyAndPrincipal("old-key", "user-1"))
@@ -754,7 +769,14 @@ class ReservationServiceTest {
             meterRegistry
         )
 
-        val deleted = service.purgeExpiredIdempotency()
+        val maintenanceService = InventoryMaintenanceService(
+            seatRepository = FakeSeatRepository(),
+            reservationRepository = FakeReservationRepository(),
+            idempotencyRecordRepository = idemRepo,
+            transactionalOperator = fakeTransactionalOperator,
+            meterRegistry = meterRegistry
+        )
+        val deleted = maintenanceService.purgeExpiredIdempotency()
 
         assertEquals(0, deleted)
         assertEquals(1.0, meterRegistry.counter("inventory.idempotency.purge.errors").count())
