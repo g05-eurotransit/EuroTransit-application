@@ -11,6 +11,7 @@ import it.polito.cpo.repository.IdempotencyRecordRepository
 import it.polito.cpo.repository.OutboxEventRepository
 import it.polito.cpo.repository.ReservationRepository
 import it.polito.cpo.repository.SeatRepository
+import it.polito.cpo.service.IdempotencyService
 import it.polito.cpo.security.EuroTransitAuthorities
 import it.polito.cpo.security.SecurityConfig
 import it.polito.cpo.service.ReservationService
@@ -74,7 +75,7 @@ class InventoryControllerTest {
     class FakeReservationService : ReservationService(
         Mockito.mock(SeatRepository::class.java),
         Mockito.mock(ReservationRepository::class.java),
-        Mockito.mock(IdempotencyRecordRepository::class.java),
+        Mockito.mock(IdempotencyService::class.java),
         Mockito.mock(OutboxEventRepository::class.java),
         Mockito.mock(ObjectMapper::class.java),
         Mockito.mock(TransactionalOperator::class.java),

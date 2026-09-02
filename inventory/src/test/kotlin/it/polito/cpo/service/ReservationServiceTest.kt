@@ -16,6 +16,7 @@ import it.polito.cpo.observability.ApiException
 import it.polito.cpo.repository.IdempotencyRecordRepository
 import it.polito.cpo.repository.ReservationRepository
 import it.polito.cpo.repository.SeatRepository
+import it.polito.cpo.service.IdempotencyService
 import it.polito.cpo.service.InventoryMaintenanceService
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.*
@@ -171,15 +172,23 @@ class ReservationServiceTest {
         idemRepo: FakeIdempotencyRecordRepository,
         outboxRepo: FakeOutboxEventRepository,
         meterRegistry: MeterRegistry = SimpleMeterRegistry()
-    ) = ReservationService(
-        seatRepository = seatRepo,
-        reservationRepository = resRepo,
-        idempotencyRecordRepository = idemRepo,
-        objectMapper = mapper,
-        outboxEventRepository = outboxRepo,
-        transactionalOperator = fakeTransactionalOperator,
-        meterRegistry = meterRegistry
-    )
+    ): ReservationService {
+        val idempotencyService = IdempotencyService(
+            idempotencyRecordRepository = idemRepo,
+            reservationRepository = resRepo,
+            objectMapper = mapper,
+            meterRegistry = meterRegistry
+        )
+        return ReservationService(
+            seatRepository = seatRepo,
+            reservationRepository = resRepo,
+            idempotencyService = idempotencyService,
+            outboxEventRepository = outboxRepo,
+            objectMapper = mapper,
+            transactionalOperator = fakeTransactionalOperator,
+            meterRegistry = meterRegistry
+        )
+    }
 
     @Test
     fun `reserveSeats successfully holds seats, persists state, and publishes Reserved event`() = runTest {
@@ -270,9 +279,7 @@ class ReservationServiceTest {
         val correlationId = "corr-1"
         val idempotencyKey = "key-cached"
         
-        val fingerprint = service.javaClass.getDeclaredMethod("generateFingerprint", ReservationRequest::class.java)
-            .apply { isAccessible = true }
-            .invoke(service, request) as String
+        val fingerprint = IdempotencyService(idemRepo, resRepo, mapper, SimpleMeterRegistry()).generateFingerprint(request)
 
         val cachedResponse = it.polito.cpo.contracts.inventory.ReservationResponse(
             "res-cached", 
@@ -312,9 +319,7 @@ class ReservationServiceTest {
         val correlationId = "corr-1"
         val idempotencyKey = "key-cached-expired"
         
-        val fingerprint = service.javaClass.getDeclaredMethod("generateFingerprint", ReservationRequest::class.java)
-            .apply { isAccessible = true }
-            .invoke(service, request) as String
+        val fingerprint = IdempotencyService(idemRepo, resRepo, mapper, SimpleMeterRegistry()).generateFingerprint(request)
 
         val reservationId = "res-expired"
         val cachedResponse = ReservationResponse(
@@ -363,9 +368,7 @@ class ReservationServiceTest {
         val correlationId = "corr-1"
         val idempotencyKey = "key-cached-cancelled"
         
-        val fingerprint = service.javaClass.getDeclaredMethod("generateFingerprint", ReservationRequest::class.java)
-            .apply { isAccessible = true }
-            .invoke(service, request) as String
+        val fingerprint = IdempotencyService(idemRepo, resRepo, mapper, SimpleMeterRegistry()).generateFingerprint(request)
 
         val reservationId = "res-cancelled"
         val cachedResponse = ReservationResponse(
@@ -563,9 +566,8 @@ class ReservationServiceTest {
         
         val failingOutboxRepo = FakeOutboxEventRepository(shouldThrow = true)
         val meterRegistry = SimpleMeterRegistry()
-        val service = ReservationService(
-            seatRepo, resRepo, idemRepo, failingOutboxRepo,
-            mapper, fakeTransactionalOperator, meterRegistry
+        val service = buildService(
+            seatRepo, resRepo, idemRepo, failingOutboxRepo, meterRegistry
         )
 
         val request = ReservationRequest(UUID.randomUUID(), listOf("1A", "1B"), "route-1", LocalDate.now())
@@ -828,19 +830,16 @@ class ReservationServiceTest {
 
     @Test
     fun `generateFingerprint produces identical hash for reordered and duplicate seats`() {
-        val service = buildService(FakeSeatRepository(), FakeReservationRepository(), FakeIdempotencyRecordRepository(), FakeOutboxEventRepository())
+        val idempotencyService = IdempotencyService(FakeIdempotencyRecordRepository(), FakeReservationRepository(), mapper, SimpleMeterRegistry())
+        
         val orderId = UUID.randomUUID()
         val req1 = ReservationRequest(orderId, listOf("1A", "1B", "1C"), "route-1", LocalDate.now())
         val req2 = ReservationRequest(orderId, listOf("1C", "1A", "1B"), "route-1", LocalDate.now())
         val req3 = ReservationRequest(orderId, listOf("1B", "1A", "1C", "1A", "1B"), "route-1", LocalDate.now())
-
-        val method = service.javaClass.getDeclaredMethod("generateFingerprint", ReservationRequest::class.java).apply {
-            isAccessible = true
-        }
-
-        val fp1 = method.invoke(service, req1) as String
-        val fp2 = method.invoke(service, req2) as String
-        val fp3 = method.invoke(service, req3) as String
+        
+        val fp1 = idempotencyService.generateFingerprint(req1)
+        val fp2 = idempotencyService.generateFingerprint(req2)
+        val fp3 = idempotencyService.generateFingerprint(req3)
 
         assertEquals(fp1, fp2)
         assertEquals(fp1, fp3)
