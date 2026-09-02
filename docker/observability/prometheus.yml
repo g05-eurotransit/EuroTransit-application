@@ -2,26 +2,19 @@ global:
   scrape_interval: 5s
 
 scrape_configs:
+  # Services run on the compose network (internal :8080), not on host ports.
+  # Labels namespace/app mirror the cluster ServiceMonitor scheme so the shared
+  # Grafana dashboards (RED / checkout SLO / infra) work locally unchanged.
   - job_name: eurotransit-services
     metrics_path: /actuator/prometheus
     static_configs:
-      - targets:
-          - host.docker.internal:8081
-        labels:
-          service: catalog
-      - targets:
-          - host.docker.internal:8082
-        labels:
-          service: inventory
-      - targets:
-          - host.docker.internal:8083
-        labels:
-          service: notifications
-      - targets:
-          - host.docker.internal:8084
-        labels:
-          service: orders
-      - targets:
-          - host.docker.internal:8085
-        labels:
-          service: payments
+      - targets: ["catalog:8080"]
+        labels: { namespace: eurotransit, app: catalog, service: catalog }
+      - targets: ["inventory:8080"]
+        labels: { namespace: eurotransit, app: inventory, service: inventory }
+      - targets: ["notifications:8080"]
+        labels: { namespace: eurotransit, app: notifications, service: notifications }
+      - targets: ["orders:8080"]
+        labels: { namespace: eurotransit, app: orders, service: orders }
+      - targets: ["payments:8080"]
+        labels: { namespace: eurotransit, app: payments, service: payments }
