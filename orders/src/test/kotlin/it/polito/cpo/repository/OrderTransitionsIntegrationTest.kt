@@ -22,6 +22,7 @@ import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.OffsetDateTime
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -74,8 +75,16 @@ class OrderTransitionsIntegrationTest {
 
         private val ALL_STATES = OrderStatus.entries
 
-        /** Any instant will do; what matters is that it survives the transition unchanged. */
-        private val HOLD_DEADLINE: OffsetDateTime = OffsetDateTime.now().plusMinutes(10)
+        /**
+         * Any instant will do; what matters is that it survives the transition unchanged.
+         *
+         * Truncated to microseconds because that is the resolution `timestamptz` stores: a JVM
+         * clock with nanosecond resolution - which the Linux CI runners have and macOS does not -
+         * would otherwise lose its last three digits on the round-trip and fail the comparison
+         * below on the build machine only.
+         */
+        private val HOLD_DEADLINE: OffsetDateTime =
+            OffsetDateTime.now().truncatedTo(ChronoUnit.MICROS).plusMinutes(10)
     }
 
     @TestConfiguration
