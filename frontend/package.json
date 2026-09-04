@@ -12,6 +12,8 @@
   },
   "dependencies": {
     "@microsoft/fetch-event-source": "2.0.1",
+    "@stripe/react-stripe-js": "^6.8.2",
+    "@stripe/stripe-js": "^9.14.0",
     "bootstrap": "^5.3.8",
     "bootstrap-icons": "^1.13.1",
     "oidc-client-ts": "3.1.0",
