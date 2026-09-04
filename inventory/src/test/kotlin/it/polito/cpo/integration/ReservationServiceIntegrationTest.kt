@@ -352,61 +352,81 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
     }
 
     @Test
-    fun `sweepExpiredReservations should expire oldest HELD reservations first and release seats`() = runBlocking {
+    fun `sweepExpiredReservations should expire oldest HELD reservations first and release seats, ignoring CONFIRMED`() = runBlocking {
         // Arrange
         val routeId = "route-sweep"
         val seat1 = "seat-sweep-1"
         val seat2 = "seat-sweep-2"
         val seat3 = "seat-sweep-3"
+        val seat4 = "seat-sweep-4"
         insertSeat(routeId, LocalDate.now(), seat1, "AVAILABLE")
         insertSeat(routeId, LocalDate.now(), seat2, "AVAILABLE")
         insertSeat(routeId, LocalDate.now(), seat3, "AVAILABLE")
+        insertSeat(routeId, LocalDate.now(), seat4, "SOLD")
 
         val resOld = "res-old"
         val resNew = "res-new"
         val resFuture = "res-future"
+        val resConfirmed = "res-confirmed"
 
         seatRepository.holdSeats(routeId, LocalDate.now(), listOf(seat1), resOld)
         seatRepository.holdSeats(routeId, LocalDate.now(), listOf(seat2), resNew)
         seatRepository.holdSeats(routeId, LocalDate.now(), listOf(seat3), resFuture)
+        
+        // Setup the CONFIRMED reservation directly via SQL since it requires 'SOLD' seats and 'CONFIRMED' status
+        databaseClient.sql("UPDATE seats SET reservation_id = :resId WHERE route_id = :routeId AND travel_date = :travelDate AND seat_id = :seatId")
+            .bind("resId", resConfirmed)
+            .bind("routeId", routeId)
+            .bind("travelDate", LocalDate.now())
+            .bind("seatId", seat4)
+            .fetch().rowsUpdated().block()
 
         val now = OffsetDateTime.now(ZoneOffset.UTC)
         // resOld: expired 10 minutes ago
         reservationRepository.save(
             Reservation(
-            reservationId = resOld,
-            orderId = UUID.randomUUID(),
-            routeId = routeId,
-            travelDate = LocalDate.now(),
-            status = "HELD",
-            expiresAt = now.minusMinutes(10
-        ),
+                reservationId = resOld,
+                orderId = UUID.randomUUID(),
+                routeId = routeId,
+                travelDate = LocalDate.now(),
+                status = "HELD",
+                expiresAt = now.minusMinutes(10),
                 isNewRecord = true
             )
         )
         // resNew: expired 1 minute ago
         reservationRepository.save(
             Reservation(
-            reservationId = resNew,
-            orderId = UUID.randomUUID(),
-            routeId = routeId,
-            travelDate = LocalDate.now(),
-            status = "HELD",
-            expiresAt = now.minusMinutes(1
-        ),
+                reservationId = resNew,
+                orderId = UUID.randomUUID(),
+                routeId = routeId,
+                travelDate = LocalDate.now(),
+                status = "HELD",
+                expiresAt = now.minusMinutes(1),
                 isNewRecord = true
             )
         )
         // resFuture: expires in 10 minutes
         reservationRepository.save(
             Reservation(
-            reservationId = resFuture,
-            orderId = UUID.randomUUID(),
-            routeId = routeId,
-            travelDate = LocalDate.now(),
-            status = "HELD",
-            expiresAt = now.plusMinutes(10
-        ),
+                reservationId = resFuture,
+                orderId = UUID.randomUUID(),
+                routeId = routeId,
+                travelDate = LocalDate.now(),
+                status = "HELD",
+                expiresAt = now.plusMinutes(10),
+                isNewRecord = true
+            )
+        )
+        // resConfirmed: already confirmed, should be ignored even if time is past
+        reservationRepository.save(
+            Reservation(
+                reservationId = resConfirmed,
+                orderId = UUID.randomUUID(),
+                routeId = routeId,
+                travelDate = LocalDate.now(),
+                status = "CONFIRMED",
+                expiresAt = now.minusMinutes(5),
                 isNewRecord = true
             )
         )
@@ -419,12 +439,15 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         assertEquals("EXPIRED", reservationRepository.findById(resOld)?.status)
         assertEquals("EXPIRED", reservationRepository.findById(resNew)?.status)
         assertEquals("HELD", reservationRepository.findById(resFuture)?.status)
+        assertEquals("CONFIRMED", reservationRepository.findById(resConfirmed)?.status)
 
         // Seats for expired reservations should be released back to AVAILABLE
         assertEquals("AVAILABLE", getSeatStatus(routeId, seat1))
         assertEquals("AVAILABLE", getSeatStatus(routeId, seat2))
         // Seat for future reservation should remain HELD
         assertEquals("HELD", getSeatStatus(routeId, seat3))
+        // Seat for CONFIRMED reservation should remain SOLD
+        assertEquals("SOLD", getSeatStatus(routeId, seat4))
 
         // Check metric
         assertEquals(2.0, meterRegistry.counter("inventory.holds.expired").count())
