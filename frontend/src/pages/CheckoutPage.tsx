@@ -2,8 +2,19 @@ import { useEffect, useState, type FormEvent } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "react-oidc-context";
 import { Card, Col, Form, Row } from "react-bootstrap";
+import { loadStripe } from "@stripe/stripe-js";
+import {
+  CardCvcElement,
+  CardExpiryElement,
+  CardNumberElement,
+  Elements,
+  useElements,
+  useStripe,
+} from "@stripe/react-stripe-js";
 import { placeOrder } from "../api/orders";
 import { ApiError, newId } from "../api/client";
+import { getRuntimeConfig } from "../config/runtimeConfig";
+import { BackButton } from "../components/BackButton";
 import { OrderSummaryCard } from "../components/OrderSummaryCard";
 
 interface CheckoutState {
@@ -20,39 +31,85 @@ interface CheckoutState {
   currency: string;
 }
 
-const SANDBOX_METHODS = [
-  { token: "tok_visa", label: "Test card — successful payment" },
-  { token: "tok_chargeDeclined", label: "Test card — declined payment" },
-];
+let stripePromise: ReturnType<typeof loadStripe> | undefined;
+function getStripePromise() {
+  if (!stripePromise) {
+    stripePromise = loadStripe(getRuntimeConfig().stripePublishableKey);
+  }
+  return stripePromise;
+}
 
-/**
- * Checkout form. Client-side validation is UX only (07b slide 26 — server is the truth).
- * A fresh Idempotency-Key is generated per attempt and reused only on retry of THIS attempt
- * (kept in state), so double-clicking never creates two orders.
- */
+const CARD_ELEMENT_OPTIONS = {
+  style: {
+    base: {
+      fontSize: "16px",
+      fontFamily: "Montserrat, sans-serif",
+      color: "#212529",
+      "::placeholder": { color: "#6c757d" },
+    },
+    invalid: { color: "#dc3545" },
+  },
+};
+
+type CardFieldName = "number" | "expiry" | "cvc";
+
 export function CheckoutPage() {
   const location = useLocation();
   const navigate = useNavigate();
-  const auth = useAuth();
   const state = location.state as CheckoutState | null;
-
-  const [paymentToken, setPaymentToken] = useState(SANDBOX_METHODS[0]!.token);
-  const [attemptKey] = useState(newId());
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!state) navigate("/", { replace: true });
   }, [state, navigate]);
 
   if (!state) return null;
-  const order: CheckoutState = state;
+
+  return (
+    <Elements stripe={getStripePromise()}>
+      <CheckoutForm order={state} />
+    </Elements>
+  );
+}
+
+function CheckoutForm({ order }: { order: CheckoutState }) {
+  const navigate = useNavigate();
+  const auth = useAuth();
+  const stripe = useStripe();
+  const elements = useElements();
+
+  const [attemptKey] = useState(newId());
+  const [submitting, setSubmitting] = useState(false);
+  const [completeFields, setCompleteFields] = useState<Record<CardFieldName, boolean>>({
+    number: false,
+    expiry: false,
+    cvc: false,
+  });
+  const [error, setError] = useState<string | null>(null);
+  const cardComplete = completeFields.number && completeFields.expiry && completeFields.cvc;
+
+  function fieldComplete(field: CardFieldName) {
+    return (e: { complete: boolean }) =>
+      setCompleteFields((prev) => ({ ...prev, [field]: e.complete }));
+  }
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
-    if (submitting) return;
+    if (submitting || !stripe || !elements) return;
+    // Stripe.js only needs one split element's handle — it finds the sibling
+    // expiry/CVC elements itself since they share this same <Elements> instance.
+    const cardNumberElement = elements.getElement(CardNumberElement);
+    if (!cardNumberElement) return;
+
     setSubmitting(true);
     setError(null);
+
+    const { token, error: tokenError } = await stripe.createToken(cardNumberElement);
+    if (tokenError || !token) {
+      setError(tokenError?.message ?? "Could not process the card.");
+      setSubmitting(false);
+      return;
+    }
+
     try {
       const res = await placeOrder(
         {
@@ -60,7 +117,7 @@ export function CheckoutPage() {
           seats: order.seats,
           travelDate: order.travelDate,
           totalAmount: order.totalAmount,
-          paymentMethodToken: paymentToken,
+          paymentMethodToken: token.id,
         },
         attemptKey, // reused if the user retries this same attempt
         newId(), // fresh correlation id per action
@@ -88,8 +145,14 @@ export function CheckoutPage() {
   return (
     <>
       <div className="mb-4 pb-3 border-bottom">
-        <h1 className="fw-bold mb-1">Checkout</h1>
-        <p className="text-uppercase text-secondary-emphasis small fw-semibold mb-0">
+        <div className="d-flex align-items-center gap-3">
+          <BackButton />
+          <h1 className="fw-bold mb-1">Checkout</h1>
+        </div>
+        <p
+          className="text-uppercase text-secondary-emphasis small fw-semibold mb-0"
+          style={{ marginLeft: "3.5rem" }}
+        >
           Complete the details to confirm your trip.
         </p>
       </div>
@@ -127,21 +190,39 @@ export function CheckoutPage() {
                   <h2 className="fw-bold fs-4 mb-0">Payment method</h2>
                 </div>
                 <p className="text-secondary-emphasis small">
-                  Sandbox environment: no real card is required, just pick a test scenario.
+                  Sandbox environment (Stripe test mode) — use{" "}
+                  <code>4242 4242 4242 4242</code> for a successful payment, or{" "}
+                  <code>4000 0000 0000 0002</code> for a decline. Any future expiry date and any
+                  3-digit CVC work.
                 </p>
-                <div className="d-flex flex-column gap-2">
-                  {SANDBOX_METHODS.map((m) => (
-                    <Form.Check
-                      key={m.token}
-                      type="radio"
-                      id={`payment-${m.token}`}
-                      name="paymentMethod"
-                      label={m.label}
-                      checked={paymentToken === m.token}
-                      onChange={() => setPaymentToken(m.token)}
-                    />
-                  ))}
-                </div>
+                <Form.Group className="mb-3">
+                  <Form.Label className="small text-secondary-emphasis fw-semibold">
+                    Card number
+                  </Form.Label>
+                  <div className="form-control py-2" style={{ height: "auto" }}>
+                    <CardNumberElement options={CARD_ELEMENT_OPTIONS} onChange={fieldComplete("number")} />
+                  </div>
+                </Form.Group>
+                <Row className="g-3">
+                  <Col xs={6}>
+                    <Form.Group>
+                      <Form.Label className="small text-secondary-emphasis fw-semibold">
+                        Expiry date
+                      </Form.Label>
+                      <div className="form-control py-2" style={{ height: "auto" }}>
+                        <CardExpiryElement options={CARD_ELEMENT_OPTIONS} onChange={fieldComplete("expiry")} />
+                      </div>
+                    </Form.Group>
+                  </Col>
+                  <Col xs={6}>
+                    <Form.Group>
+                      <Form.Label className="small text-secondary-emphasis fw-semibold">CVC</Form.Label>
+                      <div className="form-control py-2" style={{ height: "auto" }}>
+                        <CardCvcElement options={CARD_ELEMENT_OPTIONS} onChange={fieldComplete("cvc")} />
+                      </div>
+                    </Form.Group>
+                  </Col>
+                </Row>
               </Card.Body>
             </Card>
 
@@ -161,7 +242,7 @@ export function CheckoutPage() {
               totalAmount={order.totalAmount}
               currency={order.currency}
               actionLabel={submitting ? "Placing order…" : "Pay now"}
-              actionDisabled={submitting}
+              actionDisabled={submitting || !stripe || !cardComplete}
               actionType="submit"
             />
           </Col>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Button, Card, Col, Row } from "react-bootstrap";
+import { BackButton } from "../components/BackButton";
 import { OrderSummaryCard } from "../components/OrderSummaryCard";
 
 interface OfferState {
@@ -71,8 +72,14 @@ export function SeatSelectionPage() {
     <>
       <div className="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4 pb-3 border-bottom">
         <div>
-          <h1 className="fw-bold mb-1">Choose your seat</h1>
-          <p className="text-uppercase text-secondary-emphasis fw-semibold mb-0">
+          <div className="d-flex align-items-center gap-3">
+            <BackButton />
+            <h1 className="fw-bold mb-1">Choose your seat</h1>
+          </div>
+          <p
+            className="text-uppercase text-secondary-emphasis fw-semibold mb-0"
+            style={{ marginLeft: "3.5rem" }}
+          >
             {offer.trainType} · {offer.fareClass}
           </p>
         </div>
