@@ -10,7 +10,7 @@ services:
     image: eurotransit/frontend:local
     container_name: eurotransit-frontend
     volumes:
-      - ./frontend/public/config/config.json:/usr/share/nginx/html/config/config.json:ro
+      - ./frontend/public/config/config.json:/usr/share/nginx/html/config/config.json:ro,Z
     expose:
       - "8080"
     labels:
@@ -110,6 +110,7 @@ services:
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8081/realms/eurotransit
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/eurotransit/protocol/openid-connect/certs
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
+      INVENTORY_RESERVATION_EXPIRATION_ENABLED: "true"
     expose:
       - "8080"
     depends_on:
@@ -140,6 +141,8 @@ services:
       # In-network broker address (compose PLAINTEXT listener). Without it the producer
       # falls back to localhost, which does not resolve inside a container.
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      STRIPE_SANDBOX_URL: ${STRIPE_SANDBOX_URL:-https://api.stripe.com/v1}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-sk_test_1234567890}
     expose:
       - "8080"
     depends_on:
@@ -316,7 +319,7 @@ services:
     ports:
       - "8081:8080"
     volumes:
-      - ./infrastructure/local/keycloak:/opt/keycloak/data/import
+      - ./infrastructure/local/keycloak:/opt/keycloak/data/import:Z
 
 
   # ==========================================
@@ -328,7 +331,7 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./docker/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./docker/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro,Z
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -340,7 +343,7 @@ services:
       - "4318:4318" # OTLP HTTP ingest
       - "3200:3200" # Tempo query API
     volumes:
-      - ./docker/observability/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - ./docker/observability/tempo.yaml:/etc/tempo/tempo.yaml:ro,Z
 
   grafana:
     image: grafana/grafana:11.6.1
@@ -352,7 +355,7 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - ./docker/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/observability/grafana/provisioning:/etc/grafana/provisioning:ro,Z
     depends_on:
       - prometheus
       - tempo

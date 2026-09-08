@@ -14,7 +14,7 @@ import it.polito.cpo.service.ReservationService
 
 @RestController
 @RequestMapping("/api/inventory/reservations")
-class InventoryController(
+class ReservationController(
     private val reservationService: ReservationService
 ) {
 

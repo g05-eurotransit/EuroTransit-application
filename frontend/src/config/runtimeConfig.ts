@@ -2,6 +2,7 @@ export interface RuntimeConfig {
   keycloakIssuer: string;
   keycloakClientId: string;
   apiBase: string;
+  stripePublishableKey: string;
 }
 
 const CONFIG_URL = "/config/config.json";
@@ -49,6 +50,13 @@ function validateApiBase(value: string): string {
   return value.replace(/\/$/, "");
 }
 
+function validateStripePublishableKey(value: string): string {
+  if (!/^pk_(test|live)_[A-Za-z0-9]+$/.test(value)) {
+    throw new Error("Frontend runtime configuration has an invalid 'stripePublishableKey'");
+  }
+  return value;
+}
+
 export function initializeRuntimeConfig(value: unknown): RuntimeConfig {
   activeConfig = undefined;
 
@@ -63,6 +71,9 @@ export function initializeRuntimeConfig(value: unknown): RuntimeConfig {
       requiredString(candidate.keycloakClientId, "keycloakClientId"),
     ),
     apiBase: validateApiBase(requiredString(candidate.apiBase, "apiBase")),
+    stripePublishableKey: validateStripePublishableKey(
+      requiredString(candidate.stripePublishableKey, "stripePublishableKey"),
+    ),
   });
 
   activeConfig = config;

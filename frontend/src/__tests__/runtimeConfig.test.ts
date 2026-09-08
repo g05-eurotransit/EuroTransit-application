@@ -9,6 +9,7 @@ const validConfig = {
   keycloakIssuer: "https://g05.cpo2026.it/realms/eurotransit",
   keycloakClientId: "eurotransit-frontend",
   apiBase: "/api",
+  stripePublishableKey: "pk_test_abc123",
 };
 
 describe("runtime frontend configuration", () => {
@@ -35,6 +36,8 @@ describe("runtime frontend configuration", () => {
     [{ ...validConfig, keycloakClientId: "invalid client id" }],
     [{ ...validConfig, apiBase: "https://attacker.example/api" }],
     [{ ...validConfig, apiBase: "//attacker.example/api" }],
+    [{ ...validConfig, stripePublishableKey: "sk_test_abc123" }],
+    [{ ...validConfig, stripePublishableKey: "not-a-key" }],
   ])("rejects unsafe configuration %#", (config) => {
     expect(() => initializeRuntimeConfig(config)).toThrow(/runtime configuration/i);
   });
