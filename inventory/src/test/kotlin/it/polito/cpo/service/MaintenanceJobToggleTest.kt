@@ -19,7 +19,7 @@ import org.springframework.context.ConfigurableApplicationContext
 class MaintenanceJobToggleTest {
 
     private val runner = ApplicationContextRunner()
-        .withBean(ReservationService::class.java, { Mockito.mock(ReservationService::class.java) })
+        .withBean(InventoryMaintenanceService::class.java, { Mockito.mock(InventoryMaintenanceService::class.java) })
         .withConfiguration(
             UserConfigurations.of(ReservationExpirationJob::class.java, IdempotencyPurgeJob::class.java),
         )
