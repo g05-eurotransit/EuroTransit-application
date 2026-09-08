@@ -67,6 +67,13 @@ interface SeatRepository : CoroutineCrudRepository<Seat, String> {
     suspend fun confirmSeats(reservationId: String): Int
     
     /**
+     * Updates sold seats for a refunded reservation back to available.
+     */
+    @Modifying
+    @Query("UPDATE seats SET status = 'AVAILABLE', reservation_id = NULL WHERE reservation_id = :reservationId AND status = 'SOLD'")
+    suspend fun refundSeats(reservationId: String): Int
+    
+    /**
      * Counts the number of seats assigned to a reservation.
      */
     @Query("SELECT COUNT(*) FROM seats WHERE reservation_id = :reservationId")
