@@ -106,9 +106,16 @@ only `/routes`, `/routes/{routeId}` and `/offers`, and `RouteRepository` has no 
 without it Orders would fetch the whole catalogue per checkout. The comment also lists the two
 existing offers whose prose does not map cleanly to a rule (of-002, of-003).
 
-**0.4 — Open points posted on #68.** The `404 ROUTE_NOT_FOUND` that conflates "unknown route" with
-"sold out", and the missing filter for departed same-day seats that ADR-014 now returns to
-`AVAILABLE`.
+**0.4 — Open points posted on #68.** The `404 ROUTE_NOT_FOUND` that conflates two cases behind one
+code, and the missing filter for departed same-day seats that ADR-014 now returns to `AVAILABLE`.
+
+**Corrected 2026-09-10, after reading `SeatService`.** The 404 was described here as conflating
+"unknown route" with "sold out". That is wrong, and worth having right so nobody fixes the wrong
+thing: the branch throws when the seat query returns **zero rows** (`SeatService:28`), and a
+sold-out run has rows — `HELD`/`SOLD` — so it correctly returns `200` with every seat `false`. The
+real ambiguity is "no such route" versus "route exists, no seats provisioned for that travel date".
+Split into #96; the departed-seat filter into #97 (past dates, Inventory) and #98 (same-day, the
+Orders façade, because it needs Catalog's departure time and zone).
 
 Links: [#72](https://github.com/g05-eurotransit/EuroTransit-application/issues/72#issuecomment-5616516176) ·
 [#85](https://github.com/g05-eurotransit/EuroTransit-application/issues/85#issuecomment-5616518795) ·
@@ -221,8 +228,10 @@ Merged as `a3ce792` (PR #92), CI green. Full build was green at **289 tests, 0 f
   per seat and no ids.
 - `api-design.md`: the row naming Catalog as the caller corrected, the façade documented.
 
-Deliberately left for Inventory, both raised on #68: the 404 that conflates an unknown route with a
-sold-out one, and the missing filter for departed same-day seats.
+Deliberately left for Inventory, both raised on #68 and now split out of it: the ambiguous 404
+(#96 — see the correction under step 0.4; it is route-versus-date, not route-versus-sold-out) and the
+missing filter for departed seats (#97 for past dates, which Inventory can fix alone, and #98 for the
+same-day case, which is the façade's because it needs Catalog's departure time and zone).
 
 Still open before the frontend can consume it: the sweeper (#81 / configuration PR #31) must be
 enabled, or seats held by abandoned checkouts read as permanently unavailable.

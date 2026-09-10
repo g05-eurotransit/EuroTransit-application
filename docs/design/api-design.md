@@ -170,8 +170,10 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
   - Browsing traffic is isolated from the money path by a separate `inventory-read` circuit breaker
     and bulkhead, a tighter timeout, and **no retry** — a stale seat map is not worth a retry, and
     retrying read traffic is how a slow dependency becomes an outage.
-  - `404` when Inventory reports no seats for the route and date. Inventory currently conflates an
-    unknown route with a sold-out one behind the same code; raised on #68.
+  - `404` when Inventory reports no seats for the route and date. Inventory returns one code for two
+    different cases — an unknown route, and a known route with no seats provisioned for that travel
+    date — so the façade has nothing better to say than to re-raise it; tracked in #96. A sold-out
+    run is not one of those cases: its seat rows exist, so it is a `200` with every seat unavailable.
 
 - `GET /api/orders/{orderId}`
   - Returns the current order status: accepted, reserving, payment-pending, confirming-inventory, compensating, confirmed, failed, or cancelled.

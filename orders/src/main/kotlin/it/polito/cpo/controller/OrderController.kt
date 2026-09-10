@@ -123,9 +123,13 @@ class OrderController(
 
         val seats = when (outcome) {
             is SeatAvailabilityOutcome.Found -> outcome.seats
-            // Inventory conflates "unknown route" with "sold out" behind one 404 (raised on #68).
-            // Until that is split, 404 is the honest answer: reporting an empty seat map for a route
-            // that does not exist would look like a sold-out train.
+            // Inventory answers one 404 for two different cases (#96): an unknown route, and a
+            // known route with no seats provisioned for that travel date. Until those are split,
+            // re-raising it is the honest answer — reporting an empty seat map for a route that does
+            // not exist would read as a departed or unbookable train.
+            //
+            // A sold-out run is NOT one of those cases and never reaches here: its seat rows exist
+            // as HELD/SOLD, so Inventory returns them and every seat is simply unavailable.
             SeatAvailabilityOutcome.NotFound ->
                 throw ResponseStatusException(HttpStatus.NOT_FOUND, "No seats for this route and date")
         }
