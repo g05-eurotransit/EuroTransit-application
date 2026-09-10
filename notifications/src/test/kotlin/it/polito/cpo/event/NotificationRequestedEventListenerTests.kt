@@ -1,5 +1,6 @@
 package it.polito.cpo.event
 
+import it.polito.cpo.contracts.events.NotificationType
 import it.polito.cpo.notification.NotificationStore
 import org.apache.kafka.clients.producer.ProducerConfig
 import org.apache.kafka.common.serialization.StringSerializer
@@ -14,6 +15,7 @@ import org.springframework.kafka.test.utils.KafkaTestUtils
 import org.springframework.test.context.ActiveProfiles
 import java.util.UUID
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 @SpringBootTest(properties = ["spring.kafka.bootstrap-servers=\${spring.embedded.kafka.brokers}"])
@@ -70,6 +72,61 @@ class NotificationRequestedEventListenerTests {
         val recorded = store.historyFor("alice").first()
         assertEquals(order, recorded.orderId)
         assertEquals("Your order is confirmed", recorded.message)
+    }
+
+    /** The same envelope with the fields added for readable notifications. */
+    private fun enrichedEventJson(eventId: UUID, principal: String, order: UUID) = """
+        {
+          "eventId": "$eventId",
+          "eventType": "notification-requested",
+          "schemaVersion": 1,
+          "occurredAt": "2026-07-06T19:14:43",
+          "correlationId": "corr-$eventId",
+          "orderId": "$order",
+          "principalId": "$principal",
+          "payload": {
+            "recipientEmail": "$principal@eurotransit.local",
+            "message": "The selected seats are no longer available. No payment was taken.",
+            "type": "ORDER_FAILED",
+            "failureCode": "SEATS_UNAVAILABLE",
+            "routeId": "rt-to-mi-001",
+            "travelDate": "2026-08-18"
+          }
+        }
+    """.trimIndent()
+
+    @Test
+    fun `an event produced before this contract still carries no type, code or route`() {
+        // The property that makes the rollout safe in either order: Orders and Notifications are
+        // deployed separately, so a payload without the new fields must still parse and record.
+        val id = UUID.randomUUID()
+        val order = UUID.randomUUID()
+        template().send("notification-requested", order.toString(), eventJson(id, "erin", order)).get()
+
+        awaitHistory("erin", 1)
+        val recorded = store.historyFor("erin").first()
+        assertNull(recorded.type)
+        assertNull(recorded.failureCode)
+        assertNull(recorded.route)
+        assertEquals("Your order is confirmed", recorded.message)
+    }
+
+    @Test
+    fun `carries the failure code, and is delivered even when Catalog cannot be reached`() {
+        // No Catalog runs in this test, so route resolution fails. The notification must arrive
+        // anyway: trip context is an enhancement, and losing it must never cost the customer the
+        // message telling them what happened.
+        val id = UUID.randomUUID()
+        val order = UUID.randomUUID()
+        template().send("notification-requested", order.toString(), enrichedEventJson(id, "frank", order)).get()
+
+        awaitHistory("frank", 1)
+        val recorded = store.historyFor("frank").first()
+        assertEquals(NotificationType.ORDER_FAILED, recorded.type)
+        assertEquals("SEATS_UNAVAILABLE", recorded.failureCode)
+        assertNull(recorded.route)
+        // The money claim stays exactly as Orders wrote it.
+        assertEquals("The selected seats are no longer available. No payment was taken.", recorded.message)
     }
 
     @Test

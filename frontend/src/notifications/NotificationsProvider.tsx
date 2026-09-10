@@ -9,6 +9,7 @@ import { useAuth } from "react-oidc-context";
 import {
   listNotifications,
   subscribeNotifications,
+  type NotificationRoute,
   type NotificationView,
 } from "../api/notifications";
 
@@ -23,6 +24,24 @@ export function formatTimestamp(iso: string): string {
 
 export function shortOrderRef(orderId: string): string {
   return orderId.slice(0, 8);
+}
+
+/**
+ * The trip line shown above a notification's message.
+ *
+ * `travelDate` and `departureTime` are already local to the departure station, and are joined
+ * without a zone precisely so the browser does not convert them: a traveller wants the time
+ * printed on their ticket, not that time rendered in whatever zone they happen to be reading from.
+ */
+export function formatTrip(route: NotificationRoute): string {
+  const departure = new Date(`${route.travelDate}T${route.departureTime}`);
+  const when = departure.toLocaleString("it-IT", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  return `${route.origin} → ${route.destination} · ${when}`;
 }
 
 interface NotificationsContextValue {

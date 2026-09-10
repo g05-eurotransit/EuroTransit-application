@@ -3,14 +3,36 @@ import { apiFetch } from "./client";
 import { getAccessToken } from "../auth/tokenHolder";
 import { getRuntimeConfig } from "../config/runtimeConfig";
 
+export type NotificationType = "ORDER_CONFIRMED" | "ORDER_FAILED";
+
+/** The trip, as the customer recognises it. Times are local to the departure station. */
+export interface NotificationRoute {
+  routeId: string;
+  origin: string;
+  destination: string;
+  travelDate: string; // ISO LocalDate, e.g. "2026-08-18"
+  departureTime: string; // ISO LocalTime, e.g. "07:00:00"
+}
+
 export interface NotificationView {
   id: string;
   principalId: string;
   orderId: string;
+  /**
+   * A complete, ready-to-display sentence, and the only field that says anything about money.
+   * Render it verbatim: those claims are owned by the Orders failure-code set, which is careful
+   * about what it can truthfully assert, and restating them here would let the two drift.
+   */
   message: string;
   recipientEmail: string;
   occurredAt: string;
   receivedAt: string;
+  // Optional: a notification produced before this contract carries none of these, and one whose
+  // route could not be resolved carries no route. Render the message alone in either case.
+  type?: NotificationType;
+  /** The Orders failure code. Branch on this, never on an HTTP status. */
+  failureCode?: string;
+  route?: NotificationRoute;
 }
 
 /** Notification history for the authenticated caller (owner-scoped server-side). */

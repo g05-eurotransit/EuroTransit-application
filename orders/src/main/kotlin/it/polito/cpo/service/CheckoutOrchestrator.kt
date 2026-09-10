@@ -15,6 +15,7 @@ import it.polito.cpo.controller.dtos.CheckoutRequest
 import it.polito.cpo.controller.dtos.CheckoutResponse
 import it.polito.cpo.contracts.events.NotificationRequestedEvent
 import it.polito.cpo.contracts.events.NotificationRequestedPayload
+import it.polito.cpo.contracts.events.NotificationType
 import it.polito.cpo.contracts.events.OrderConfirmedEvent
 import it.polito.cpo.contracts.events.OrderPlacedEvent
 import it.polito.cpo.model.Order
@@ -419,8 +420,14 @@ class CheckoutOrchestrator(
                             orderId = ctx.orderId,
                             principalId = ctx.order.userId,
                             payload = NotificationRequestedPayload(
+                                // No order id in the sentence: a UUID identifies the order to us and
+                                // means nothing to the customer. The trip is what they recognise, and
+                                // it travels as identifiers below for the consumer to resolve.
                                 recipientEmail = recipientEmail(ctx.order),
-                                message = "Your order ${ctx.orderId} has been successfully confirmed!",
+                                message = "Your booking is confirmed.",
+                                type = NotificationType.ORDER_CONFIRMED,
+                                routeId = ctx.order.routeId,
+                                travelDate = ctx.order.travelDate,
                             ),
                         ),
                     )
@@ -657,6 +664,11 @@ class CheckoutOrchestrator(
      * The message is the [CustomerFailureCode]'s own text and never the internal failure class. It
      * used to interpolate the latter, which put strings like `reservation_seat_conflict` — and, for
      * a dependency fault, a wire code — in front of a customer.
+     *
+     * The code travels beside the message so a client can branch on it without parsing the sentence
+     * or, worse, inferring the reason from an HTTP status: Inventory answers 409 for five different
+     * conditions and none of them means the seats were taken, while the refusal that does mean it is
+     * not a 409 at all. The message stays the authority on anything to do with money.
      */
     private fun failureNotification(ctx: PipelineContext, code: CustomerFailureCode): OutboxEvent = outbox(
         "notification-requested", ctx.orderId,
@@ -667,6 +679,10 @@ class CheckoutOrchestrator(
             payload = NotificationRequestedPayload(
                 recipientEmail = recipientEmail(ctx.order),
                 message = code.customerMessage,
+                type = NotificationType.ORDER_FAILED,
+                failureCode = code.name,
+                routeId = ctx.order.routeId,
+                travelDate = ctx.order.travelDate,
             ),
         ),
     )
