@@ -40,6 +40,20 @@ offer: `CheckoutRequest` carries no `offerId`, the orders table has no offer col
 Catalog client anywhere in `orders/src/main`. Everything downstream of the refund policy depends on
 closing that gap first, and none of it waits on anyone.
 
+**Two of the five Orders canary gates in `EuroTransit-configuration#27` do not measure what they
+claim.** `non-terminal-orders` and `open-reconciliation-incidents` filter `orders_pipeline_inflight`
+and `orders_reconciliation_open` by `rollouts_pod_template_hash`, but both gauges are produced by a
+scheduled job querying the whole database, so every replica publishes the same global value. The
+filter attributes nothing, `sum()` multiplies by replica count, and `result == 0` on open incidents
+makes the canary unpromotable the moment a chaos experiment leaves a record open — which is what
+those experiments are for. Attributable per-pod replacements exist: `orders_events_dlt_total`,
+`orders_checkout_failed_total`, `orders_checkout_completed_total{result="confirmed"}`.
+
+Related and worth writing down beside the template: under ADR-011 the pipeline runs in a Kafka
+consumer, so the `TraefikService` weight controls only the HTTP entry. Which instance runs the money
+path is decided by partition assignment, so `p95` on `http_server_requests` covers a persist and an
+insert and none of reserve, pay or confirm. Posted as a review comment on that PR.
+
 **The availability façade is not a contested decision.** The design was stated on #68 and Inventory
 implemented it to spec: the path, the `travelDate` parameter, and the collapse of `HELD`/`SOLD` into
 a single `isAvailable` flag all match what was asked. The `api-design.md` row naming Catalog as the
@@ -55,7 +69,7 @@ counter-proposal to negotiate.
 | 2 | Refund part 1 — the ADR and `offerId` in the checkout contract | **detailed below** |
 | 3 | Refund part 2 — Catalog client and policy resolution | to be written when 2 lands |
 | 4 | Refund part 3 — refund state machine and endpoint | to be written |
-| 5 | Orders canary with metric-gated promote/abort | to be written |
+| 5 | Orders canary with metric-gated promote/abort | to be written; findings already recorded below |
 | 6 | Chaos experiments, postmortem, agent log | to be written |
 
 Steps 2 to 4 are one feature split by dependency, not three features. Step 3 needs #85 to have
