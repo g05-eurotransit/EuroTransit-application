@@ -1,0 +1,14 @@
+-- The Inventory hold deadline, so the customer can see how long the checkout has to converge.
+--
+-- Orders already received this value from the hold response and discarded it, which is why the
+-- countdown the SPA was coded against never rendered.
+--
+-- TIMESTAMPTZ, deliberately unlike `created_at`, which is a plain TIMESTAMP. This one is not a local
+-- wall-clock reading owned by Orders: it is an instant produced by the Inventory database clock — the
+-- only authority for expiry (reservation-confirmation.md, invariant 4) — travelling between two
+-- services and then to a browser in an unknown zone. Storing it without an offset would reintroduce
+-- exactly the ambiguity the contract change removed.
+--
+-- Nullable: set only once seats are held, like `reservation_id`, and null for an order that never
+-- reached RESERVING.
+ALTER TABLE orders ADD COLUMN reservation_expires_at TIMESTAMPTZ;

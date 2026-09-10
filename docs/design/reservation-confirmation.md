@@ -533,11 +533,15 @@ and pass against PostgreSQL and Kafka. Runtime enforcement is
 - [ ] commit-aware metrics and reconciliation alerts — the metrics are complete and
   commit-aware: `orders.reconciliation.required` on every incident, the
   `orders.reconciliation.open` and `orders.pipeline.inflight` gauges with their oldest-age
-  companions, and `orders.events.dlt` on the dead-letter path. What remains is outside this
-  repository and outside the Orders slice: the `PrometheusRule` objects belong to the
-  configuration repository, and `/actuator/prometheus` is still denied by the Orders security
-  chain, so no Orders metric is scrapable yet. **This is the only item still blocking the
-  gate.**
+  companions, and `orders.events.dlt` on the dead-letter path. They are also scrapable:
+  `/actuator/prometheus` is permitted (`EuroTransitSecurity.UNAUTHENTICATED_ACTUATOR_ENDPOINTS`),
+  exposed (`orders/src/main/resources/application.yaml`), pinned by a test in
+  `OrdersSecurityConfigTests`, and collected by the `ServiceMonitor` the configuration repository
+  ships for every service. What remains is outside this repository and outside the Orders slice:
+  the `PrometheusRule` objects belong to the configuration repository, where
+  `platform/kube-prometheus-stack/prometheus-rules.yaml` still defines only the checkout burn-rate,
+  latency, and Kafka-lag alerts and nothing for reconciliation. **This is the only item still
+  blocking the gate**, tracked as `EuroTransit-configuration#11`.
 
 This list is the release gate for the reservation-expiration capability; none of
 its items are deferred design questions.

@@ -26,6 +26,7 @@ EuroTransit is designed as an enterprise-grade system. Public APIs must assume a
 | --- | --- | --- | --- |
 | `GET /api/catalog/**` | Public or authenticated depending on offer visibility | Optional for public catalog; required for personalized offers | Public read or customer scope |
 | `POST /api/orders` | External | Required | Customer scope; principal becomes order owner |
+| `GET /api/orders` | External | Required | Customer scope; always scoped to the caller's own orders, with no operations widening |
 | `GET /api/orders/{orderId}` | External | Required | Order owner or privileged operations scope |
 | `POST /api/orders/{orderId}/reconciliation/redrive` | Internal operations | Required operations credential | Operations role only; redrives an open reconciliation record through the Orders outbox |
 | `POST /api/orders/{orderId}/reconciliation/{recordId}/resolve` | Internal operations | Required operations credential | Operations role only; records evidence-backed resolution of a terminal invariant incident |
@@ -117,9 +118,34 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     The stored request fingerprint includes `travelDate`, so reusing one key for two different days is an
     `IDEMPOTENCY_CONFLICT` rather than a replay of the wrong day.
   - Stores checkout idempotency records for 24 hours.
+- `GET /api/orders`
+  - Returns the authenticated customer's own order history, newest first.
+  - Accepts an optional `status` filter, so a "my tickets" view is `?status=CONFIRMED` while the
+    unfiltered list stays reachable and a customer can still find a failed attempt.
+  - Paginates by keyset, not offset: `limit` (default 20, capped at 100) plus an opaque `cursor`
+    returned as `nextCursor`, null on the last page. Offset paging would shift under the concurrent
+    inserts that happen precisely while a customer is reading this list.
+  - **Unlike `GET /api/orders/{orderId}`, the operations role does not widen this endpoint.** That
+    role exists so support can read one order it was given the id of; dropping the principal filter
+    on a collection would return every customer's orders in one call. The filter is applied in the
+    SQL predicate rather than in the controller, so it cannot be bypassed by a later edit.
+  - A malformed cursor is `400`, not a silent restart from the first page, which would make a paging
+    client loop over the same page forever.
 - `GET /api/orders/{orderId}`
   - Returns the current order status: accepted, reserving, payment-pending, confirming-inventory, compensating, confirmed, failed, or cancelled.
   - Includes `travelDate`, distinct from `createdAt`: the day of travel, not the day of purchase.
+  - Once seats are held, includes `reservationExpiresAt`: the Inventory hold deadline, carried as an
+    offset-bearing instant because it is produced by the Inventory database clock and consumed by a
+    browser in an unknown zone. It is the deadline for the *checkout* to converge — covering crash,
+    retry, and Kafka lag — and **not** a payment window: the payment token arrives with the checkout
+    request and the pipeline runs server-side with no user interaction. Clients must not present it
+    as "you have ten minutes to pay". A customer-driven payment step is issue #72, deferred.
+  - On a `failed` order, includes `failureCode` and a ready-to-display `failureMessage`. The code is
+    drawn from a deliberately small closed set — `SEATS_UNAVAILABLE`, `PAYMENT_DECLINED`, and a
+    generic `CHECKOUT_FAILED` — because only the first two describe something a customer can act on.
+    Every other internal classification, including every invariant violation, collapses into the
+    generic code, so an operator-facing failure class or a provider code can never reach a customer.
+    The mapping is an allowlist: a failure class added later collapses by default rather than leaking.
   - Requires the authenticated customer to own the order, unless an operator/admin role is used.
   - Returns `404 Not Found` for customer-to-customer access to avoid revealing another customer's order.
 - `POST /api/orders/{orderId}/cancel`
@@ -154,6 +180,9 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
   - Does not require a propagated user context (`X-User-Id`), as it only returns public seat state.
 - `POST /api/inventory/reservations`
   - Attempts to create a 10-minute hold for the requested seats.
+  - Returns `expiresAt` as an offset-bearing instant. It is derived from the Inventory database clock,
+    which is the only authority for expiry, and it reaches a browser as a countdown; a zone-less
+    wall-clock reading would be re-interpreted in the viewer's own zone.
   - Internal API; callers must be trusted services such as Orders.
   - Requires an Orders-generated idempotency key derived from the order id, operation, and attempt.
   - Uses a strong consistency decision: the same seat cannot have two active holds.

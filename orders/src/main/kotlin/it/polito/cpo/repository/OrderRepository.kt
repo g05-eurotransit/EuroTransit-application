@@ -5,6 +5,8 @@ import kotlinx.coroutines.flow.Flow
 import org.springframework.data.r2dbc.repository.Modifying
 import org.springframework.data.r2dbc.repository.Query
 import org.springframework.data.repository.kotlin.CoroutineCrudRepository
+import java.time.LocalDateTime
+import java.time.OffsetDateTime
 import java.util.UUID
 
 interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
@@ -38,16 +40,26 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
     // replay (inv-{orderId}) always resolves the original reservation, so a *different* id means the
     // hold contract was violated: 0 rows, and the caller treats it as an invariant violation rather
     // than silently rebinding the order to another hold.
+    // The deadline is written in the SAME statement as the id, not in a follow-up update: they are
+    // two halves of one fact, and a crash between two writes would leave an order holding seats with
+    // no visible expiry, or an expiry belonging to a hold it no longer has.
     @Modifying
     @Query(
         """
-        UPDATE orders SET status = 'PAYMENT_PENDING', reservation_id = :reservationId
+        UPDATE orders
+           SET status = 'PAYMENT_PENDING',
+               reservation_id = :reservationId,
+               reservation_expires_at = :reservationExpiresAt
         WHERE id = :id
           AND (status = 'RESERVING'
                OR (status = 'PAYMENT_PENDING' AND reservation_id = :reservationId))
         """,
     )
-    suspend fun markPaymentPending(id: UUID, reservationId: String): Long
+    suspend fun markPaymentPending(
+        id: UUID,
+        reservationId: String,
+        reservationExpiresAt: OffsetDateTime,
+    ): Long
 
     @Modifying
     @Query(
@@ -81,11 +93,11 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
     @Modifying
     @Query(
         """
-        UPDATE orders SET status = 'FAILED', payment_method_token = NULL
+        UPDATE orders SET status = 'FAILED', payment_method_token = NULL, failure_code = :failureCode
         WHERE id = :id AND status IN ('RESERVING', 'PAYMENT_PENDING')
         """,
     )
-    suspend fun markFailedUnpaid(id: UUID): Long
+    suspend fun markFailedUnpaid(id: UUID, failureCode: String): Long
 
     // FAILED after authorization, reachable only from COMPENSATING, and the orchestrator calls it
     // only once the reversal has definitively succeeded. There is deliberately NO SQL path from
@@ -95,11 +107,11 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
     @Modifying
     @Query(
         """
-        UPDATE orders SET status = 'FAILED', payment_method_token = NULL
+        UPDATE orders SET status = 'FAILED', payment_method_token = NULL, failure_code = :failureCode
         WHERE id = :id AND status = 'COMPENSATING'
         """,
     )
-    suspend fun markFailedAfterReversal(id: UUID): Long
+    suspend fun markFailedAfterReversal(id: UUID, failureCode: String): Long
 
     // Customer cancellation is accepted only while no payment authorization has started
     // (reservation-confirmation.md:147-149). From PAYMENT_PENDING onward the controller answers
@@ -113,6 +125,49 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
         """,
     )
     suspend fun cancelIfUnpaid(id: UUID): Long
+
+    // --- Customer order history ------------------------------------------------------------------
+    // Ownership is enforced HERE, in the predicate, and not in the controller. `getOrder` and
+    // `cancel` let the `operations` role bypass their ownership check, which is right for a single
+    // order a support agent was given the id of; reusing that shape on a list would hand every
+    // customer's orders to any operator holding the role. A privileged search, if it is ever wanted,
+    // is a separate endpoint with its own authorization.
+    //
+    // Pagination is keyset, not offset: an offset page shifts under concurrent inserts, and orders
+    // are inserted exactly while a customer is looking at this list. The sort key is
+    // (created_at, id) because created_at is not unique.
+    //
+    // The status filter is optional. `CAST(:status AS VARCHAR)` is what makes a null bind legal:
+    // without the cast Postgres cannot infer the type of the parameter in `IS NULL`.
+
+    @Query(
+        """
+        SELECT * FROM orders
+         WHERE user_id = :userId
+           AND (CAST(:status AS VARCHAR) IS NULL OR status = CAST(:status AS VARCHAR))
+         ORDER BY created_at DESC, id DESC
+         LIMIT :limit
+        """,
+    )
+    fun findHistoryFirstPage(userId: String, status: String?, limit: Int): Flow<Order>
+
+    @Query(
+        """
+        SELECT * FROM orders
+         WHERE user_id = :userId
+           AND (CAST(:status AS VARCHAR) IS NULL OR status = CAST(:status AS VARCHAR))
+           AND (created_at, id) < (:cursorCreatedAt, :cursorId)
+         ORDER BY created_at DESC, id DESC
+         LIMIT :limit
+        """,
+    )
+    fun findHistoryAfter(
+        userId: String,
+        status: String?,
+        cursorCreatedAt: LocalDateTime,
+        cursorId: UUID,
+        limit: Int,
+    ): Flow<Order>
 
     /**
      * Feeds the non-terminal pipeline gauges. An order stranded in one of these phases is the failure

@@ -2,8 +2,12 @@ package it.polito.cpo.controller
 
 import it.polito.cpo.controller.dtos.CheckoutRequest
 import it.polito.cpo.controller.dtos.CheckoutResponse
+import it.polito.cpo.controller.dtos.OrderHistoryCursor
+import it.polito.cpo.controller.dtos.OrderPage
 import it.polito.cpo.controller.dtos.OrderView
+import it.polito.cpo.model.OrderStatus
 import it.polito.cpo.service.CheckoutOrchestrator
+import it.polito.cpo.service.CustomerFailureCode
 import it.polito.cpo.service.OrderService
 import org.springframework.http.HttpStatus
 import org.springframework.security.core.annotation.AuthenticationPrincipal
@@ -19,6 +23,11 @@ class OrderController(
     private val checkoutOrchestrator: CheckoutOrchestrator
 ) {
 
+    private companion object {
+        const val DEFAULT_PAGE_SIZE = 20
+        const val MAX_PAGE_SIZE = 100
+    }
+
     @PostMapping
     @ResponseStatus(HttpStatus.ACCEPTED)
     suspend fun checkout(
@@ -30,6 +39,50 @@ class OrderController(
         // email is optional delivery metadata (never the ownership key — that is `sub`).
         val email = jwt.getClaimAsString("email")
         return checkoutOrchestrator.checkout(request, idempotencyKey, userId, email)
+    }
+
+    /**
+     * The authenticated customer's own order history, newest first.
+     *
+     * Unlike [getOrder], there is deliberately **no `operations` widening**. That role exists so a
+     * support agent can look up one order they were given the id of; letting it drop the principal
+     * filter here would return every customer's orders in one call. The filter is applied in SQL
+     * (`OrderRepository.findHistoryFirstPage`), not in this method, so it cannot be bypassed by a
+     * later edit to the controller.
+     *
+     * `status` is optional: the SPA renders "my tickets" as `?status=CONFIRMED`, while the
+     * unfiltered list stays reachable so a customer can still find a failed attempt.
+     */
+    @GetMapping
+    suspend fun listOrders(
+        @RequestParam(required = false) status: OrderStatus?,
+        @RequestParam(required = false) cursor: String?,
+        @RequestParam(required = false, defaultValue = "$DEFAULT_PAGE_SIZE") limit: Int,
+        @AuthenticationPrincipal jwt: Jwt
+    ): OrderPage {
+        val userId = jwt.subject ?: throw ResponseStatusException(HttpStatus.UNAUTHORIZED, "Missing subject claim")
+
+        // Clamped rather than rejected: an out-of-range page size is not worth failing a read over,
+        // but an unbounded one lets a caller pull the whole history in a single query.
+        val pageSize = limit.coerceIn(1, MAX_PAGE_SIZE)
+
+        // A malformed cursor is a 400, not a silent restart from page one — that would make a
+        // paging client loop over the first page forever instead of surfacing the bug.
+        val decoded = cursor?.let {
+            OrderHistoryCursor.decode(it)
+                ?: throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Malformed cursor")
+        }
+
+        // One row beyond the page tells us whether a further page exists, without a count query.
+        val rows = orderService.findHistoryPage(userId, status, decoded, pageSize)
+        val page = rows.take(pageSize)
+        val next = if (rows.size > pageSize) {
+            page.lastOrNull()?.let { OrderHistoryCursor(it.createdAt, it.id).encode() }
+        } else {
+            null
+        }
+
+        return OrderPage(orders = page.map { toView(it) }, nextCursor = next)
     }
 
     @GetMapping("/{orderId}")
@@ -72,8 +125,10 @@ class OrderController(
         return toView(checkoutOrchestrator.cancel(orderId))
     }
 
-    private fun toView(order: it.polito.cpo.model.Order): OrderView =
-        OrderView(
+    private fun toView(order: it.polito.cpo.model.Order): OrderView {
+        // Null for every non-FAILED order: the column is written only by the terminal FAILED commit.
+        val failure = CustomerFailureCode.parse(order.failureCode)
+        return OrderView(
             orderId = order.id,
             userId = order.userId,
             status = order.status,
@@ -81,6 +136,12 @@ class OrderController(
             seats = order.seats.split(","),
             travelDate = order.travelDate,
             totalAmount = order.totalAmount,
-            createdAt = order.createdAt
+            createdAt = order.createdAt,
+            reservationExpiresAt = order.reservationExpiresAt,
+            failureCode = failure?.name,
+            // Derived, not stored: display text is presentation, and storing it would freeze today's
+            // wording into every historical row.
+            failureMessage = failure?.customerMessage,
         )
+    }
 }

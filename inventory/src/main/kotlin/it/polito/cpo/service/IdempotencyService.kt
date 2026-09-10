@@ -108,7 +108,7 @@ class IdempotencyService(
                         return ReservationResponse(
                             reservationId = currentReservation.reservationId,
                             status = ReservationStatus.CONFIRMED,
-                            expiresAt = currentReservation.expiresAt.toLocalDateTime()
+                            expiresAt = currentReservation.expiresAt
                         )
                     }
                     if (currentReservation.status == "HELD" && !currentReservation.expiresAt.isAfter(reservationRepository.getCurrentTimestamp())) {

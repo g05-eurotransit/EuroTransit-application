@@ -39,6 +39,7 @@ import tools.jackson.module.kotlin.kotlinModule
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.OffsetDateTime
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeoutException
@@ -138,7 +139,15 @@ class CheckoutOrchestratorTest {
         override suspend fun markReserving(id: UUID): Long =
             cas(id, setOf(OrderStatus.ACCEPTED, OrderStatus.RESERVING), OrderStatus.RESERVING)
 
-        override suspend fun markPaymentPending(id: UUID, reservationId: String): Long {
+        /** What the pipeline stored alongside the reservation id, so a test can assert the pair. */
+        @Volatile
+        var storedExpiresAt: OffsetDateTime? = null
+
+        override suspend fun markPaymentPending(
+            id: UUID,
+            reservationId: String,
+            reservationExpiresAt: OffsetDateTime,
+        ): Long {
             val o = ordersById[id] ?: return 0
             // The self-transition is pinned to the same reservation id, exactly as the SQL is.
             val accepted = o.status == OrderStatus.RESERVING ||
@@ -146,6 +155,8 @@ class CheckoutOrchestratorTest {
             if (!accepted) return 0
             o.status = OrderStatus.PAYMENT_PENDING
             o.reservationId = reservationId
+            o.reservationExpiresAt = reservationExpiresAt
+            storedExpiresAt = reservationExpiresAt
             savedOrderStatuses.add(OrderStatus.PAYMENT_PENDING)
             return 1
         }
@@ -170,11 +181,17 @@ class CheckoutOrchestratorTest {
             return cas(id, setOf(OrderStatus.CONFIRMING_INVENTORY), OrderStatus.CONFIRMED, clearToken = true)
         }
 
-        override suspend fun markFailedUnpaid(id: UUID): Long =
-            cas(id, setOf(OrderStatus.RESERVING, OrderStatus.PAYMENT_PENDING), OrderStatus.FAILED, clearToken = true)
+        /** The public code the terminal commit stored, so a test can assert what a customer would see. */
+        @Volatile
+        var storedFailureCode: CustomerFailureCode? = null
 
-        override suspend fun markFailedAfterReversal(id: UUID): Long =
+        override suspend fun markFailedUnpaid(id: UUID, failureCode: CustomerFailureCode): Long =
+            cas(id, setOf(OrderStatus.RESERVING, OrderStatus.PAYMENT_PENDING), OrderStatus.FAILED, clearToken = true)
+                .also { if (it > 0) storedFailureCode = failureCode }
+
+        override suspend fun markFailedAfterReversal(id: UUID, failureCode: CustomerFailureCode): Long =
             cas(id, setOf(OrderStatus.COMPENSATING), OrderStatus.FAILED, clearToken = true)
+                .also { if (it > 0) storedFailureCode = failureCode }
 
         override suspend fun cancelIfUnpaid(id: UUID): Long =
             cas(id, setOf(OrderStatus.ACCEPTED, OrderStatus.RESERVING), OrderStatus.CANCELLED, clearToken = true)
@@ -235,7 +252,7 @@ class CheckoutOrchestratorTest {
     }
 
     private class StubInventoryClient(
-        private val hold: () -> HoldOutcome = { HoldOutcome.Held("res-1", LocalDateTime.now().plusMinutes(10)) },
+        private val hold: () -> HoldOutcome = { HoldOutcome.Held("res-1", OffsetDateTime.now().plusMinutes(10)) },
         private val confirm: () -> ConfirmReservationOutcome = { ConfirmReservationOutcome.Confirmed("res-1") },
         /** Runs inside reserveSeats, i.e. exactly at the hold suspension point. */
         private val duringReserve: (suspend () -> Unit)? = null,

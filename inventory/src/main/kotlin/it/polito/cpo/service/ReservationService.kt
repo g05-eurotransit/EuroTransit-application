@@ -91,7 +91,7 @@ class ReservationService(
                 val storedResponse = ReservationResponse(
                     reservationId = reservationId,
                     status = status,
-                    expiresAt = expiresAt.toLocalDateTime()
+                    expiresAt = expiresAt
                 )
 
                 idempotencyService.createRecord(idempotencyKey, principalId, request, storedResponse, success)
@@ -107,7 +107,7 @@ class ReservationService(
                             reservationId = reservationId,
                             routeId = request.routeId,
                             travelDate = request.travelDate,
-                            expiresAt = expiresAt.toLocalDateTime()
+                            expiresAt = expiresAt
                         )
                     )
                     val outboxEvent = OutboxEvent(
@@ -197,7 +197,7 @@ class ReservationService(
                 return@executeAndAwait ReservationResponse(
                     reservationId,
                     ReservationStatus.CONFIRMED,
-                    reservation.expiresAt.toLocalDateTime()
+                    reservation.expiresAt
                 )
             }
 
@@ -232,7 +232,7 @@ class ReservationService(
             ReservationResponse(
                 reservationId,
                 ReservationStatus.CONFIRMED,
-                reservation.expiresAt.toLocalDateTime()
+                reservation.expiresAt
             )
         }
 
@@ -270,7 +270,7 @@ class ReservationService(
                 return@executeAndAwait ReservationResponse(
                     reservationId,
                     ReservationStatus.REFUNDED,
-                    reservation.expiresAt.toLocalDateTime()
+                    reservation.expiresAt
                 )
             }
 
@@ -296,7 +296,7 @@ class ReservationService(
             ReservationResponse(
                 reservationId,
                 ReservationStatus.REFUNDED,
-                reservation.expiresAt.toLocalDateTime()
+                reservation.expiresAt
             )
         }
 

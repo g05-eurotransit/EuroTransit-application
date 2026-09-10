@@ -7,6 +7,7 @@ import org.springframework.data.relational.core.mapping.Table
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.OffsetDateTime
 import java.util.UUID
 
 @Table("orders")
@@ -30,10 +31,19 @@ class Order(
     // Inventory reservation id, set once seats are held in the async pipeline. Enables a
     // pre-payment cancellation to release the held seats. Null before RESERVING completes.
     var reservationId: String? = null,
+    // When that hold expires, as decided by the Inventory database clock. Stored alongside the
+    // reservation id in the same atomic transition so the two can never disagree, and exposed to the
+    // customer as the checkout countdown. Null before RESERVING completes.
+    var reservationExpiresAt: OffsetDateTime? = null,
     // Why the checkout entered COMPENSATING, so a redelivery that resumes after a crash can pick
     // the right reconciliation record kind and know whether releasing the hold is safe at all.
     // Null outside COMPENSATING.
     var compensationReason: String? = null,
+    // The customer-visible reason the checkout failed, from the closed CustomerFailureCode set.
+    // Distinct from compensationReason, which is the internal operator vocabulary: this one is
+    // returned by the public API, so it never carries an invariant violation or a provider code.
+    // Set only on the terminal FAILED transition; null in every other state.
+    var failureCode: String? = null,
 ) : Persistable<UUID> {
 
     @Transient

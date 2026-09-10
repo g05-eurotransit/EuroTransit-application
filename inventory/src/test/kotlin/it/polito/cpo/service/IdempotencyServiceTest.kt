@@ -19,7 +19,6 @@ import tools.jackson.databind.ObjectMapper
 import tools.jackson.databind.json.JsonMapper
 import tools.jackson.module.kotlin.kotlinModule
 import java.time.LocalDate
-import java.time.LocalDateTime
 import java.time.OffsetDateTime
 import java.util.UUID
 
@@ -59,7 +58,7 @@ class IdempotencyServiceTest {
         val cachedResponse = ReservationResponse(
             "res-cached", 
             ReservationStatus.HELD, 
-            LocalDateTime.now().plusMinutes(10)
+            OffsetDateTime.now().plusMinutes(10)
         )
         
         idemRepo.save(IdempotencyRecord(
@@ -93,7 +92,7 @@ class IdempotencyServiceTest {
         val cachedResponse = ReservationResponse(
             reservationId,
             ReservationStatus.HELD,
-            LocalDateTime.now().plusMinutes(10)
+            OffsetDateTime.now().plusMinutes(10)
         )
         
         idemRepo.save(IdempotencyRecord(
@@ -139,7 +138,7 @@ class IdempotencyServiceTest {
         val cachedResponse = ReservationResponse(
             reservationId, 
             ReservationStatus.HELD, 
-            LocalDateTime.now().plusMinutes(10)
+            OffsetDateTime.now().plusMinutes(10)
         )
         
         idemRepo.save(IdempotencyRecord(

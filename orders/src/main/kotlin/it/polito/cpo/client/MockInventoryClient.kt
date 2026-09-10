@@ -3,7 +3,7 @@ package it.polito.cpo.client
 import it.polito.cpo.contracts.inventory.ReservationRequest
 import org.springframework.context.annotation.Profile
 import org.springframework.stereotype.Component
-import java.time.LocalDateTime
+import java.time.OffsetDateTime
 import java.util.UUID
 
 /**
@@ -24,7 +24,7 @@ class MockInventoryClient : InventoryClient {
         userId: String,
     ): HoldOutcome = HoldOutcome.Held(
         reservationId = reservationIdFor(request.orderId),
-        expiresAt = LocalDateTime.now().plusMinutes(10),
+        expiresAt = OffsetDateTime.now().plusMinutes(10),
     )
 
     override suspend fun confirmReservation(

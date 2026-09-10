@@ -2,6 +2,7 @@ package it.polito.cpo.repository
 
 import it.polito.cpo.model.Order
 import it.polito.cpo.model.OrderStatus
+import it.polito.cpo.service.CustomerFailureCode
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
@@ -20,6 +21,8 @@ import reactor.core.publisher.Mono
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.OffsetDateTime
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -71,6 +74,17 @@ class OrderTransitionsIntegrationTest {
         }
 
         private val ALL_STATES = OrderStatus.entries
+
+        /**
+         * Any instant will do; what matters is that it survives the transition unchanged.
+         *
+         * Truncated to microseconds because that is the resolution `timestamptz` stores: a JVM
+         * clock with nanosecond resolution - which the Linux CI runners have and macOS does not -
+         * would otherwise lose its last three digits on the round-trip and fail the comparison
+         * below on the build machine only.
+         */
+        private val HOLD_DEADLINE: OffsetDateTime =
+            OffsetDateTime.now().truncatedTo(ChronoUnit.MICROS).plusMinutes(10)
     }
 
     @TestConfiguration
@@ -124,7 +138,7 @@ class OrderTransitionsIntegrationTest {
         assertRowsAffected(
             accepting = setOf(OrderStatus.RESERVING, OrderStatus.PAYMENT_PENDING),
             resultingIn = OrderStatus.FAILED,
-        ) { id -> orders.markFailedUnpaid(id) }
+        ) { id -> orders.markFailedUnpaid(id, CustomerFailureCode.CHECKOUT_FAILED.name) }
     }
 
     @Test
@@ -132,7 +146,7 @@ class OrderTransitionsIntegrationTest {
         assertRowsAffected(
             accepting = setOf(OrderStatus.COMPENSATING),
             resultingIn = OrderStatus.FAILED,
-        ) { id -> orders.markFailedAfterReversal(id) }
+        ) { id -> orders.markFailedAfterReversal(id, CustomerFailureCode.CHECKOUT_FAILED.name) }
     }
 
     @Test
@@ -148,11 +162,11 @@ class OrderTransitionsIntegrationTest {
     @Test
     fun `there is no path from CONFIRMING_INVENTORY to FAILED`() = runBlocking {
         val viaUnpaid = seed(OrderStatus.CONFIRMING_INVENTORY)
-        assertEquals(0L, orders.markFailedUnpaid(viaUnpaid))
+        assertEquals(0L, orders.markFailedUnpaid(viaUnpaid, CustomerFailureCode.CHECKOUT_FAILED.name))
         assertEquals(OrderStatus.CONFIRMING_INVENTORY, statusOf(viaUnpaid))
 
         val viaReversal = seed(OrderStatus.CONFIRMING_INVENTORY)
-        assertEquals(0L, orders.markFailedAfterReversal(viaReversal))
+        assertEquals(0L, orders.markFailedAfterReversal(viaReversal, CustomerFailureCode.CHECKOUT_FAILED.name))
         assertEquals(OrderStatus.CONFIRMING_INVENTORY, statusOf(viaReversal))
     }
 
@@ -161,24 +175,28 @@ class OrderTransitionsIntegrationTest {
     @Test
     fun `markPaymentPending stores the reservation id from RESERVING`() = runBlocking {
         val id = seed(OrderStatus.RESERVING)
-        assertEquals(1L, orders.markPaymentPending(id, "res-1"))
+        assertEquals(1L, orders.markPaymentPending(id, "res-1", HOLD_DEADLINE))
 
         val order = orders.findById(id)!!
         assertEquals(OrderStatus.PAYMENT_PENDING, order.status)
         assertEquals("res-1", order.reservationId)
+        // The deadline is written by the same statement, so it can never be missing while the id is
+        // present. Compared as instants: a timestamptz round-trip is free to come back in a
+        // different offset, and only the instant is the contract.
+        assertEquals(HOLD_DEADLINE.toInstant(), order.reservationExpiresAt?.toInstant())
     }
 
     @Test
     fun `markPaymentPending repeats itself only for the same reservation id`() = runBlocking {
         val id = seed(OrderStatus.RESERVING)
-        orders.markPaymentPending(id, "res-1")
+        orders.markPaymentPending(id, "res-1", HOLD_DEADLINE)
 
         // An idempotent hold replay resolves the original reservation, so the same id must succeed.
-        assertEquals(1L, orders.markPaymentPending(id, "res-1"))
+        assertEquals(1L, orders.markPaymentPending(id, "res-1", HOLD_DEADLINE))
         assertEquals("res-1", orders.findById(id)!!.reservationId)
 
         // A different id means the hold contract was broken: refuse rather than rebind the order.
-        assertEquals(0L, orders.markPaymentPending(id, "res-2"))
+        assertEquals(0L, orders.markPaymentPending(id, "res-2", HOLD_DEADLINE))
         assertEquals("res-1", orders.findById(id)!!.reservationId)
     }
 
@@ -187,7 +205,7 @@ class OrderTransitionsIntegrationTest {
         val refused = ALL_STATES - setOf(OrderStatus.RESERVING, OrderStatus.PAYMENT_PENDING)
         refused.forEach { from ->
             val id = seed(from)
-            assertEquals(0L, orders.markPaymentPending(id, "res-1"), "expected refusal from $from")
+            assertEquals(0L, orders.markPaymentPending(id, "res-1", HOLD_DEADLINE), "expected refusal from $from")
             assertEquals(from, statusOf(id))
             assertNull(orders.findById(id)!!.reservationId, "reservation id leaked from $from")
         }

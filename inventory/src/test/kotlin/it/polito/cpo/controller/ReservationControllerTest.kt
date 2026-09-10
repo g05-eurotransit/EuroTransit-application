@@ -37,7 +37,7 @@ import org.springframework.transaction.reactive.TransactionalOperator
 import tools.jackson.databind.ObjectMapper
 import java.time.Clock
 import java.time.LocalDate
-import java.time.LocalDateTime
+import java.time.OffsetDateTime
 import java.util.UUID
 
 @WebFluxTest(controllers = [ReservationController::class])
@@ -120,7 +120,7 @@ class ReservationControllerTest {
             return ReservationResponse(
                 "res-123",
                 reserveResponseStatus,
-                LocalDateTime.now().plusMinutes(15)
+                OffsetDateTime.now().plusMinutes(15)
             )
         }
 
@@ -134,7 +134,7 @@ class ReservationControllerTest {
             return ReservationResponse(
                 reservationId,
                 ReservationStatus.CONFIRMED,
-                LocalDateTime.now().plusMinutes(15)
+                OffsetDateTime.now().plusMinutes(15)
             )
         }
     }

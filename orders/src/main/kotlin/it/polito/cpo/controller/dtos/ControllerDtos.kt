@@ -30,7 +30,26 @@ data class OrderView(
     /** Distinct from [createdAt]: the day of travel, not the day of purchase. */
     val travelDate: LocalDate,
     val totalAmount: BigDecimal,
-    val createdAt: LocalDateTime
+    val createdAt: LocalDateTime,
+    /**
+     * When the Inventory seat hold expires, as an instant. Non-null once seats are held.
+     *
+     * This is the deadline for the *checkout* to converge — it covers crash, retry and Kafka lag —
+     * and NOT a payment window: the payment token arrives with the checkout request and the whole
+     * pipeline runs server-side with no user interaction. A client must not present it as "you have
+     * ten minutes to pay".
+     */
+    val reservationExpiresAt: OffsetDateTime? = null,
+    /**
+     * Why the checkout failed, from the closed `CustomerFailureCode` set. Non-null only on `FAILED`.
+     *
+     * Deliberately not the internal failure class: everything except "the seats were taken" and
+     * "the payment was declined" collapses into `CHECKOUT_FAILED`, so an invariant violation or a
+     * provider code can never reach a customer through this field.
+     */
+    val failureCode: String? = null,
+    /** Ready-to-display text for [failureCode], derived from it rather than stored. */
+    val failureMessage: String? = null,
 )
 
 /**

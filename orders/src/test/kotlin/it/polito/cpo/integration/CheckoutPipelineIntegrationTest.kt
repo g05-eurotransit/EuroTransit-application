@@ -52,6 +52,7 @@ import java.io.IOException
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.OffsetDateTime
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -738,7 +739,7 @@ class CheckoutPipelineIntegrationTest {
         ): HoldOutcome {
             reservedOrderIds.add(request.orderId)
             request.seats.forEach { heldTriples.add(Triple(request.routeId, request.travelDate, it)) }
-            return HoldOutcome.Held("res-${request.orderId}", LocalDateTime.now().plusMinutes(10))
+            return HoldOutcome.Held("res-${request.orderId}", OffsetDateTime.now().plusMinutes(10))
         }
 
         override suspend fun confirmReservation(reservationId: String, orderId: UUID): ConfirmReservationOutcome {
