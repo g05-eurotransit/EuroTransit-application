@@ -99,9 +99,22 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
 - `GET /api/catalog/routes`
   - Lists available routes and schedules. Public data may be served without authentication; personalized pricing requires an authenticated user.
 - `GET /api/catalog/routes/{routeId}`
-  - Returns details for one route.
+  - Returns details for one route, including `departureZone`, the IANA zone id of the departure
+    station. `departureTime` is a zone-less `LocalTime`, so a caller holding a `travelDate` needs the
+    zone to compose an instant.
 - `GET /api/catalog/offers`
   - Lists currently available pricing and ticket offers. Personalized offers require a customer principal.
+- `GET /api/catalog/offers/{offerId}`
+  - Returns one offer with its machine-readable `refundPolicy` (`refundable`, plus
+    `cutoffMinutesBeforeDeparture`, null when not refundable), its `termsVersion`, and the route's
+    `departureTime` and `departureZone` denormalized onto the response.
+  - Catalog owns the refund policy; Orders applies it. The `conditions` string is display text
+    *rendered from* the policy — a caller must never parse it to make a money decision.
+  - The response carries a duration and a zone rather than a precomputed instant: Orders composes
+    `travelDate + departureTime` in `departureZone` and compares it against its own database clock,
+    for the same reason hold expiry uses the database clock. Catalog never learns about orders.
+  - `termsVersion` is the monotonic marker Orders persists with the offer id at checkout, so editing
+    an offer later cannot retroactively rewrite what a past customer accepted.
 
 ### Orders
 
