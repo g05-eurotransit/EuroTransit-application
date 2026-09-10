@@ -330,7 +330,15 @@ and the entity mapping agree.
 **Not done here, deliberately:** nothing resolves the offer, so #93 (the client-supplied amount) is
 still open and is step 3. Tightening `offerId` to required waits on #84.
 
-Told Erestina on #84 that the field exists and is accepted.
+Told Erestina on
+[#84](https://github.com/g05-eurotransit/EuroTransit-application/issues/84#issuecomment-5619180337)
+that the field exists and is accepted, with the two things it is not yet (not validated, not a price)
+and the fingerprint rule for retries. The same comment closes step 1's last open item, which the
+step 1 outcome did not record as done: item 3 is unblocked, the response shape is stated, and the
+sweeper caveat travels with it.
+
+Opened as [PR #94](https://github.com/g05-eurotransit/EuroTransit-application/pull/94), with the
+fingerprint rollover called out as the thing to review.
 
 ---
 
