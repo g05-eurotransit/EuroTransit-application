@@ -397,6 +397,18 @@ the field is optional. That flip is gated on #84, not on Catalog. Land 3a valida
 is present, and flip to required as a one-line follow-up once the SPA sends it — recording in the
 meantime that a checkout without `offerId` is still unvalidated, which is the honest state.
 
+**Do one more thing in that same follow-up: make the offer segment of the checkout fingerprint
+unconditional.** Step 2 appends it only when the field is present, so that an offer-less payload
+hashes exactly as it did before the field shipped and keys in flight across the deployment still
+replay. The cost is that the canonical string has a variable number of separators, so two logically
+different requests can collide: a `paymentMethodToken` of `tok|of-001` with no offer produces the
+same string as the token `tok` with offer `of-001`. Reachable only with a crafted token, and the
+worst outcome is a replay of the caller's own order rather than a `409` — which is why it was left
+alone rather than fixed with length prefixes and a dual-fingerprint transition. It disappears for
+free the moment the field is mandatory, because every string then has fixed arity. Do not do it any
+earlier: changing the canonical string while the field is optional is what the conditional append
+exists to avoid, and it would break every idempotency key stored in the previous 24 hours.
+
 **Done when:** a checkout with a mismatched amount is rejected, the amount sent to Payments is the
 resolved one, #93 is closed or explicitly reduced to the `offerId`-optional case, and — if 3b was in
 scope — an order carries the refund rule and departure instant it was sold under.
