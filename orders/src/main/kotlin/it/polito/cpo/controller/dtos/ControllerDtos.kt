@@ -74,3 +74,30 @@ data class ResolveReconciliationResponse(
     val status: String,
     val resolvedAt: OffsetDateTime,
 )
+
+/**
+ * The seat map for one route on one travel date, as Orders publishes it.
+ *
+ * Deliberately a type owned by Orders rather than Inventory's `SeatAvailabilityResponse` from
+ * `money-path-contracts`. Reusing the shared type would make the public response *be* the internal
+ * contract, so an Inventory change would silently become a public API change — the same reason
+ * `CustomerFailureCode` exists instead of exposing `FailureClassifier`'s vocabulary.
+ *
+ * The answer is **advisory**: a seat reported free can still lose the hold race, and
+ * `SEATS_UNAVAILABLE` at checkout stays the authoritative outcome.
+ */
+data class SeatAvailabilityView(
+    val routeId: String,
+    val travelDate: LocalDate,
+    val seats: List<SeatView>,
+)
+
+/**
+ * One seat. `available` collapses Inventory's `HELD` and `SOLD`, and no reservation id, order id or
+ * principal is carried: distinguishing held from sold would report another customer's in-flight
+ * checkout to whoever is looking at the picker.
+ */
+data class SeatView(
+    val seatId: String,
+    val available: Boolean,
+)

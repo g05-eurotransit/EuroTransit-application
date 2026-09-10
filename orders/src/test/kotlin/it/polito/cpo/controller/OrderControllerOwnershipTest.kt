@@ -1,5 +1,8 @@
 package it.polito.cpo.controller
 
+import it.polito.cpo.client.InventoryReadClient
+import it.polito.cpo.client.SeatAvailability
+import it.polito.cpo.client.SeatAvailabilityOutcome
 import it.polito.cpo.controller.dtos.OrderHistoryCursor
 import it.polito.cpo.model.Order
 import it.polito.cpo.model.OrderStatus
@@ -39,6 +42,7 @@ import java.util.UUID
 class OrderControllerOwnershipTest @Autowired constructor(
     private val webTestClient: WebTestClient,
     private val orderService: FakeOrderService,
+    private val inventoryReadClient: FakeInventoryReadClient,
 ) {
     private val orderId = UUID.randomUUID()
     private val travelDate: LocalDate = LocalDate.now().plusDays(3)
@@ -307,6 +311,78 @@ class OrderControllerOwnershipTest @Autowired constructor(
             .jsonPath("$.failureMessage").doesNotExist()
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // GET /api/orders/seat-availability
+    // ---------------------------------------------------------------------------------------------
+
+    @Test
+    fun `the literal seat-availability path wins over the by-id route`() {
+        // The failure mode this guards is confusing rather than dangerous: if `{orderId}` matched
+        // first, the request would fail converting "seat-availability" to a UUID and surface as a
+        // 400 on a perfectly valid call. Spring's PathPattern comparator sorts literal segments
+        // ahead of variables, and that is what is being pinned here.
+        inventoryReadClient.next = SeatAvailabilityOutcome.Found(listOf(SeatAvailability("1A", true)))
+
+        webTestClient.get().uri("/api/orders/seat-availability?routeId=R1&travelDate=$travelDate")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isOk
+            .expectBody()
+            .jsonPath("$.routeId").isEqualTo("R1")
+            .jsonPath("$.seats[0].seatId").isEqualTo("1A")
+
+        assertEquals("R1", inventoryReadClient.lastRouteId)
+        assertEquals(travelDate, inventoryReadClient.lastTravelDate)
+    }
+
+    @Test
+    fun `the seat map exposes availability only, never who holds a seat`() {
+        // Distinguishing HELD from SOLD, or leaking a reservation or order id, would report one
+        // customer's in-flight checkout to another. The response carries two fields and no more.
+        inventoryReadClient.next = SeatAvailabilityOutcome.Found(
+            listOf(SeatAvailability("1A", true), SeatAvailability("1B", false)),
+        )
+
+        webTestClient.get().uri("/api/orders/seat-availability?routeId=R1&travelDate=$travelDate")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isOk
+            .expectBody()
+            .jsonPath("$.seats[1].available").isEqualTo(false)
+            .jsonPath("$.seats[1].length()").isEqualTo(2)
+            .jsonPath("$.seats[1].reservationId").doesNotExist()
+            .jsonPath("$.seats[1].orderId").doesNotExist()
+            .jsonPath("$.seats[1].status").doesNotExist()
+    }
+
+    @Test
+    fun `an unknown route is a 404`() {
+        inventoryReadClient.next = SeatAvailabilityOutcome.NotFound
+
+        webTestClient.get().uri("/api/orders/seat-availability?routeId=nope&travelDate=$travelDate")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isNotFound
+    }
+
+    @Test
+    fun `the seat map requires authentication`() {
+        // It is a step of the checkout, not public browsing: the picker sits behind ProtectedRoute.
+        webTestClient.get().uri("/api/orders/seat-availability?routeId=R1&travelDate=$travelDate")
+            .exchange()
+            .expectStatus().isUnauthorized
+    }
+
+    @Test
+    fun `a missing travel date is rejected rather than defaulted`() {
+        // Seats are keyed by (route_id, travel_date, seat_id) since #64, so answering for "some
+        // day" would return a seat map for a journey nobody asked about.
+        webTestClient.get().uri("/api/orders/seat-availability?routeId=R1")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isBadRequest
+    }
+
     open class FakeOrderService : OrderService(
         mock(OrderRepository::class.java),
         mock(IdempotentRequestRepository::class.java),
@@ -332,6 +408,18 @@ class OrderControllerOwnershipTest @Autowired constructor(
         }
     }
 
+    open class FakeInventoryReadClient : InventoryReadClient {
+        var next: SeatAvailabilityOutcome = SeatAvailabilityOutcome.Found(emptyList())
+        var lastRouteId: String? = null
+        var lastTravelDate: LocalDate? = null
+
+        override suspend fun getSeatAvailability(routeId: String, travelDate: LocalDate): SeatAvailabilityOutcome {
+            lastRouteId = routeId
+            lastTravelDate = travelDate
+            return next
+        }
+    }
+
     @TestConfiguration
     class Cfg {
         @Bean
@@ -343,6 +431,9 @@ class OrderControllerOwnershipTest @Autowired constructor(
 
         @Bean
         fun checkoutOrchestrator(): CheckoutOrchestrator = mock(CheckoutOrchestrator::class.java)
+
+        @Bean
+        fun inventoryReadClient(): FakeInventoryReadClient = FakeInventoryReadClient()
     }
 }
 

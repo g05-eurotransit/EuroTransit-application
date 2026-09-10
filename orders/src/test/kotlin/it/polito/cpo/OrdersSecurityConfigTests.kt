@@ -243,6 +243,26 @@ class OrdersSecurityConfigTests @Autowired constructor(
             OrdersSecurityProbeController()
     }
 
+    @Test
+    fun `the seat map is not public`() {
+        // It is a step of the checkout, not browsing: the picker sits behind ProtectedRoute in the
+        // SPA. Serving it anonymously would also make Inventory's seat state enumerable through
+        // Orders by anyone, with no principal to rate-limit.
+        webTestClient.get()
+            .uri("/api/orders/seat-availability?routeId=R1&travelDate=2026-09-20")
+            .exchange()
+            .expectStatus().isUnauthorized
+    }
+
+    @Test
+    fun `a customer may read the seat map`() {
+        webTestClient.get()
+            .uri("/api/orders/seat-availability?routeId=R1&travelDate=2026-09-20")
+            .headers { it.setBearerAuth("customer-token") }
+            .exchange()
+            .expectStatus().isOk
+    }
+
     @RestController
     class OrdersSecurityProbeController {
         @PostMapping("/api/orders")
@@ -250,6 +270,9 @@ class OrdersSecurityConfigTests @Autowired constructor(
 
         @GetMapping("/api/orders")
         fun listOrders(): Map<String, String> = mapOf("orders" to "[]")
+
+        @GetMapping("/api/orders/seat-availability")
+        fun seatAvailability(): Map<String, String> = mapOf("seats" to "[]")
 
         @GetMapping("/api/orders/{orderId}")
         fun readOrder(@PathVariable orderId: String): Map<String, String> = mapOf("orderId" to orderId)

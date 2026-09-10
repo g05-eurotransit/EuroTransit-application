@@ -27,10 +27,11 @@ EuroTransit is designed as an enterprise-grade system. Public APIs must assume a
 | `GET /api/catalog/**` | Public or authenticated depending on offer visibility | Optional for public catalog; required for personalized offers | Public read or customer scope |
 | `POST /api/orders` | External | Required | Customer scope; principal becomes order owner |
 | `GET /api/orders` | External | Required | Customer scope; always scoped to the caller's own orders, with no operations widening |
+| `GET /api/orders/seat-availability` | External | Required | Customer scope; no owned resource, so no ownership check — it is a checkout step, not public browsing |
 | `GET /api/orders/{orderId}` | External | Required | Order owner or privileged operations scope |
 | `POST /api/orders/{orderId}/reconciliation/redrive` | Internal operations | Required operations credential | Operations role only; redrives an open reconciliation record through the Orders outbox |
 | `POST /api/orders/{orderId}/reconciliation/{recordId}/resolve` | Internal operations | Required operations credential | Operations role only; records evidence-backed resolution of a terminal invariant incident |
-| `GET /api/inventory/availability` | Internal | Required service credential | Trusted services only (e.g. Catalog); no propagated user context required |
+| `GET /api/inventory/availability` | Internal | Required service credential | Orders service only; read behind the Orders façade, no propagated user context required |
 | `POST /api/inventory/reservations` | Internal | Required service credential plus propagated user context | Orders service only; order owner context required |
 | `PUT /api/inventory/reservations/{reservationId}/confirmation` | Internal | Required service credential plus propagated user context | Orders service only; confirms the reservation for its owning order |
 | `DELETE /api/inventory/reservations/{reservationId}` | Internal | Required service credential plus propagated user context | Orders service only; compensation for owned order |
@@ -131,6 +132,26 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     SQL predicate rather than in the controller, so it cannot be bypassed by a later edit.
   - A malformed cursor is `400`, not a silent restart from the first page, which would make a paging
     client loop over the same page forever.
+- `GET /api/orders/seat-availability?routeId=&travelDate=`
+  - Returns every seat for that route and travel date with a single `available` flag.
+  - Orders fronts this so Inventory stays internal: the browser reaches the `/api/orders` prefix
+    through Traefik, and Orders calls `GET /api/inventory/availability` with a service credential.
+    Routing it through Catalog instead would serve an authenticated step of the checkout from a
+    public anonymous route, and would leave nowhere to create a hold if issue #72 is ever accepted.
+  - `travelDate` is required, not optional: seats are keyed by `(route_id, travel_date, seat_id)`,
+    so a route alone does not identify a bookable seat.
+  - Inventory's `HELD` and `SOLD` are deliberately collapsed into one flag, and no reservation id,
+    order id, or principal is returned: distinguishing held from sold reports another customer's
+    in-flight checkout.
+  - **The answer is advisory.** It is a read with no lock, so a seat reported free can still lose the
+    hold race; `SEATS_UNAVAILABLE` at checkout remains the authoritative answer and clients must
+    still handle it.
+  - Browsing traffic is isolated from the money path by a separate `inventory-read` circuit breaker
+    and bulkhead, a tighter timeout, and **no retry** — a stale seat map is not worth a retry, and
+    retrying read traffic is how a slow dependency becomes an outage.
+  - `404` when Inventory reports no seats for the route and date. Inventory currently conflates an
+    unknown route with a sold-out one behind the same code; raised on #68.
+
 - `GET /api/orders/{orderId}`
   - Returns the current order status: accepted, reserving, payment-pending, confirming-inventory, compensating, confirmed, failed, or cancelled.
   - Includes `travelDate`, distinct from `createdAt`: the day of travel, not the day of purchase.
