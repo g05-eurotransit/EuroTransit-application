@@ -336,3 +336,82 @@ The complete protocol, failure matrix, API shape, and acceptance criteria are do
 ### Why This Is Better
 
 This fulfills the business requirement of reselling refunded tickets without compromising the safety of the critical checkout money path. By creating a completely separate API and state transition for post-sale refunds, we guarantee that a delayed or erroneous checkout compensation (`release`) cannot accidentally un-sell a confirmed ticket.
+
+## ADR-015: Orders-Side Post-Sale Refund
+
+**Decision:** A refund of a confirmed order is a distinct business process owned by Orders, with its
+own durable states, its own trigger, and its own idempotency namespace. It reverses the money first
+and returns the seat second, and it never reaches a terminal state while money or seat is unresolved.
+
+ADR-014 records the Inventory half: a dedicated `CONFIRMED -> REFUNDED` reservation transition that
+returns `SOLD` seats to `AVAILABLE` without weakening Invariant 5. This ADR records the Orders half,
+which decides *whether* a refund is allowed, in *what order* the reversal happens, and *what state
+the order is left in* when part of it fails.
+
+### Selected Option: A Separate Durable Process Beside the Checkout Pipeline
+
+**States.** `CONFIRMED -> REFUNDING -> REFUNDED`, added to the durable `OrderStatus` phases.
+`REFUNDING` is the resume point: it means the refund was authorized by policy and committed as
+intended, and that the reversal, the seat return, or both may still be outstanding.
+
+There is deliberately **no** `REFUND_FAILED`. An order whose money or seat is unresolved stays in
+`REFUNDING` with an open reconciliation record, exactly as `COMPENSATING` does on the checkout path
+(ADR-011, and the `COMPENSATING` rationale in `OrderStatus`). A terminal failure state would let an
+order with a stuck reversal read as finished, which is the one thing the money path must never do.
+
+**Trigger.** The refund has its own outbox event and its own consumer, **not** the `order-placed`
+pipeline. That pipeline's terminal-state rule stays exactly as it is: `CONFIRMED` is terminal, and a
+redelivered `order-placed` for a confirmed order acknowledges without a remote call (invariant, and
+`OrderStatus.isTerminal`). Routing the refund through it would require `CONFIRMED` to become
+resumable, and a Kafka redelivery of an old checkout event would then restart a completed checkout.
+
+**Order of operations: money first, seat second.** The reversal to Payments happens before the
+post-sale transition in Inventory. If the seat return then fails definitively, the customer already
+has their money and a `SEAT_RETURN_FAILURE` reconciliation record stays open for an operator: one
+resaleable seat is withheld from inventory until someone looks. The opposite order would put the
+seat back on sale while the refund is still unresolved, so a failed reversal would leave a customer
+without both ticket and money.
+
+**Idempotency key: `pay-refund-{orderId}`.** A new namespace, not the existing `refund-{orderId}`,
+which checkout compensation already consumes. Payments keys idempotency by the record's primary key,
+so reusing the compensation's key for a commercial refund would replay the compensation's stored
+result: Payments would answer `200` and no money would move, while Orders recorded a completed
+refund. The two keys must not alias. This is representable today — `payment_refunds` has no
+uniqueness constraint on the authorization, so a second refund per order is a valid row (ADR-006's
+sandbox adapter, `payments` `V1__init.sql`).
+
+**The cutoff is evaluated with the Orders database clock.** Eligibility compares the departure
+instant — `travelDate` plus the route's departure time in the route's zone — against the database
+clock, not a JVM clock, for the same reason Invariant 4 evaluates hold expiry with the Inventory
+database clock (`reservation-confirmation.md`): replicas disagree by seconds, and at the boundary
+two identical requests to two pods would otherwise get opposite answers.
+
+**A replay is not a new request.** An idempotency key already accepted *before* the cutoff returns
+its original result even when the replay arrives after the cutoff. A *new* request after the cutoff
+is refused. These are two opposite behaviours on the same time condition, and the idempotency record
+is what distinguishes them: without that rule, a client retrying a network timeout across the cutoff
+boundary would be told its own accepted refund is too late.
+
+**Policy comes from the offer terms captured at checkout,** not from the offer as it reads today:
+the order persists which offer was bought and which version of its terms the customer accepted, so
+editing an offer cannot retroactively change what a past customer agreed to. Orders therefore needs
+`offerId` on the order before any of the above can be implemented, which is why it lands first and
+separately.
+
+### Why This Is Better
+
+Every part of this keeps unresolved money visible and keeps the checkout path untouched. A separate
+consumer means the refund cannot destabilise checkout redelivery semantics; a separate idempotency
+namespace means Payments cannot confuse a compensation with a sale reversal; no terminal failure
+state means an operator, not a customer, discovers a stuck reversal.
+
+### Alternatives Considered
+
+- **`REFUND_FAILED` as a terminal state.** Simpler to query and to display, and wrong for the same
+  reason `COMPENSATING` is non-terminal: it reports an order as finished while money is in doubt.
+- **Reusing the `order-placed` consumer.** No new topic or listener, but it forces `CONFIRMED` to be
+  a resumable state, which makes a redelivered checkout event able to restart a completed sale.
+- **Returning the seat before reversing the payment.** Puts a resaleable seat back on sale sooner,
+  at the cost of a window where a customer has neither ticket nor refund.
+- **Reusing `refund-{orderId}`.** One key scheme instead of two, but it makes Payments replay the
+  compensation result for a commercial refund — a silent no-op reported as success.

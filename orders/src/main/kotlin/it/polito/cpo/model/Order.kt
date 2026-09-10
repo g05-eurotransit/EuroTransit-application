@@ -44,6 +44,13 @@ class Order(
     // returned by the public API, so it never carries an invariant violation or a provider code.
     // Set only on the terminal FAILED transition; null in every other state.
     var failureCode: String? = null,
+    // Which offer was bought, as claimed by the client. The post-sale refund (ADR-015) resolves its
+    // policy and cutoff from the offer's terms, so an order without it cannot be refunded.
+    //
+    // NOT a validated value: nothing resolves it against Catalog, checks that it belongs to
+    // routeId, or compares totalAmount against its price (issue #93). Nullable until the SPA sends
+    // it (issue #84); making it required in the same change would break checkout outright.
+    val offerId: String? = null,
 ) : Persistable<UUID> {
 
     @Transient

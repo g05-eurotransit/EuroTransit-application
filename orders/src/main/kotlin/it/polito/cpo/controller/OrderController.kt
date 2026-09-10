@@ -194,6 +194,7 @@ class OrderController(
             // Derived, not stored: display text is presentation, and storing it would freeze today's
             // wording into every historical row.
             failureMessage = failure?.customerMessage,
+            offerId = order.offerId,
         )
     }
 }

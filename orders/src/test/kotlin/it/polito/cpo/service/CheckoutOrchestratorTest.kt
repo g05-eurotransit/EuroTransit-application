@@ -500,6 +500,100 @@ class CheckoutOrchestratorTest {
         assertEquals("IDEMPOTENCY_CONFLICT", ex.code)
     }
 
+    // --- the offer (ADR-015) ----------------------------------------------------------------------
+
+    @Test
+    fun `a checkout carrying an offerId persists it on the order`() = runTest {
+        val service = FakeOrderService()
+
+        orchestratorFor(service).checkout(
+            request = CheckoutRequest(
+                routeId = "R1",
+                seats = listOf("1A"),
+                travelDate = TRAVEL_DATE,
+                totalAmount = BigDecimal("100.00"),
+                paymentMethodToken = "test-token",
+                offerId = "of-001",
+            ),
+            idempotencyKey = "key-offer",
+            userId = "user-1",
+            recipientEmail = "alice@example.com",
+        )
+
+        // Recorded as claimed, not resolved: the refund needs to know which offer was sold, and
+        // nothing validates it against Catalog yet (issue #93).
+        assertEquals("of-001", service.ordersById.values.single().offerId)
+    }
+
+    @Test
+    fun `a checkout without an offerId still succeeds and stores no offer`() = runTest {
+        val service = FakeOrderService()
+
+        val response = orchestratorFor(service).checkout(
+            request = CheckoutRequest(
+                routeId = "R1",
+                seats = listOf("1A"),
+                travelDate = TRAVEL_DATE,
+                totalAmount = BigDecimal("100.00"),
+                paymentMethodToken = "test-token",
+            ),
+            idempotencyKey = "key-no-offer",
+            userId = "user-1",
+            recipientEmail = "alice@example.com",
+        )
+
+        // The SPA does not send the field yet (issue #84). An unrefundable order is a smaller failure
+        // than a checkout that rejects every request until the frontend catches up.
+        assertEquals(OrderStatus.ACCEPTED, response.status)
+        assertNull(service.ordersById.values.single().offerId)
+    }
+
+    @Test
+    fun `the same idempotency key with a different offerId is a conflict`() = runTest {
+        val service = FakeOrderService()
+        val orchestrator = orchestratorFor(service)
+        fun requestFor(offerId: String) = CheckoutRequest(
+            routeId = "R1",
+            seats = listOf("1A"),
+            travelDate = TRAVEL_DATE,
+            totalAmount = BigDecimal("100.00"),
+            paymentMethodToken = "test-token",
+            offerId = offerId,
+        )
+
+        orchestrator.checkout(requestFor("of-001"), "key-offers", "user-1", "alice@example.com")
+
+        // The offer is part of what was ordered — it decides the refund terms — so it belongs in the
+        // fingerprint like the travel date.
+        val ex = assertThrows<ApiException> {
+            orchestrator.checkout(requestFor("of-002"), "key-offers", "user-1", "alice@example.com")
+        }
+        assertEquals("IDEMPOTENCY_CONFLICT", ex.code)
+    }
+
+    @Test
+    fun `a key stored before the offer field existed still replays`() = runTest {
+        val service = FakeOrderService()
+        val orchestrator = orchestratorFor(service)
+        val request = CheckoutRequest(
+            routeId = "R1",
+            seats = listOf("1A"),
+            travelDate = TRAVEL_DATE,
+            totalAmount = BigDecimal("100.00"),
+            paymentMethodToken = "test-token",
+        )
+        val firstOrderId = orchestrator.checkout(request, "key-rollout", "user-1", "alice@example.com").orderId
+
+        // The offer segment is appended only when the field is present, so an offer-less payload
+        // hashes exactly as it did before the column shipped. Idempotency records live 24 hours: if
+        // the canonical string had changed for every request, every key in flight across the
+        // deployment would have answered 409 to its own retry.
+        val replay = orchestrator.checkout(request, "key-rollout", "user-1", "alice@example.com")
+
+        assertEquals(firstOrderId, replay.orderId)
+        assertEquals(1, service.savedOrderStatuses.size)
+    }
+
     // --- happy path and phase order ---------------------------------------------------------------
 
     @Test

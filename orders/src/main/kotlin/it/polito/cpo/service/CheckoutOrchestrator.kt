@@ -162,6 +162,9 @@ class CheckoutOrchestrator(
             createdAt = LocalDateTime.now(),
             paymentMethodToken = request.paymentMethodToken,
             recipientEmail = recipientEmail,
+            // Recorded as claimed, not resolved: there is no Catalog client yet, so this is not
+            // checked against the route and its price is not compared with totalAmount (issue #93).
+            offerId = request.offerId,
         ).apply { setAsNew(true) }
 
         // 3. Persist order + idempotency + the order-placed outbox row atomically (fixes the
@@ -196,6 +199,14 @@ class CheckoutOrchestrator(
             append(request.travelDate).append('|')
             append(request.totalAmount.stripTrailingZeros().toPlainString()).append('|')
             append(request.paymentMethodToken)
+            // Appended only when present, so the canonical string of a request without an offer is
+            // byte-identical to the one this method produced before the field existed. Idempotency
+            // records live for 24 hours: hashing an empty segment unconditionally would make every
+            // key in flight across the deployment collide with its own stored fingerprint and get a
+            // 409 instead of a replay.
+            if (request.offerId != null) {
+                append('|').append(request.offerId)
+            }
         }
         return MessageDigest.getInstance("SHA-256")
             .digest(canonical.toByteArray(Charsets.UTF_8))

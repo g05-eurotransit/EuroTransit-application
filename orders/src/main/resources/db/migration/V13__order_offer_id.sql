@@ -1,0 +1,18 @@
+-- Which offer was bought.
+--
+-- Orders had no concept of an offer at all: no column, no field on the checkout request, and no
+-- Catalog client. Everything the post-sale refund needs (ADR-015) starts here, because the refund
+-- policy and the cutoff are properties of the offer that was sold, resolved against the terms the
+-- customer accepted rather than against the offer as it reads at refund time.
+--
+-- **This value is not validated.** It is whatever the client sent. Nothing yet resolves it against
+-- Catalog, checks that it belongs to `route_id`, or compares `total_amount` against its price
+-- (issue #93). Do not make a money decision on this column until the Catalog client lands: it is
+-- enough to record what was claimed, and not enough to trust.
+--
+-- Nullable, and deliberately so: the SPA does not send the field yet (issue #84), and making it
+-- NOT NULL in the same change would break every checkout until that lands. An unrefundable order is
+-- a smaller failure than a broken money path. The refund endpoint refuses an order with no offer,
+-- which is the right answer for anything bought before this column existed. Tighten to NOT NULL
+-- once the SPA sends it.
+ALTER TABLE orders ADD COLUMN offer_id VARCHAR(255);
