@@ -1,10 +1,14 @@
 package it.polito.cpo.controller
 
+import it.polito.cpo.client.InventoryReadClient
+import it.polito.cpo.client.SeatAvailabilityOutcome
 import it.polito.cpo.controller.dtos.CheckoutRequest
 import it.polito.cpo.controller.dtos.CheckoutResponse
 import it.polito.cpo.controller.dtos.OrderHistoryCursor
 import it.polito.cpo.controller.dtos.OrderPage
 import it.polito.cpo.controller.dtos.OrderView
+import it.polito.cpo.controller.dtos.SeatAvailabilityView
+import it.polito.cpo.controller.dtos.SeatView
 import it.polito.cpo.model.OrderStatus
 import it.polito.cpo.service.CheckoutOrchestrator
 import it.polito.cpo.service.CustomerFailureCode
@@ -14,13 +18,15 @@ import org.springframework.security.core.annotation.AuthenticationPrincipal
 import org.springframework.security.oauth2.jwt.Jwt
 import org.springframework.web.bind.annotation.*
 import org.springframework.web.server.ResponseStatusException
+import java.time.LocalDate
 import java.util.UUID
 
 @RestController
 @RequestMapping("/api/orders")
 class OrderController(
     private val orderService: OrderService,
-    private val checkoutOrchestrator: CheckoutOrchestrator
+    private val checkoutOrchestrator: CheckoutOrchestrator,
+    private val inventoryReadClient: InventoryReadClient,
 ) {
 
     private companion object {
@@ -83,6 +89,52 @@ class OrderController(
         }
 
         return OrderPage(orders = page.map { toView(it) }, nextCursor = next)
+    }
+
+    /**
+     * The seat map for a route on a travel date, so a customer can pick a seat instead of finding
+     * out it was taken only after paying.
+     *
+     * Orders fronts this so Inventory stays internal: the browser reaches the `/api/orders` prefix
+     * through Traefik, and Orders calls `/api/inventory/availability` with a service credential. The
+     * alternative — routing it through Catalog — would serve an authenticated step of the checkout
+     * (the picker lives behind `ProtectedRoute` at `/checkout/seats`) from a public anonymous route.
+     *
+     * The isolation cost of hosting browsing traffic here is paid explicitly in
+     * `ResilienceConfiguration`: a separate `inventory-read` breaker and bulkhead, and no retry.
+     *
+     * **The answer is advisory.** It is a read with no lock: a seat reported free can lose the hold
+     * race a moment later, and `SEATS_UNAVAILABLE` at checkout remains the authoritative answer.
+     *
+     * Declared before [getOrder] for readability only — routing does not depend on the order.
+     * `seat-availability` is a literal segment and Spring's `PathPattern` comparator sorts literals
+     * ahead of `{orderId}`, so this never reaches the by-id handler; `OrderControllerOwnershipTest`
+     * pins that, because the failure mode would otherwise be a confusing 400 on a UUID conversion.
+     */
+    @GetMapping("/seat-availability")
+    suspend fun seatAvailability(
+        @RequestParam routeId: String,
+        @RequestParam travelDate: LocalDate,
+    ): SeatAvailabilityView {
+        // No ownership check and no principal use: there is no owned resource here. Authentication
+        // is still required — the security chain covers this path with the customer/operations rule
+        // — because this is a step of the checkout, not public browsing.
+        val outcome = inventoryReadClient.getSeatAvailability(routeId, travelDate)
+
+        val seats = when (outcome) {
+            is SeatAvailabilityOutcome.Found -> outcome.seats
+            // Inventory conflates "unknown route" with "sold out" behind one 404 (raised on #68).
+            // Until that is split, 404 is the honest answer: reporting an empty seat map for a route
+            // that does not exist would look like a sold-out train.
+            SeatAvailabilityOutcome.NotFound ->
+                throw ResponseStatusException(HttpStatus.NOT_FOUND, "No seats for this route and date")
+        }
+
+        return SeatAvailabilityView(
+            routeId = routeId,
+            travelDate = travelDate,
+            seats = seats.map { SeatView(seatId = it.seatId, available = it.available) },
+        )
     }
 
     @GetMapping("/{orderId}")
