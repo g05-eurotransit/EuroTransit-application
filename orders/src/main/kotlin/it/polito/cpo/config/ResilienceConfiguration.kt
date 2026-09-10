@@ -36,9 +36,25 @@ class ResilienceConfiguration {
         val registry = CircuitBreakerRegistry.ofDefaults()
         registry.circuitBreaker("inventory", circuitBreakerConfig(slowCall = Duration.ofSeconds(2)))
         registry.circuitBreaker("payments", circuitBreakerConfig(slowCall = Duration.ofSeconds(3)))
+        // Browsing traffic, deliberately not the "inventory" instance. A seat map is read while
+        // customers navigate, at volumes unrelated to checkout, and it queries every seat on a route
+        // rather than a handful by id — so it is both more frequent and slower than any money-path
+        // call. Sharing the instance would let a navigation spike trip the breaker that hold,
+        // confirm and release depend on: five slow reads in a twenty-second window is enough, and
+        // for the ten seconds the breaker stays open no checkout can create a hold. The threshold is
+        // tighter than checkout's because a seat map has no business being slow.
+        registry.circuitBreaker("inventory-read", circuitBreakerConfig(slowCall = Duration.ofSeconds(1)))
         return registry
     }
 
+    /**
+     * Note what is NOT here: there is no `inventory-read` retry, and its absence is the decision.
+     *
+     * A stale seat map is not worth a retry — the answer is advisory and the customer can ask again
+     * by reloading — while retrying read traffic is precisely how a struggling dependency becomes an
+     * outage: three attempts per call triples the load on Inventory at the moment it is least able
+     * to serve it. [WebClientInventoryReadClient] therefore composes bulkhead and breaker only.
+     */
     @Bean
     fun retryRegistry(): RetryRegistry {
         val registry = RetryRegistry.ofDefaults()
@@ -52,6 +68,10 @@ class ResilienceConfiguration {
         val registry = BulkheadRegistry.ofDefaults()
         registry.bulkhead("inventory", bulkheadConfig())
         registry.bulkhead("payments", bulkheadConfig())
+        // The isolation the DoD asks for ("bulkheads isolate checkout resources from unrelated
+        // traffic"): saturating the seat-map pool sheds seat-map load and leaves the twenty
+        // money-path permits untouched.
+        registry.bulkhead("inventory-read", bulkheadConfig())
         return registry
     }
 
