@@ -66,14 +66,15 @@ counter-proposal to negotiate.
 | --- | --- | --- |
 | 0 | Unblock everyone else: four messages, no code | **done** (2026-09-10) |
 | 1 | Seat availability façade on Orders | **done** — merged as `a3ce792` |
-| 2 | Refund part 1 — the ADR and `offerId` in the checkout contract | **next, detailed below** |
-| 3 | Refund part 2 — Catalog client and policy resolution | to be written when 2 lands |
+| 2 | Refund part 1 — the ADR and `offerId` in the checkout contract | **done** — see the outcome below |
+| 3 | Refund part 2 — Catalog client and policy resolution | **next, detailed below** |
 | 4 | Refund part 3 — refund state machine and endpoint | to be written |
 | 5 | Orders canary with metric-gated promote/abort | to be written; findings already recorded below |
 | 6 | Chaos experiments, postmortem, agent log | to be written |
 
-Steps 2 to 4 are one feature split by dependency, not three features. Step 3 needs #85 to have
-landed; step 2 does not, which is why the request goes out in step 0.
+Steps 2 to 4 are one feature split by dependency, not three features. Step 3 needs part of #85 to
+have landed — `GET /api/catalog/offers/{offerId}` for 3a, the refund fields for 3b; step 2 needed
+neither, which is why the request goes out in step 0.
 
 ---
 
@@ -291,3 +292,103 @@ nobody mistakes it for a validated value.
 
 **Done when:** ADR-015 is merged, a checkout carrying `offerId` persists it and one without it still
 succeeds, `OrderView` exposes it, and #84 has been told.
+
+---
+
+## Step 2 — outcome
+
+Branch `feature/orders-refund-adr-offer-id`. Full build green at **297 tests, 0 failures** (+8).
+
+**ADR-015 written**, beside ADR-014 rather than instead of it: ADR-014 is Inventory's half (the
+`CONFIRMED -> REFUNDED` transition that keeps Invariant 5), ADR-015 is the Orders half — who may
+refund, in what order the reversal happens, and what state a partial failure leaves behind. It
+records all six decisions listed for this step, and the four alternatives that were rejected, so
+each one has a written reason rather than a habit: `CONFIRMED -> REFUNDING -> REFUNDED` with no
+`REFUND_FAILED`, its own trigger and consumer, money first and seat second with
+`SEAT_RETURN_FAILURE` left open, `pay-refund-{orderId}` as a separate idempotency namespace, the
+cutoff evaluated with the Orders database clock, and a pre-cutoff replay that still returns its
+original result after the cutoff.
+
+**`offerId` persisted, unvalidated and nullable.** `V13__order_offer_id.sql`, the field on `Order`,
+the write in the checkout transaction, and `OrderView`. The migration comment says in as many words
+that the column holds what the client claimed and that no money decision may be made on it until the
+Catalog client lands — the one thing a future reader is most likely to get wrong.
+
+One decision that was not in the step text and that the fingerprint forced. `offerId` belongs in the
+checkout fingerprint for the same reason `travelDate` does: it is part of what was ordered, so one
+key reused for two offers must be an `IDEMPOTENCY_CONFLICT` rather than a replay of the other offer.
+But changing the canonical string changes the hash of every request, and idempotency records live 24
+hours — so during the deployment every key in flight would have answered 409 to its own retry. The
+offer segment is therefore appended **only when the field is present**, which leaves an offer-less
+payload byte-identical to what the old code hashed. Covered by
+`a key stored before the offer field existed still replays`.
+
+Tests: the offer reaching the order, a checkout without one still succeeding, the conflict, the
+rollover replay, `OrderView` exposing it and omitting it, and a persistence round-trip proving V13
+and the entity mapping agree.
+
+**Not done here, deliberately:** nothing resolves the offer, so #93 (the client-supplied amount) is
+still open and is step 3. Tightening `offerId` to required waits on #84.
+
+Told Erestina on #84 that the field exists and is accepted.
+
+---
+
+## Step 3 — The Catalog client, price validation, and frozen refund terms
+
+This is the step that turns `offerId` from a recorded string into something Orders can make a money
+decision on. It closes **#93** and produces the inputs ADR-015's refund needs.
+
+**It is blocked, and by a specific thing rather than by #85 as a whole.** What is needed first is
+`GET /api/catalog/offers/{offerId}` — it does not exist today, `CatalogController` exposes only
+`/routes`, `/routes/{routeId}` and `/offers`, and without it Orders would fetch the whole catalogue
+on every checkout. The machine-readable refund rule and the route zone (the rest of #85) block only
+3b below. Check #85 before starting: if the endpoint has landed and the fields have not, do 3a and
+stop.
+
+### 3a — Resolve the offer and validate the amount (needs only the by-id endpoint)
+
+- **A Catalog client, in the synchronous checkout entry, not in the pipeline.** A wrong price must
+  come back as a `400` on the checkout call, not as a `FAILED` order discovered minutes later: the
+  customer can fix a rejected request, they cannot fix a failed one.
+- **Its own Resilience4j instance** — `catalog-read`, registered separately, for exactly the reason
+  step 1 separated `inventory-read`: a browsing-driven Catalog problem must not open a breaker the
+  money path depends on. Tight timeout, no retry.
+- **Fail closed.** If Catalog cannot be reached the checkout is rejected, not accepted on trust.
+  This is a deliberate availability trade: Catalog becoming unavailable stops new checkouts. Say so
+  in the ADR-015 follow-up or in a comment, because the tempting alternative — accept the client's
+  amount when Catalog is down — reopens #93 exactly when nobody is watching.
+- **Validate three things:** the offer exists, it belongs to the requested `routeId`, and its price
+  matches `totalAmount`. A mismatch is a `400` with its own code, not a silent correction: silently
+  charging a different amount than the client displayed is its own bug.
+- **Persist the resolved price**, and treat `totalAmount` from the request as a consistency check
+  only. The authorization sent to Payments must use the resolved value, which is the actual fix for
+  #93 — `CheckoutOrchestrator:327` currently sends `ctx.order.totalAmount` straight from the request.
+- **The fingerprint stays as it is.** It hashes what the client asked for, and that is the right
+  input for telling a retry from a key reuse; the resolved price is an output.
+
+### 3b — Freeze the refund terms (needs the #85 fields)
+
+- **Store the terms on the order, not just the version marker.** #86 asked for the offer version so
+  a later catalogue edit cannot rewrite what a customer accepted — but a version only protects that
+  if Catalog keeps history, and Catalog is an in-memory repository of six offers with no history at
+  all. So persist the resolved rule itself (refundable, cutoff duration) and keep the version beside
+  it as an audit marker. This is a correction to the #86 wording, not a re-litigation of it: same
+  goal, and the version alone does not reach it.
+- **Store the departure instant, computed once at checkout** as `travelDate + departureTime` in the
+  route's zone, as `TIMESTAMPTZ` like `reservation_expires_at`. The refund then compares one stored
+  instant against the database clock, with no zone arithmetic on the refund path and no dependency
+  on Catalog being reachable at refund time.
+- **Migration `V14`**, and the fields on `Order` and — where the SPA needs them to decide whether to
+  show a refund button — on `OrderView`.
+
+### Tightening `offerId` to required
+
+Price validation only bites for a checkout that carries an offer, so #93 is not fully closed while
+the field is optional. That flip is gated on #84, not on Catalog. Land 3a validating when the field
+is present, and flip to required as a one-line follow-up once the SPA sends it — recording in the
+meantime that a checkout without `offerId` is still unvalidated, which is the honest state.
+
+**Done when:** a checkout with a mismatched amount is rejected, the amount sent to Payments is the
+resolved one, #93 is closed or explicitly reduced to the `offerId`-optional case, and — if 3b was in
+scope — an order carries the refund rule and departure instant it was sold under.
