@@ -5,10 +5,16 @@ import org.springframework.data.r2dbc.repository.Modifying
 import org.springframework.data.r2dbc.repository.Query
 import org.springframework.data.repository.kotlin.CoroutineCrudRepository
 import org.springframework.stereotype.Repository
+import kotlinx.coroutines.flow.Flow
 import java.time.LocalDate
 
 @Repository
 interface SeatRepository : CoroutineCrudRepository<Seat, String> {
+
+    /**
+     * Retrieves all seats for a specific route and travel date.
+     */
+    fun findByRouteIdAndTravelDate(routeId: String, travelDate: LocalDate): Flow<Seat>
 
     /**
      * Updates available seats to held for a route, date and reservation when all seats are available.
@@ -59,6 +65,13 @@ interface SeatRepository : CoroutineCrudRepository<Seat, String> {
     @Modifying
     @Query("UPDATE seats SET status = 'SOLD' WHERE reservation_id = :reservationId AND status = 'HELD'")
     suspend fun confirmSeats(reservationId: String): Int
+    
+    /**
+     * Updates sold seats for a refunded reservation back to available.
+     */
+    @Modifying
+    @Query("UPDATE seats SET status = 'AVAILABLE', reservation_id = NULL WHERE reservation_id = :reservationId AND status = 'SOLD'")
+    suspend fun refundSeats(reservationId: String): Int
     
     /**
      * Counts the number of seats assigned to a reservation.

@@ -12,7 +12,7 @@ data class ReservationRequest(
     val travelDate: LocalDate
 )
 
-enum class ReservationStatus { HELD, FAILED, CONFIRMED, EXPIRED, CANCELLED }
+enum class ReservationStatus { HELD, FAILED, CONFIRMED, EXPIRED, CANCELLED, REFUNDED }
 
 data class ReservationConfirmationRequest(
     val orderId: UUID
@@ -31,4 +31,8 @@ data class ReservationResponse(
      * depending on where the customer is.
      */
     val expiresAt: OffsetDateTime
+)
+
+data class ReservationRefundRequest(
+    val orderId: UUID
 )

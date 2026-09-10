@@ -11,7 +11,7 @@ export function ProtectedRoute({ children }: PropsWithChildren) {
   const location = useLocation();
 
   useEffect(() => {
-    if (silentChecked && !auth.isAuthenticated && !auth.activeNavigator && !auth.error) {
+    if (silentChecked && !auth.isAuthenticated && !auth.activeNavigator) {
       const redirect: PostLoginRedirect = {
         pathname: location.pathname,
         search: location.search,

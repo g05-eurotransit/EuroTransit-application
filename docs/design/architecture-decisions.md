@@ -318,3 +318,21 @@ The complete protocol, failure matrix, API shape, and acceptance criteria are do
   Inventory has accepted the sale. A fully asynchronous confirmation saga is possible, but it requires
   additional intermediate states, response events, timeouts, deduplication, and reconciliation without
   a clear benefit for the current money path.
+
+## ADR-014: Post-Sale Seat Refund Transition
+
+**Decision:** Allow a dedicated post-sale transition that returns `SOLD` seats to `AVAILABLE` status upon order cancellation/refund, while strictly preserving Invariant 5 for checkout compensation.
+
+`reservation-confirmation.md` originally excluded returning a confirmed seat to available, treating `SOLD` as terminal to protect against checkout compensation bugs. However, the business requires refunded tickets to be resold.
+
+### Selected Option: Dedicated Post-Sale Transition
+
+- Introduce a new reservation state transition (e.g., `CONFIRMED -> REFUNDED`) and seat transition (`SOLD -> AVAILABLE`) triggered by a distinct, dedicated internal operation.
+- This operation must use the same reservation-row concurrency lock as confirmation, release, and expiration.
+- The operation must be strictly idempotent by reservation and order.
+- The existing `release` (used for checkout compensation) and `expiration` operations must **remain completely unable to modify a `CONFIRMED` reservation or a `SOLD` seat** (maintaining Invariant 5).
+- Seats of a departed train will theoretically return to `AVAILABLE` in the database, but must be filtered out at read-time by the availability endpoint rather than blocked during the transition, separating data consistency from business visibility.
+
+### Why This Is Better
+
+This fulfills the business requirement of reselling refunded tickets without compromising the safety of the critical checkout money path. By creating a completely separate API and state transition for post-sale refunds, we guarantee that a delayed or erroneous checkout compensation (`release`) cannot accidentally un-sell a confirmed ticket.

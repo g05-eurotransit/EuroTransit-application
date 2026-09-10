@@ -1,6 +1,7 @@
 package it.polito.cpo.controller
 
 import it.polito.cpo.contracts.inventory.ReservationConfirmationRequest
+import it.polito.cpo.contracts.inventory.ReservationRefundRequest
 import it.polito.cpo.contracts.inventory.ReservationRequest
 import it.polito.cpo.contracts.inventory.ReservationResponse
 import it.polito.cpo.contracts.inventory.ReservationStatus
@@ -13,7 +14,7 @@ import it.polito.cpo.service.ReservationService
 
 @RestController
 @RequestMapping("/api/inventory/reservations")
-class InventoryController(
+class ReservationController(
     private val reservationService: ReservationService
 ) {
 
@@ -52,6 +53,18 @@ class InventoryController(
         @RequestBody request: ReservationConfirmationRequest
     ): ResponseEntity<ReservationResponse> {
         val response = reservationService.confirmReservation(reservationId, request.orderId)
+        return ResponseEntity.ok(response)
+    }
+
+    /**
+     * Handles requests to refund a confirmed reservation, making seats available again.
+     */
+    @PostMapping("/{reservationId}/refund")
+    suspend fun refundReservation(
+        @PathVariable reservationId: String,
+        @RequestBody request: ReservationRefundRequest
+    ): ResponseEntity<ReservationResponse> {
+        val response = reservationService.refundReservation(reservationId, request.orderId)
         return ResponseEntity.ok(response)
     }
 }
