@@ -51,9 +51,9 @@ counter-proposal to negotiate.
 | Step | What | Status |
 | --- | --- | --- |
 | 0 | Unblock everyone else: four messages, no code | **done** (2026-09-10) |
-| 1 | Seat availability façade on Orders | **in progress** |
-| 2 | Refund part 1 — `offerId` in the checkout contract | to be written when 1 lands |
-| 3 | Refund part 2 — Catalog client and policy resolution | to be written |
+| 1 | Seat availability façade on Orders | **code complete, in review** |
+| 2 | Refund part 1 — the ADR and `offerId` in the checkout contract | **detailed below** |
+| 3 | Refund part 2 — Catalog client and policy resolution | to be written when 2 lands |
 | 4 | Refund part 3 — refund state machine and endpoint | to be written |
 | 5 | Orders canary with metric-gated promote/abort | to be written |
 | 6 | Chaos experiments, postmortem, agent log | to be written |
@@ -187,3 +187,85 @@ separate and tested, and #84 item 3 is unblocked with the response shape communi
 > if time remains after the money path is complete and demonstrable. If instead we want to accept it,
 > it should be planned as its own cross-slice block with Inventory, Payments and the configuration
 > repository involved from the start — not as an Orders task.
+
+
+---
+
+## Step 1 — outcome
+
+Branch `feature/orders-seat-availability`, three commits, full build green at **289 tests, 0
+failures** (+14). Not yet merged.
+
+- `inventory-read` circuit breaker and bulkhead registered separately from `inventory`, with a
+  1s slow-call threshold and a 1s timeout, and **no retry registration**. The absence is asserted
+  by `a failing read is attempted once, unlike the money path`, which drives both clients at the
+  same failing handler and counts requests: 1 versus 3.
+- `InventoryReadClient` / `WebClientInventoryReadClient` kept apart from the money-path client, so
+  the wrong resilience chain cannot be applied by accident, plus a `dev` mock with deterministic
+  availability.
+- `GET /api/orders/seat-availability?routeId=&travelDate=`, Orders-owned response DTO, two fields
+  per seat and no ids.
+- `api-design.md`: the row naming Catalog as the caller corrected, the façade documented.
+
+Deliberately left for Inventory, both raised on #68: the 404 that conflates an unknown route with a
+sold-out one, and the missing filter for departed same-day seats.
+
+Still open before the frontend can consume it: the sweeper (#81 / configuration PR #31) must be
+enabled, or seats held by abandoned checkouts read as permanently unavailable.
+
+---
+
+## Step 2 — The refund ADR, and `offerId` in the checkout contract
+
+Two things that are entirely Orders' and blocked by nobody. Deliberately no refund behaviour yet:
+this step only makes Orders able to say *which offer was bought*, which nothing downstream can work
+without.
+
+### 2a — Write the ADR
+
+The design is already settled and written out in the body of #86; what is missing is the record.
+ADR-014 covers Inventory's `SOLD -> AVAILABLE` transition, and there is no counterpart for the
+Orders side. Next free number is **ADR-015**.
+
+It should capture the decisions that are non-obvious enough to be re-litigated otherwise:
+
+- `CONFIRMED -> REFUNDING -> REFUNDED`, with `REFUNDING` as the durable resume point and
+  deliberately **no** `REFUND_FAILED`. Unresolved money stays in `REFUNDING` with an open
+  reconciliation record, exactly as `COMPENSATING` does, rather than reaching a terminal state that
+  hides it;
+- its own durable trigger and consumer, **not** the `order-placed` pipeline. That consumer must keep
+  treating `CONFIRMED` as terminal, or a redelivery would restart a completed checkout;
+- reverse the money first, return the seat second. If the seat return fails definitively the
+  customer already has their money and a `SEAT_RETURN_FAILURE` reconciliation record stays open;
+- a new idempotency key scheme, `pay-refund-{orderId}`. `refund-{orderId}` is already consumed by
+  checkout compensation; reusing it would make Payments replay the compensation's stored result and
+  return a 200 while no money moves. This is safe today — verified, see the findings above — because
+  `payment_refunds` has no uniqueness constraint on the order and idempotency is keyed by key;
+- the cutoff is compared against the **Orders database clock**, not a JVM clock, for the same reason
+  invariant 4 uses the database clock for hold expiry: replicas disagree at the boundary;
+- a replay of an idempotency key accepted *before* the cutoff must return the original result even
+  when it arrives after it, while a *new* request after the cutoff is refused. Two opposite
+  behaviours on the same time condition, and the idempotency record is what distinguishes them.
+
+### 2b — Persist the offer
+
+Orders has no concept of an offer: no `offerId` on `CheckoutRequest`, no column, no Catalog client.
+
+- add `offerId` to `CheckoutRequest`, **nullable to begin with**. The frontend is a different owner
+  and sending it is part of #84; making it required in the same commit would break checkout until
+  that lands, and a broken checkout is worse than an unrefundable order. The refund endpoint will
+  refuse an order that has no `offerId`, which is the correct answer for anything bought before this
+  ships anyway. Tighten to required once the SPA sends it;
+- migration `V13`, plus the column on the entity and the write in the checkout transaction;
+- surface it on `OrderView` so the SPA can show what was bought and decide whether to offer a refund
+  button;
+- tell Erestina on #84 that the field exists and is accepted, so the SPA change can be scheduled.
+
+**Not in this step, on purpose:** resolving the offer against Catalog, validating that it belongs to
+the requested route, and freezing its terms. All three need the Catalog client and the fields
+requested on #85, and they are step 3. Until then the column holds what the client claimed, which is
+enough to persist and not enough to make a money decision on — worth a comment in the migration so
+nobody mistakes it for a validated value.
+
+**Done when:** ADR-015 is merged, a checkout carrying `offerId` persists it and one without it still
+succeeds, `OrderView` exposes it, and #84 has been told.
