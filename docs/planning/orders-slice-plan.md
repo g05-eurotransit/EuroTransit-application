@@ -65,8 +65,8 @@ counter-proposal to negotiate.
 | Step | What | Status |
 | --- | --- | --- |
 | 0 | Unblock everyone else: four messages, no code | **done** (2026-09-10) |
-| 1 | Seat availability façade on Orders | **code complete, in review** |
-| 2 | Refund part 1 — the ADR and `offerId` in the checkout contract | **detailed below** |
+| 1 | Seat availability façade on Orders | **done** — merged as `a3ce792` |
+| 2 | Refund part 1 — the ADR and `offerId` in the checkout contract | **next, detailed below** |
 | 3 | Refund part 2 — Catalog client and policy resolution | to be written when 2 lands |
 | 4 | Refund part 3 — refund state machine and endpoint | to be written |
 | 5 | Orders canary with metric-gated promote/abort | to be written; findings already recorded below |
@@ -207,8 +207,7 @@ separate and tested, and #84 item 3 is unblocked with the response shape communi
 
 ## Step 1 — outcome
 
-Branch `feature/orders-seat-availability`, three commits, full build green at **289 tests, 0
-failures** (+14). Not yet merged.
+Merged as `a3ce792` (PR #92), CI green. Full build was green at **289 tests, 0 failures** (+14).
 
 - `inventory-read` circuit breaker and bulkhead registered separately from `inventory`, with a
   1s slow-call threshold and a 1s timeout, and **no retry registration**. The absence is asserted
@@ -274,6 +273,15 @@ Orders has no concept of an offer: no `offerId` on `CheckoutRequest`, no column,
 - surface it on `OrderView` so the SPA can show what was bought and decide whether to offer a refund
   button;
 - tell Erestina on #84 that the field exists and is accepted, so the SPA change can be scheduled.
+
+**Found while scoping this step, and why step 3 matters more than the refund alone.** The amount
+Orders authorizes is supplied by the client and validated against nothing: `CheckoutRequest`
+carries `totalAmount`, `CheckoutOrchestrator` persists it at :161 and sends it to Payments at :327,
+so a checkout submitted with `0.01` is authorized for one cent and confirmed as a normal sale.
+Nothing downstream catches it — Payments authorizes what it is given, Inventory has no notion of
+price. The cause is the same gap this step closes: with no way to resolve what was bought, there is
+nothing to compare the amount against. Tracked as #93, fixed by the Catalog client in step 3, and
+out of scope here.
 
 **Not in this step, on purpose:** resolving the offer against Catalog, validating that it belongs to
 the requested route, and freezing its terms. All three need the Catalog client and the fields
