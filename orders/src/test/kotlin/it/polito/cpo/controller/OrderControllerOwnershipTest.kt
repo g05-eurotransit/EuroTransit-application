@@ -119,7 +119,12 @@ class OrderControllerOwnershipTest @Autowired constructor(
         orderService.historyRows = orders.toList()
     }
 
-    private fun order(owner: String, createdAt: LocalDateTime, status: OrderStatus = OrderStatus.CONFIRMED) =
+    private fun order(
+        owner: String,
+        createdAt: LocalDateTime,
+        status: OrderStatus = OrderStatus.CONFIRMED,
+        offerId: String? = null,
+    ) =
         Order(
             id = UUID.randomUUID(),
             userId = owner,
@@ -129,6 +134,7 @@ class OrderControllerOwnershipTest @Autowired constructor(
             travelDate = travelDate,
             totalAmount = BigDecimal.TEN,
             createdAt = createdAt,
+            offerId = offerId,
         ).apply { setAsNew(false) }
 
     @Test
@@ -309,6 +315,33 @@ class OrderControllerOwnershipTest @Autowired constructor(
             .expectBody()
             .jsonPath("$.failureCode").doesNotExist()
             .jsonPath("$.failureMessage").doesNotExist()
+    }
+
+    // --- the offer that was bought ----------------------------------------------------------------
+
+    @Test
+    fun `the order view exposes the offer the order was bought against`() {
+        orderService.next = order("user-owner", LocalDateTime.now(), offerId = "of-001")
+        webTestClient.get().uri("/api/orders/$orderId")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isOk
+            .expectBody()
+            // The SPA needs this to show what was bought and to decide whether a refund is offered
+            // at all (ADR-015).
+            .jsonPath("$.offerId").isEqualTo("of-001")
+    }
+
+    @Test
+    fun `an order bought without an offer carries no offerId`() {
+        seedOwnedBy("user-owner")
+        webTestClient.get().uri("/api/orders/$orderId")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isOk
+            .expectBody()
+            // Every order placed before the field existed, which the refund endpoint will refuse.
+            .jsonPath("$.offerId").doesNotExist()
     }
 
     // ---------------------------------------------------------------------------------------------

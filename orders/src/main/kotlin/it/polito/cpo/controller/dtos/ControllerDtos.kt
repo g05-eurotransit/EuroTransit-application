@@ -13,7 +13,17 @@ data class CheckoutRequest(
     /** The day being travelled. A route plus a seat is not a bookable thing on its own (issue #64). */
     val travelDate: LocalDate,
     val totalAmount: BigDecimal,
-    val paymentMethodToken: String
+    val paymentMethodToken: String,
+    /**
+     * Which offer is being bought. Needed by the post-sale refund (ADR-015), whose policy and cutoff
+     * are properties of the offer that was sold.
+     *
+     * Optional for now: the SPA does not send it yet (issue #84), and requiring it here would reject
+     * every checkout until that lands. It is also **not validated** — nothing resolves it against
+     * Catalog or checks that its price matches [totalAmount] (issue #93) — so an order carrying it is
+     * refundable, not priced.
+     */
+    val offerId: String? = null,
 )
 
 data class CheckoutResponse(
@@ -50,6 +60,14 @@ data class OrderView(
     val failureCode: String? = null,
     /** Ready-to-display text for [failureCode], derived from it rather than stored. */
     val failureMessage: String? = null,
+    /**
+     * The offer this order was bought against, as recorded at checkout. Null for orders placed
+     * before the field existed, and for clients that do not send it yet.
+     *
+     * The SPA needs it to show what was bought and to decide whether to offer a refund at all: an
+     * order with no offer has no refund terms and the refund endpoint will refuse it (ADR-015).
+     */
+    val offerId: String? = null,
 )
 
 /**

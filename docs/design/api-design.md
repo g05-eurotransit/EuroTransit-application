@@ -106,10 +106,16 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
 ### Orders
 
 - `POST /api/orders`
-  - Accepts a checkout request: `routeId`, `seats`, `travelDate`, `totalAmount`, `paymentMethodToken`.
+  - Accepts a checkout request: `routeId`, `seats`, `travelDate`, `totalAmount`,
+    `paymentMethodToken`, and an optional `offerId`.
   - `travelDate` is the ISO day being travelled (`"2026-09-01"`). A route plus a seat does not identify
     a bookable thing on its own: Inventory keys seats by `(route_id, travel_date, seat_id)`, so the same
     physical seat is sold separately for each day.
+  - `offerId` records which offer is being bought. It is **optional and unvalidated**: Orders has no
+    Catalog client yet, so nothing checks that the offer exists, that it belongs to `routeId`, or that
+    its price matches `totalAmount` (issue #93). It is stored so that the post-sale refund can resolve
+    the terms the customer accepted (ADR-015); it is not yet a priced or trusted value. It becomes
+    required once the SPA sends it (issue #84).
   - Requires an authenticated customer identity.
   - Returns `202 Accepted` with an `orderId` and initial status after the request has been accepted for processing.
   - Rejects a `travelDate` in the past with `400 TRAVEL_DATE_IN_THE_PAST`. Orders deliberately checks no
@@ -117,7 +123,9 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     becomes a definitive hold rejection that fails the order through the normal path.
   - Requires a public-client-generated `Idempotency-Key` so client retries do not create duplicate orders.
     The stored request fingerprint includes `travelDate`, so reusing one key for two different days is an
-    `IDEMPOTENCY_CONFLICT` rather than a replay of the wrong day.
+    `IDEMPOTENCY_CONFLICT` rather than a replay of the wrong day. It includes `offerId` for the same
+    reason, and only when the field is present, so keys already in flight when the field shipped still
+    replay instead of conflicting.
   - Stores checkout idempotency records for 24 hours.
 - `GET /api/orders`
   - Returns the authenticated customer's own order history, newest first.
@@ -155,6 +163,9 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
 - `GET /api/orders/{orderId}`
   - Returns the current order status: accepted, reserving, payment-pending, confirming-inventory, compensating, confirmed, failed, or cancelled.
   - Includes `travelDate`, distinct from `createdAt`: the day of travel, not the day of purchase.
+  - Includes `offerId` when the checkout carried one, so a client can show what was bought and decide
+    whether to offer a refund: an order without an offer has no refund terms and the refund endpoint
+    will refuse it (ADR-015). Null on orders placed before the field existed.
   - Once seats are held, includes `reservationExpiresAt`: the Inventory hold deadline, carried as an
     offset-bearing instant because it is produced by the Inventory database clock and consumed by a
     browser in an unknown zone. It is the deadline for the *checkout* to converge — covering crash,

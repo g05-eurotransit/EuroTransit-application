@@ -227,6 +227,22 @@ class OrderTransitionsIntegrationTest {
         assertEquals("RESERVATION_ORDER_CONFLICT", orders.findById(id)!!.compensationReason)
     }
 
+    @Test
+    fun `the offer the order was bought against survives a round-trip`() = runBlocking {
+        // Proves V13 and the entity mapping agree. The refund (ADR-015) resolves its policy from the
+        // offer, so an order that silently forgot it would be unrefundable with no sign of why.
+        val id = seed(OrderStatus.CONFIRMED, offerId = "of-001")
+        assertEquals("of-001", orders.findById(id)!!.offerId)
+    }
+
+    @Test
+    fun `an order can be persisted without an offer`() = runBlocking {
+        // The column is nullable until the SPA sends the field (issue #84); a NOT NULL constraint
+        // here would break every checkout in the meantime.
+        val id = seed(OrderStatus.CONFIRMED)
+        assertNull(orders.findById(id)!!.offerId)
+    }
+
     // --- helpers ---------------------------------------------------------------------------------
 
     /**
@@ -257,6 +273,7 @@ class OrderTransitionsIntegrationTest {
     private suspend fun seed(
         status: OrderStatus,
         paymentMethodToken: String? = null,
+        offerId: String? = null,
     ): UUID {
         val id = UUID.randomUUID()
         orders.save(
@@ -271,6 +288,7 @@ class OrderTransitionsIntegrationTest {
                 createdAt = LocalDateTime.now(),
                 paymentMethodToken = paymentMethodToken,
                 recipientEmail = "user-transitions@example.com",
+                offerId = offerId,
             ).apply { setAsNew(true) },
         )
         return id
