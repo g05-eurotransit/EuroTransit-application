@@ -398,6 +398,34 @@ editing an offer cannot retroactively change what a past customer agreed to. Ord
 `offerId` on the order before any of the above can be implemented, which is why it lands first and
 separately.
 
+### Amended when the Catalog client landed
+
+Three things were decided while implementing the offer resolution that this ADR should carry, because
+each of them is easier to undo than to rediscover.
+
+**The refund rule is persisted, not only its version.** The paragraph above asks for `termsVersion`
+so a later catalogue edit cannot rewrite what a customer accepted. A version marker only achieves
+that if the catalogue keeps its history, and it does not: `InMemoryCatalogRepository.findOfferById`
+resolves against a flat list of *current* offers, and no previous revision is stored anywhere — so
+the marker would point at terms nobody can produce. The order therefore persists the rule itself
+(`refundable`, `refund_cutoff_minutes_before_departure`) and keeps `offer_terms_version` beside it as
+an audit marker. Same goal as above, by the only means that reaches it.
+
+**The departure instant is composed once, at checkout.** Catalog returns a duration before departure
+and the route's zone-less `departureTime` plus its IANA zone, deliberately not a precomputed instant
+— Catalog knows nothing about orders. Orders composes `travelDate + departureTime` in that zone at
+checkout and stores it as `TIMESTAMPTZ`. The refund then compares one stored instant against the
+database clock: no zone arithmetic on the refund path, and no dependency on Catalog being reachable
+at refund time, which is when a customer is least willing to hear about a broken dependency.
+
+**Offer resolution fails closed at checkout.** The price and the refund terms are resolved in the
+synchronous checkout entry, and if Catalog cannot be reached the checkout is refused with
+`503 OFFER_UNRESOLVABLE` rather than accepted on trust. The cost is real and worth stating: while
+Catalog is unavailable, new checkouts carrying an offer stop. The alternative — trusting the client's
+amount when the check cannot be made — restores the bug the resolution exists to remove (issue #93)
+at precisely the moment nobody is watching, and it would do so silently. Checkouts without an
+`offerId` are unaffected, because nothing is resolved for them.
+
 ### Why This Is Better
 
 Every part of this keeps unresolved money visible and keeps the checkout path untouched. A separate

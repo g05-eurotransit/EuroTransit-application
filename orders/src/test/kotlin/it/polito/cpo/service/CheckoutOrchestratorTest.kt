@@ -1,12 +1,16 @@
 package it.polito.cpo.service
 
 import it.polito.cpo.client.AuthorizationOutcome
+import it.polito.cpo.client.CatalogClient
 import it.polito.cpo.client.ConfirmReservationOutcome
 import it.polito.cpo.client.HoldOutcome
 import it.polito.cpo.client.InventoryClient
 import it.polito.cpo.client.InventoryRefusalCode
+import it.polito.cpo.client.OfferOutcome
 import it.polito.cpo.client.PaymentClient
+import it.polito.cpo.client.ResolvedOffer
 import it.polito.cpo.client.ReversalOutcome
+import it.polito.cpo.contracts.catalog.RefundPolicy
 import it.polito.cpo.contracts.payments.PaymentRequest
 import it.polito.cpo.contracts.inventory.ReservationRequest
 import it.polito.cpo.controller.dtos.CheckoutRequest
@@ -39,7 +43,9 @@ import tools.jackson.module.kotlin.kotlinModule
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.LocalTime
 import java.time.OffsetDateTime
+import java.time.ZoneId
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeoutException
@@ -66,6 +72,23 @@ class CheckoutOrchestratorTest {
 
     /** A stable future date: the checkout guard rejects anything in the past. */
     private val TRAVEL_DATE: LocalDate = LocalDate.now().plusDays(7)
+
+    private companion object {
+        /**
+         * Priced to match the 100.00 every request in this file asks for, so the offer is only
+         * "wrong" in the tests that deliberately make it so.
+         */
+        val OFFER = ResolvedOffer(
+            offerId = "of-001",
+            routeId = "R1",
+            price = BigDecimal("100.00"),
+            currency = "EUR",
+            refundPolicy = RefundPolicy(refundable = true, cutoffMinutesBeforeDeparture = 60),
+            termsVersion = 3,
+            departureTime = LocalTime.of(7, 0),
+            departureZone = ZoneId.of("Europe/Rome"),
+        )
+    }
 
     private val mapper: ObjectMapper = JsonMapper.builder().addModule(kotlinModule()).build()
 
@@ -290,6 +313,8 @@ class CheckoutOrchestratorTest {
         private val reversal: () -> ReversalOutcome = { ReversalOutcome.Reversed },
     ) : PaymentClient {
         val authorizeCalls = CopyOnWriteArrayList<UUID>()
+        /** The full requests, so what is actually charged — amount and currency — can be asserted. */
+        val authorizeRequests = CopyOnWriteArrayList<PaymentRequest>()
         val refundedOrderIds = CopyOnWriteArrayList<UUID>()
         val refundKeys = CopyOnWriteArrayList<String>()
 
@@ -299,6 +324,7 @@ class CheckoutOrchestratorTest {
             correlationId: String,
         ): AuthorizationOutcome {
             authorizeCalls.add(request.orderId)
+            authorizeRequests.add(request)
             return authorize()
         }
 
@@ -309,6 +335,24 @@ class CheckoutOrchestratorTest {
         }
     }
 
+    /**
+     * Catalog stand-in. Answers with [OFFER] unless told otherwise; [failWith] makes the lookup throw,
+     * which is how "Catalog is unreachable" is expressed — the client throws unknown outcomes rather
+     * than returning them, so the checkout can only fail closed.
+     */
+    private class StubCatalogClient(
+        var outcome: OfferOutcome = OfferOutcome.Found(OFFER),
+        var failWith: Throwable? = null,
+    ) : CatalogClient {
+        val lookedUp = CopyOnWriteArrayList<String>()
+
+        override suspend fun getOffer(offerId: String): OfferOutcome {
+            lookedUp.add(offerId)
+            failWith?.let { throw it }
+            return outcome
+        }
+    }
+
     // --- harness ----------------------------------------------------------------------------------
 
     private fun orchestratorFor(
@@ -316,10 +360,12 @@ class CheckoutOrchestratorTest {
         inventory: StubInventoryClient = StubInventoryClient(),
         payment: StubPaymentClient = StubPaymentClient(),
         reconciliation: FakeReconciliationService = FakeReconciliationService(),
+        catalog: StubCatalogClient = StubCatalogClient(),
     ) = CheckoutOrchestrator(
         orderService = service,
         inventoryClient = inventory,
         paymentClient = payment,
+        catalogClient = catalog,
         outboxEventRepository = mock(OutboxEventRepository::class.java),
         reconciliationService = reconciliation,
         objectMapper = mapper,
@@ -334,6 +380,7 @@ class CheckoutOrchestratorTest {
         reservationId: String? = null,
         compensationReason: String? = null,
         travelDate: LocalDate = TRAVEL_DATE,
+        currency: String = "EUR",
     ) = Order(
         id = id,
         userId = "user-1",
@@ -342,6 +389,7 @@ class CheckoutOrchestratorTest {
         seats = "1A,1B",
         travelDate = travelDate,
         totalAmount = BigDecimal("100.00"),
+        currency = currency,
         createdAt = LocalDateTime.now(),
         paymentMethodToken = token,
         recipientEmail = "alice@example.com",
@@ -520,8 +568,8 @@ class CheckoutOrchestratorTest {
             recipientEmail = "alice@example.com",
         )
 
-        // Recorded as claimed, not resolved: the refund needs to know which offer was sold, and
-        // nothing validates it against Catalog yet (issue #93).
+        // The refund needs to know which offer was sold. Since #93 this id is also resolved against
+        // Catalog, which is what the price, currency and refund-terms cases below cover.
         assertEquals("of-001", service.ordersById.values.single().offerId)
     }
 
@@ -592,6 +640,203 @@ class CheckoutOrchestratorTest {
 
         assertEquals(firstOrderId, replay.orderId)
         assertEquals(1, service.savedOrderStatuses.size)
+    }
+
+    // --- offer resolution and the price of the sale (#93) -----------------------------------------
+
+    /** The amount every request in this file asks for, and the price [OFFER] is seeded at. */
+    private fun offerRequest(
+        routeId: String = "R1",
+        totalAmount: BigDecimal = BigDecimal("100.00"),
+        offerId: String? = "of-001",
+    ) = CheckoutRequest(
+        routeId = routeId,
+        seats = listOf("1A"),
+        travelDate = TRAVEL_DATE,
+        totalAmount = totalAmount,
+        paymentMethodToken = "test-token",
+        offerId = offerId,
+    )
+
+    @Test
+    fun `an amount that disagrees with the offer is rejected before anything is persisted`() = runTest {
+        // Issue #93: `totalAmount` used to arrive from the browser and be validated against nothing,
+        // so a checkout submitted with 0.01 was authorized for one cent and confirmed as a sale.
+        val service = FakeOrderService()
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service).checkout(
+                offerRequest(totalAmount = BigDecimal("0.01")),
+                "key-cheap",
+                "user-1",
+                "alice@example.com",
+            )
+        }
+
+        assertEquals("OFFER_PRICE_MISMATCH", ex.code)
+        assertEquals(HttpStatus.BAD_REQUEST, ex.status)
+        // Rejected, never silently corrected to the real price: charging an amount other than the
+        // one the customer was shown is its own bug. And nothing was written.
+        assertTrue(service.ordersById.isEmpty())
+        assertTrue(service.idempotencyStore.isEmpty())
+    }
+
+    @Test
+    fun `the price that is persisted is the resolved one, not the one the client sent`() = runTest {
+        val service = FakeOrderService()
+
+        // Equal in value, different in scale. compareTo accepts it — rejecting a correct amount over
+        // a trailing zero would be a bug — and what lands on the order is still Catalog's number.
+        orchestratorFor(service).checkout(
+            offerRequest(totalAmount = BigDecimal("100.0")),
+            "key-scale",
+            "user-1",
+            "alice@example.com",
+        )
+
+        val stored = service.ordersById.values.single().totalAmount
+        assertEquals(0, BigDecimal("100.00").compareTo(stored))
+        assertEquals("100.00", stored.toPlainString(), "the request's number was persisted, not Catalog's")
+    }
+
+    @Test
+    fun `an offer Catalog does not know is a 400, not a silent acceptance`() = runTest {
+        val service = FakeOrderService()
+        val catalog = StubCatalogClient(outcome = OfferOutcome.NotFound)
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service, catalog = catalog).checkout(
+                offerRequest(), "key-unknown-offer", "user-1", "alice@example.com",
+            )
+        }
+
+        assertEquals("OFFER_NOT_FOUND", ex.code)
+        assertTrue(service.ordersById.isEmpty())
+    }
+
+    @Test
+    fun `an offer sold on a different route is rejected`() = runTest {
+        // Reachable from a client that keeps the chosen offer across a route change. Left unchecked,
+        // the seats would be held on one route and the refund terms taken from another route's offer.
+        val service = FakeOrderService()
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service).checkout(
+                offerRequest(routeId = "R2"), "key-wrong-route", "user-1", "alice@example.com",
+            )
+        }
+
+        assertEquals("OFFER_ROUTE_MISMATCH", ex.code)
+        assertTrue(service.ordersById.isEmpty())
+    }
+
+    @Test
+    fun `an unreachable Catalog fails the checkout closed rather than trusting the amount`() = runTest {
+        // The deliberate availability trade: while Catalog is down, checkouts carrying an offer are
+        // refused. The alternative — accepting the client's amount when the check cannot be made —
+        // reopens #93 at exactly the moment nobody is watching.
+        val service = FakeOrderService()
+        val catalog = StubCatalogClient(failWith = TimeoutException("catalog is down"))
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service, catalog = catalog).checkout(
+                offerRequest(), "key-catalog-down", "user-1", "alice@example.com",
+            )
+        }
+
+        // 503 and not 400: the customer's request is fine, so the answer is "ask again", not
+        // "you are wrong". Nothing was persisted, so the retry is a clean first attempt.
+        assertEquals("OFFER_UNRESOLVABLE", ex.code)
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, ex.status)
+        assertTrue(service.ordersById.isEmpty())
+    }
+
+    @Test
+    fun `the currency comes from the offer rather than from a literal`() = runTest {
+        // Latent today — every seeded offer is EUR — and not latent for long: two seeded routes are
+        // cross-border, and the first CHF offer would have been authorized as the same number of
+        // euros, because the amount and its unit came from two different places.
+        val service = FakeOrderService()
+        val catalog = StubCatalogClient(outcome = OfferOutcome.Found(OFFER.copy(currency = "CHF")))
+
+        orchestratorFor(service, catalog = catalog).checkout(
+            offerRequest(), "key-chf", "user-1", "alice@example.com",
+        )
+
+        assertEquals("CHF", service.ordersById.values.single().currency)
+    }
+
+    @Test
+    fun `the refund terms and the departure instant are frozen onto the order`() = runTest {
+        val service = FakeOrderService()
+
+        orchestratorFor(service).checkout(offerRequest(), "key-terms", "user-1", "alice@example.com")
+
+        val order = service.ordersById.values.single()
+        // The rule itself, not only the version: Catalog resolves offers from a flat list of current
+        // ones and keeps no history, so a version marker alone would point at terms that may since
+        // have been edited (ADR-015, corrected).
+        assertEquals(true, order.refundable)
+        assertEquals(60, order.refundCutoffMinutesBeforeDeparture)
+        assertEquals(3, order.offerTermsVersion)
+        // And the cutoff has a moment to count back from. A date plus a zone-less local time is not
+        // one; this is composed once here so the refund path does no zone arithmetic at all.
+        assertEquals(
+            TRAVEL_DATE.atTime(LocalTime.of(7, 0)).atZone(ZoneId.of("Europe/Rome")).toInstant(),
+            order.departureAt?.toInstant(),
+        )
+    }
+
+    @Test
+    fun `a checkout without an offer resolves nothing and is priced as the client asked`() = runTest {
+        val service = FakeOrderService()
+        val catalog = StubCatalogClient()
+
+        orchestratorFor(service, catalog = catalog).checkout(
+            offerRequest(offerId = null), "key-offerless", "user-1", "alice@example.com",
+        )
+
+        // Catalog is not consulted at all, so an offer-less checkout keeps working while Catalog is
+        // down — and its amount stays unvalidated, which is the part of #93 only the SPA can close.
+        assertTrue(catalog.lookedUp.isEmpty())
+        val order = service.ordersById.values.single()
+        assertEquals(BigDecimal("100.00"), order.totalAmount)
+        assertEquals("EUR", order.currency)
+        assertNull(order.refundable)
+        assertNull(order.departureAt)
+    }
+
+    @Test
+    fun `a replay returns the stored result without resolving the offer again`() = runTest {
+        val service = FakeOrderService()
+        val catalog = StubCatalogClient()
+        val orchestrator = orchestratorFor(service, catalog = catalog)
+        val first = orchestrator.checkout(offerRequest(), "key-replay", "user-1", "alice@example.com")
+
+        // Resolution sits after the idempotency check on purpose: re-resolving would make an already
+        // accepted order unreplayable the moment Catalog went down or its price changed.
+        catalog.failWith = TimeoutException("catalog went down after the order was accepted")
+        val replay = orchestrator.checkout(offerRequest(), "key-replay", "user-1", "alice@example.com")
+
+        assertEquals(first.orderId, replay.orderId)
+        assertEquals(1, catalog.lookedUp.size)
+    }
+
+    @Test
+    fun `the authorization charges the amount and currency stored on the order`() = runTest {
+        // The actual fix for #93 as Payments sees it. Read off the row rather than re-resolved: the
+        // pipeline is asynchronous and may resume much later, so a catalogue edit — or Catalog being
+        // down — must not change what an accepted order authorizes.
+        val service = FakeOrderService()
+        val payment = StubPaymentClient()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = order(orderId, currency = "CHF")
+
+        orchestratorFor(service, payment = payment).processOrderPlaced(event(orderId))
+
+        val authorized = payment.authorizeRequests.single()
+        assertEquals(BigDecimal("100.00"), authorized.amount)
+        assertEquals("CHF", authorized.currency)
     }
 
     // --- happy path and phase order ---------------------------------------------------------------

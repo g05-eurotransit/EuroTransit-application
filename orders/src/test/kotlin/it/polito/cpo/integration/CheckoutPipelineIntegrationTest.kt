@@ -2,12 +2,16 @@ package it.polito.cpo.integration
 
 import io.micrometer.core.instrument.MeterRegistry
 import it.polito.cpo.client.AuthorizationOutcome
+import it.polito.cpo.client.CatalogClient
 import it.polito.cpo.client.ConfirmReservationOutcome
 import it.polito.cpo.client.HoldOutcome
 import it.polito.cpo.client.InventoryClient
 import it.polito.cpo.client.InventoryRefusalCode
+import it.polito.cpo.client.OfferOutcome
 import it.polito.cpo.client.PaymentClient
+import it.polito.cpo.client.ResolvedOffer
 import it.polito.cpo.client.ReversalOutcome
+import it.polito.cpo.contracts.catalog.RefundPolicy
 import it.polito.cpo.contracts.events.OrderPlacedEvent
 import it.polito.cpo.contracts.payments.PaymentRequest
 import it.polito.cpo.contracts.inventory.ReservationRequest
@@ -52,7 +56,9 @@ import java.io.IOException
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.LocalTime
 import java.time.OffsetDateTime
+import java.time.ZoneId
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -95,6 +101,18 @@ class CheckoutPipelineIntegrationTest {
         /** A stable future date: the checkout guard rejects anything in the past. */
         val TRAVEL_DATE: LocalDate = LocalDate.now().plusDays(7)
 
+        /** Priced at the 100.00 every request here asks for, and refundable so the terms are visible. */
+        val OFFER = ResolvedOffer(
+            offerId = "of-001",
+            routeId = "R1",
+            price = BigDecimal("100.00"),
+            currency = "EUR",
+            refundPolicy = RefundPolicy(refundable = true, cutoffMinutesBeforeDeparture = 60),
+            termsVersion = 2,
+            departureTime = LocalTime.of(7, 0),
+            departureZone = ZoneId.of("Europe/Rome"),
+        )
+
         @Container
         @JvmStatic
         val postgres: PostgreSQLContainer<*> = PostgreSQLContainer("postgres:16-alpine")
@@ -119,6 +137,7 @@ class CheckoutPipelineIntegrationTest {
     @Autowired private lateinit var kafkaTemplate: KafkaTemplate<String, String>
     @Autowired private lateinit var inventory: ControllableInventoryClient
     @Autowired private lateinit var payment: ControllablePaymentClient
+    @Autowired private lateinit var catalog: ControllableCatalogClient
     @Autowired private lateinit var reconciliationRepository: ReconciliationRecordRepository
     @Autowired private lateinit var databaseClient: DatabaseClient
     @Autowired private lateinit var meterRegistry: MeterRegistry
@@ -136,6 +155,87 @@ class CheckoutPipelineIntegrationTest {
         assertEquals(OrderStatus.CONFIRMED, order.status)
         assertTrue(payment.authorizedOrderIds.contains(response.orderId))
         assertFalse(inventory.releasedReservationIds.contains("res-${response.orderId}")) // no compensation
+    }
+
+    @Test
+    fun `an offer checkout authorizes the resolved price and freezes its terms on the row`() = runBlocking {
+        // Issue #93 end to end, through the real schema: the amount Payments is asked to authorize
+        // has to be the one Catalog priced, not the one the browser sent, and the refund terms have
+        // to be on the committed row where the refund can read them without calling Catalog.
+        val response = orchestrator.checkout(
+            // Same value, looser scale — a client is not required to send trailing zeros.
+            request(totalAmount = BigDecimal("100.0"), offerId = OFFER.offerId),
+            "it-offer-${UUID.randomUUID()}",
+            "user-1",
+            "user-1@example.com",
+        )
+        relayOrderPlaced(response.orderId)
+        val order = awaitTerminal(response.orderId)
+        assertEquals(OrderStatus.CONFIRMED, order.status)
+
+        val authorized = payment.authorizeRequests.single { it.orderId == response.orderId }
+        assertEquals(0, BigDecimal("100.00").compareTo(authorized.amount))
+        assertEquals("EUR", authorized.currency)
+
+        // And the sale's terms survived the round-trip through V14.
+        assertEquals(OFFER.offerId, order.offerId)
+        assertEquals(true, order.refundable)
+        assertEquals(60, order.refundCutoffMinutesBeforeDeparture)
+        assertEquals(2, order.offerTermsVersion)
+        assertEquals(
+            TRAVEL_DATE.atTime(LocalTime.of(7, 0)).atZone(ZoneId.of("Europe/Rome")).toInstant(),
+            order.departureAt!!.toInstant(),
+        )
+    }
+
+    @Test
+    fun `a checkout priced below the offer never becomes an order`() = runBlocking {
+        // The bug as it was reachable before this: one cent, authorized and confirmed as a sale.
+        // The rejection has to happen in the synchronous entry, so nothing is persisted and the
+        // customer can correct it — a FAILED order found minutes later is not correctable.
+        val key = "it-underpriced-${UUID.randomUUID()}"
+
+        val ex = assertFailsWith<ApiException> {
+            orchestrator.checkout(
+                request(totalAmount = BigDecimal("0.01"), offerId = OFFER.offerId),
+                key,
+                "user-1",
+                "user-1@example.com",
+            )
+        }
+
+        assertEquals("OFFER_PRICE_MISMATCH", ex.code)
+        assertTrue(
+            outboxRepository.findAll().toList().none { it.payload.asString().contains(key) },
+            "a rejected checkout must leave no outbox row",
+        )
+    }
+
+    @Test
+    fun `an unreachable Catalog stops new offer checkouts and leaves offer-less ones working`() = runBlocking {
+        catalog.failWith = IOException("catalog is down")
+        try {
+            val ex = assertFailsWith<ApiException> {
+                orchestrator.checkout(
+                    request(offerId = OFFER.offerId),
+                    "it-catalog-down-${UUID.randomUUID()}",
+                    "user-1",
+                    "user-1@example.com",
+                )
+            }
+            // Fail closed, and say which kind of failure it is: 503 means "ask again", where a 400
+            // would have blamed a request that was perfectly correct.
+            assertEquals("OFFER_UNRESOLVABLE", ex.code)
+
+            // The stated cost of that trade, and its stated limit: a checkout with no offer never
+            // touches Catalog, so it is unaffected.
+            val accepted = orchestrator.checkout(
+                request(), "it-catalog-down-offerless-${UUID.randomUUID()}", "user-1", "user-1@example.com",
+            )
+            assertEquals(OrderStatus.ACCEPTED, accepted.status)
+        } finally {
+            catalog.failWith = null
+        }
     }
 
     @Test
@@ -565,12 +665,15 @@ class CheckoutPipelineIntegrationTest {
         token: String = "tok-123",
         travelDate: LocalDate = TRAVEL_DATE,
         seats: List<String> = listOf("1A", "1B"),
+        totalAmount: BigDecimal = BigDecimal("100.00"),
+        offerId: String? = null,
     ) = CheckoutRequest(
         routeId = "R1",
         seats = seats,
         travelDate = travelDate,
-        totalAmount = BigDecimal("100.00"),
+        totalAmount = totalAmount,
         paymentMethodToken = token,
+        offerId = offerId,
     )
 
     // Stands in for Debezium: reads the committed order-placed outbox row(s) for this order and
@@ -761,8 +864,29 @@ class CheckoutPipelineIntegrationTest {
         }
     }
 
+    /**
+     * Catalog stand-in seeded with one offer. Not a mock of a money-path collaborator like the other
+     * two — it is what makes the amount trustworthy — so it answers the real shape and lets a test
+     * take the offer away ([knownOffers]) or break the service ([failWith]) on purpose.
+     */
+    class ControllableCatalogClient : CatalogClient {
+        val knownOffers = ConcurrentHashMap<String, ResolvedOffer>().apply { put(OFFER.offerId, OFFER) }
+        val lookedUp = CopyOnWriteArrayList<String>()
+
+        @Volatile
+        var failWith: Throwable? = null
+
+        override suspend fun getOffer(offerId: String): OfferOutcome {
+            lookedUp.add(offerId)
+            failWith?.let { throw it }
+            return knownOffers[offerId]?.let { OfferOutcome.Found(it) } ?: OfferOutcome.NotFound
+        }
+    }
+
     class ControllablePaymentClient : PaymentClient {
         val authorizedOrderIds = CopyOnWriteArrayList<UUID>()
+        /** The full requests, so what actually reaches Payments — amount and currency — is assertable. */
+        val authorizeRequests = CopyOnWriteArrayList<PaymentRequest>()
         val refundedOrderIds = CopyOnWriteArrayList<UUID>()
 
         /** orderId -> answer the reversal with a definitive failure instead of success. */
@@ -777,6 +901,7 @@ class CheckoutPipelineIntegrationTest {
                 return AuthorizationOutcome.Declined("DECLINED")
             }
             authorizedOrderIds.add(request.orderId)
+            authorizeRequests.add(request)
             return AuthorizationOutcome.Authorized("test-ref")
         }
 
@@ -795,6 +920,8 @@ class CheckoutPipelineIntegrationTest {
         @Bean @Primary fun inventoryDouble() = ControllableInventoryClient()
 
         @Bean @Primary fun paymentDouble() = ControllablePaymentClient()
+
+        @Bean @Primary fun catalogDouble() = ControllableCatalogClient()
 
         // No real Keycloak in the test: back off the network-fetching decoder. It is never invoked
         // because these tests drive the orchestrator directly rather than over HTTP.

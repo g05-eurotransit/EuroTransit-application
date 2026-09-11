@@ -13,6 +13,7 @@ import it.polito.cpo.security.SecurityConfig
 import it.polito.cpo.service.CheckoutOrchestrator
 import it.polito.cpo.service.OrderService
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.TestConfiguration
@@ -56,6 +57,7 @@ class OrderControllerOwnershipTest @Autowired constructor(
             seats = "1A",
             travelDate = travelDate,
             totalAmount = BigDecimal.TEN,
+            currency = "EUR",
             createdAt = LocalDateTime.now(),
         ).apply { setAsNew(false) }
     }
@@ -124,6 +126,11 @@ class OrderControllerOwnershipTest @Autowired constructor(
         createdAt: LocalDateTime,
         status: OrderStatus = OrderStatus.CONFIRMED,
         offerId: String? = null,
+        currency: String = "EUR",
+        refundable: Boolean? = null,
+        refundCutoffMinutesBeforeDeparture: Int? = null,
+        offerTermsVersion: Int? = null,
+        departureAt: OffsetDateTime? = null,
     ) =
         Order(
             id = UUID.randomUUID(),
@@ -133,8 +140,13 @@ class OrderControllerOwnershipTest @Autowired constructor(
             seats = "1A",
             travelDate = travelDate,
             totalAmount = BigDecimal.TEN,
+            currency = currency,
             createdAt = createdAt,
             offerId = offerId,
+            refundable = refundable,
+            refundCutoffMinutesBeforeDeparture = refundCutoffMinutesBeforeDeparture,
+            offerTermsVersion = offerTermsVersion,
+            departureAt = departureAt,
         ).apply { setAsNew(false) }
 
     @Test
@@ -344,6 +356,73 @@ class OrderControllerOwnershipTest @Autowired constructor(
             .jsonPath("$.offerId").doesNotExist()
     }
 
+    // --- what the order was sold under ------------------------------------------------------------
+
+    @Test
+    fun `the order view carries the currency beside the amount`() {
+        // An amount without its unit is the bug this change removes one layer down: the authorization
+        // used to pair a client-supplied number with a hardcoded "EUR". Showing the same pair in the
+        // UI without the currency would put it straight back.
+        orderService.next = order("user-owner", LocalDateTime.now(), currency = "CHF")
+
+        webTestClient.get().uri("/api/orders/$orderId")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isOk
+            .expectBody()
+            .jsonPath("$.currency").isEqualTo("CHF")
+    }
+
+    @Test
+    fun `the order view exposes the refund terms the order was sold under`() {
+        val departure = OffsetDateTime.parse("2026-10-01T07:00:00+02:00")
+        orderService.next = order(
+            "user-owner",
+            LocalDateTime.now(),
+            offerId = "of-002",
+            refundable = true,
+            refundCutoffMinutesBeforeDeparture = 5,
+            offerTermsVersion = 1,
+            departureAt = departure,
+        )
+
+        val body = webTestClient.get().uri("/api/orders/$orderId")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isOk
+            .expectBody()
+            .jsonPath("$.refundable").isEqualTo(true)
+            .jsonPath("$.refundCutoffMinutesBeforeDeparture").isEqualTo(5)
+            // The version marker is an audit field, not a client one: a SPA holding it might use it
+            // as a key into a catalogue that no longer has that revision.
+            .jsonPath("$.offerTermsVersion").doesNotExist()
+            .jsonPath("$.termsVersion").doesNotExist()
+            .returnResult()
+
+        // The departure instant keeps its offset through serialization, like reservationExpiresAt:
+        // it is what the cutoff counts back from, and reinterpreting it in the browser's own zone
+        // would move the refund deadline by the offset.
+        val json = String(body.responseBody!!)
+        val serialized = Regex("\"departureAt\":\"([^\"]+)\"").find(json)!!.groupValues[1]
+        assertEquals(departure.toInstant(), OffsetDateTime.parse(serialized).toInstant())
+    }
+
+    @Test
+    fun `an order bought without an offer carries no refund terms at all`() {
+        // It has none, and the refund endpoint refuses it (ADR-015). Reporting `refundable: false`
+        // instead would say Catalog decided that, which nobody did.
+        seedOwnedBy("user-owner")
+
+        webTestClient.get().uri("/api/orders/$orderId")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isOk
+            .expectBody()
+            .jsonPath("$.refundable").doesNotExist()
+            .jsonPath("$.refundCutoffMinutesBeforeDeparture").doesNotExist()
+            .jsonPath("$.departureAt").doesNotExist()
+    }
+
     // ---------------------------------------------------------------------------------------------
     // GET /api/orders/seat-availability
     // ---------------------------------------------------------------------------------------------
@@ -404,6 +483,38 @@ class OrderControllerOwnershipTest @Autowired constructor(
         webTestClient.get().uri("/api/orders/seat-availability?routeId=R1&travelDate=$travelDate")
             .exchange()
             .expectStatus().isUnauthorized
+    }
+
+    @Test
+    fun `a travel date in the past is refused with the same code as checkout`() {
+        // Issue #98, first half. The façade used to forward a past date to Inventory unchallenged,
+        // so a customer could be shown a seat map for a train that left last week and be told only
+        // at checkout, which rejects the same date with this code.
+        inventoryReadClient.next = SeatAvailabilityOutcome.Found(listOf(SeatAvailability("1A", true)))
+        val past = LocalDate.now().minusDays(1)
+
+        webTestClient.get().uri("/api/orders/seat-availability?routeId=R1&travelDate=$past")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isBadRequest
+            .expectBody()
+            .jsonPath("$.code").isEqualTo("TRAVEL_DATE_IN_THE_PAST")
+
+        // And Inventory was never asked: the guard is in front of the call, not a filter on its answer.
+        assertNull(inventoryReadClient.lastTravelDate)
+    }
+
+    @Test
+    fun `today is still a valid travel date`() {
+        // The guard is `isBefore`, not `isAfter`: a run departing later today is bookable. Filtering
+        // out same-day runs that have *already departed* needs the departure instant per route and
+        // is the rest of #98.
+        inventoryReadClient.next = SeatAvailabilityOutcome.Found(listOf(SeatAvailability("1A", true)))
+
+        webTestClient.get().uri("/api/orders/seat-availability?routeId=R1&travelDate=${LocalDate.now()}")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isOk
     }
 
     @Test

@@ -12,16 +12,21 @@ data class CheckoutRequest(
     val seats: List<String>,
     /** The day being travelled. A route plus a seat is not a bookable thing on its own (issue #64). */
     val travelDate: LocalDate,
+    /** What the client displayed. Checked against the offer's price when [offerId] is present. */
     val totalAmount: BigDecimal,
     val paymentMethodToken: String,
     /**
      * Which offer is being bought. Needed by the post-sale refund (ADR-015), whose policy and cutoff
      * are properties of the offer that was sold.
      *
+     * **When present, it is resolved against Catalog and it decides the price.** The offer must
+     * exist, must be sold on [routeId], and its price must equal [totalAmount] — otherwise the
+     * checkout is rejected. [totalAmount] is therefore a consistency check on what the client
+     * displayed, not the amount that gets authorized; the offer's own price and currency are.
+     *
      * Optional for now: the SPA does not send it yet (issue #84), and requiring it here would reject
-     * every checkout until that lands. It is also **not validated** — nothing resolves it against
-     * Catalog or checks that its price matches [totalAmount] (issue #93) — so an order carrying it is
-     * refundable, not priced.
+     * every checkout until that lands. While it is absent, [totalAmount] is still authorized
+     * unvalidated, which is the part of issue #93 that only the SPA can close.
      */
     val offerId: String? = null,
 )
@@ -40,6 +45,11 @@ data class OrderView(
     /** Distinct from [createdAt]: the day of travel, not the day of purchase. */
     val travelDate: LocalDate,
     val totalAmount: BigDecimal,
+    /**
+     * The currency of [totalAmount]. Resolved from the offer, so an amount is never shown without
+     * the unit it was actually authorized in.
+     */
+    val currency: String,
     val createdAt: LocalDateTime,
     /**
      * When the Inventory seat hold expires, as an instant. Non-null once seats are held.
@@ -68,6 +78,26 @@ data class OrderView(
      * order with no offer has no refund terms and the refund endpoint will refuse it (ADR-015).
      */
     val offerId: String? = null,
+    /**
+     * The refund terms this order was sold under, frozen at checkout, so the SPA can decide whether
+     * to show a refund button at all and until when.
+     *
+     * All three are null together for an order placed without an offer, which has no refund terms.
+     * [refundCutoffMinutesBeforeDeparture] is null when [refundable] is false — there is no cutoff on
+     * a ticket that cannot be refunded — and null when it is refundable right up to departure.
+     *
+     * [departureAt] is the instant [refundCutoffMinutesBeforeDeparture] counts back from, already
+     * composed from the travel date and the departure station's zone, so a client never has to do
+     * that arithmetic. Eligibility is still decided server-side against the Orders database clock
+     * (ADR-015): these fields let the SPA render the right thing, not make the decision.
+     *
+     * `termsVersion` is deliberately **not** exposed. It is an audit marker for which revision of the
+     * rule was accepted, and a client that had it might use it as a key into a catalogue that no
+     * longer holds that revision.
+     */
+    val refundable: Boolean? = null,
+    val refundCutoffMinutesBeforeDeparture: Int? = null,
+    val departureAt: OffsetDateTime? = null,
 )
 
 /**

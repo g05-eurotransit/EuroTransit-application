@@ -169,6 +169,7 @@ class OrderHistoryQueryIntegrationTest {
                 seats = "A1",
                 travelDate = LocalDate.now().plusDays(3),
                 totalAmount = BigDecimal("10.00"),
+                currency = "EUR",
                 createdAt = createdAt,
                 recipientEmail = "$userId@example.com",
             ).apply { setAsNew(true) },
