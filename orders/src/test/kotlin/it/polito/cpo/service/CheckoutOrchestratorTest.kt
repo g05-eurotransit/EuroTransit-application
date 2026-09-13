@@ -752,6 +752,64 @@ class CheckoutOrchestratorTest {
     }
 
     @Test
+    fun `a malformed currency refuses the checkout instead of poisoning the pipeline`() = runTest {
+        // Payments validates the currency against ISO 4217 and answers 400, and only DECLINED is a
+        // definitive outcome on the Orders side — so an unusable currency would not fail the order,
+        // it would leave it in PAYMENT_PENDING holding a seat while the delivery retried to the
+        // dead-letter topic. Catching it here turns catalogue data into one rejected checkout.
+        val service = FakeOrderService()
+        val catalog = StubCatalogClient(outcome = OfferOutcome.Found(OFFER.copy(currency = "eur")))
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service, catalog = catalog).checkout(
+                offerRequest(), "key-bad-currency", "user-1", "alice@example.com",
+            )
+        }
+
+        assertEquals("OFFER_UNRESOLVABLE", ex.code)
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, ex.status)
+        assertTrue(service.ordersById.isEmpty())
+    }
+
+    @Test
+    fun `an offer priced at zero never reaches Payments`() = runTest {
+        // Payments rejects a non-positive amount the same way, with the same consequence. A free
+        // promotional offer is the plausible way this arrives, and refusing it loudly is the right
+        // answer until someone decides what buying one should mean.
+        val service = FakeOrderService()
+        val catalog = StubCatalogClient(outcome = OfferOutcome.Found(OFFER.copy(price = BigDecimal.ZERO)))
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service, catalog = catalog).checkout(
+                offerRequest(totalAmount = BigDecimal.ZERO), "key-zero-price", "user-1", "alice@example.com",
+            )
+        }
+
+        assertEquals("OFFER_UNRESOLVABLE", ex.code)
+        assertTrue(service.ordersById.isEmpty())
+    }
+
+    @Test
+    fun `an unusable offer is not reported as a price mismatch`() = runTest {
+        // The ordering of the two checks, which is the whole reason the guard sits where it does.
+        // Comparing a garbage price against the request would answer OFFER_PRICE_MISMATCH — a 400
+        // blaming the customer for a catalogue that is broken.
+        val service = FakeOrderService()
+        val catalog = StubCatalogClient(
+            outcome = OfferOutcome.Found(OFFER.copy(price = BigDecimal("-5.00"), currency = "CH")),
+        )
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service, catalog = catalog).checkout(
+                offerRequest(totalAmount = BigDecimal("100.00")), "key-garbage", "user-1", "alice@example.com",
+            )
+        }
+
+        assertEquals("OFFER_UNRESOLVABLE", ex.code)
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, ex.status)
+    }
+
+    @Test
     fun `the currency comes from the offer rather than from a literal`() = runTest {
         // Latent today — every seeded offer is EUR — and not latent for long: two seeded routes are
         // cross-border, and the first CHF offer would have been authorized as the same number of

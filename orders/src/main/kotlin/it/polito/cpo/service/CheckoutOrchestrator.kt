@@ -35,6 +35,7 @@ import org.springframework.http.HttpStatus
 import org.springframework.stereotype.Service
 import org.springframework.transaction.reactive.TransactionalOperator
 import org.springframework.transaction.reactive.executeAndAwait
+import java.math.BigDecimal
 import java.security.MessageDigest
 import java.time.Duration
 import java.time.LocalDate
@@ -93,6 +94,13 @@ class CheckoutOrchestrator(
          * every payment. It disappears when `offerId` becomes required (issue #84).
          */
         const val ASSUMED_CURRENCY = "EUR"
+
+        /**
+         * The shape Payments accepts, mirrored here so a malformed one is caught before it is
+         * persisted. Kept as a shape check and not a list of known codes: Orders has no business
+         * deciding which currencies exist.
+         */
+        val ISO_CURRENCY = Regex("^[A-Z]{3}$")
     }
 
     /** One delivery's working state. [reservationId] is seeded from the row, so a resume needs no lookup. */
@@ -257,6 +265,39 @@ class CheckoutOrchestrator(
                 "OFFER_NOT_FOUND",
                 "Offer $offerId does not exist",
                 mapOf("offerId" to offerId),
+            )
+        }
+
+        // Is this offer usable at all? Checked **before** the two comparisons below, and the order
+        // is the point: a garbage price compared against the request would come back as
+        // OFFER_PRICE_MISMATCH, a 400 blaming the customer for a broken catalogue.
+        //
+        // These two fields are checked and no others because these two leave Orders and enter
+        // fields Payments validates: `PaymentService` rejects a non-ISO-4217 currency and a
+        // non-positive amount with a 400, and `WebClientPaymentClient` treats only DECLINED as
+        // definitive — so that 400 becomes an *unknown* outcome. The order would sit in
+        // PAYMENT_PENDING holding a seat while the delivery is retried to the dead-letter topic: a
+        // poison message rather than a clean failure, and the poison would be catalogue data.
+        // Refusing here turns it into one rejected checkout.
+        //
+        // Unreachable today — the six seeded offers are compile-time constants — and the path is
+        // new: this used to be a literal "EUR" and a client-supplied number, so it could not be
+        // malformed, only wrong.
+        if (!ISO_CURRENCY.matches(offer.currency) || offer.price <= BigDecimal.ZERO) {
+            // Deliberately the same public code as an unreachable Catalog. To a caller both mean
+            // "no trustworthy offer could be obtained", and a fifth code added to an error model
+            // api-design.md calls frozen is not worth a case that needs someone to ship a malformed
+            // offer first. The two are told apart where an operator actually needs it: `error`
+            // rather than `warn`, and a different metric tag.
+            meterRegistry.counter("orders.checkout.rejected", "reason", "offer_malformed").increment()
+            logger.error(
+                "Catalog returned an unusable offer {}: price={} currency={}",
+                offerId, offer.price, offer.currency,
+            )
+            throw ApiException(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "OFFER_UNRESOLVABLE",
+                "The offer could not be verified right now. Please try again.",
             )
         }
 
