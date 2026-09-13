@@ -8,6 +8,7 @@ import it.polito.cpo.client.InventoryClient
 import it.polito.cpo.client.InventoryRefusalCode
 import it.polito.cpo.client.OfferOutcome
 import it.polito.cpo.client.PaymentClient
+import it.polito.cpo.client.RefundReservationOutcome
 import it.polito.cpo.client.ResolvedOffer
 import it.polito.cpo.client.ReversalOutcome
 import it.polito.cpo.contracts.catalog.RefundPolicy
@@ -306,11 +307,14 @@ class CheckoutOrchestratorTest {
             releasedReservationIds.add(reservationId)
             releaseKeys.add(idempotencyKey)
         }
+
+        override suspend fun refundReservation(reservationId: String, orderId: UUID): RefundReservationOutcome =
+            RefundReservationOutcome.Refunded(reservationId)
     }
 
     private class StubPaymentClient(
         private val authorize: () -> AuthorizationOutcome = { AuthorizationOutcome.Authorized("test-auth-id") },
-        private val reversal: () -> ReversalOutcome = { ReversalOutcome.Reversed },
+        private val reversal: () -> ReversalOutcome = { ReversalOutcome.Reversed(providerReference = "test-refund-ref") },
     ) : PaymentClient {
         val authorizeCalls = CopyOnWriteArrayList<UUID>()
         /** The full requests, so what is actually charged — amount and currency — can be asserted. */

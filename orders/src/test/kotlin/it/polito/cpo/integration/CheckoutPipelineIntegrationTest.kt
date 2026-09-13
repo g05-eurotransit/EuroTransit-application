@@ -9,6 +9,7 @@ import it.polito.cpo.client.InventoryClient
 import it.polito.cpo.client.InventoryRefusalCode
 import it.polito.cpo.client.OfferOutcome
 import it.polito.cpo.client.PaymentClient
+import it.polito.cpo.client.RefundReservationOutcome
 import it.polito.cpo.client.ResolvedOffer
 import it.polito.cpo.client.ReversalOutcome
 import it.polito.cpo.contracts.catalog.RefundPolicy
@@ -863,6 +864,17 @@ class CheckoutPipelineIntegrationTest {
         override suspend fun releaseSeats(reservationId: String, idempotencyKey: String) {
             releasedReservationIds.add(reservationId)
         }
+
+        val refundedReservationIds = CopyOnWriteArrayList<String>()
+
+        /** orderId -> a definitive refusal to answer the seat return with. */
+        val refuseRefundWith = ConcurrentHashMap<UUID, InventoryRefusalCode>()
+
+        override suspend fun refundReservation(reservationId: String, orderId: UUID): RefundReservationOutcome {
+            refuseRefundWith[orderId]?.let { return RefundReservationOutcome.Refused(it, "forced by test") }
+            refundedReservationIds.add(reservationId)
+            return RefundReservationOutcome.Refunded(reservationId)
+        }
     }
 
     /**
@@ -889,6 +901,9 @@ class CheckoutPipelineIntegrationTest {
         /** The full requests, so what actually reaches Payments — amount and currency — is assertable. */
         val authorizeRequests = CopyOnWriteArrayList<PaymentRequest>()
         val refundedOrderIds = CopyOnWriteArrayList<UUID>()
+        /** The idempotency keys `refund` was called with, so a test can tell compensation from a
+         * commercial refund apart (`refund-{orderId}` vs `pay-refund-{orderId}`). */
+        val refundIdempotencyKeys = CopyOnWriteArrayList<String>()
 
         /** orderId -> answer the reversal with a definitive failure instead of success. */
         val failReversalFor = ConcurrentHashMap.newKeySet<UUID>()
@@ -908,10 +923,11 @@ class CheckoutPipelineIntegrationTest {
 
         override suspend fun refund(orderId: UUID, idempotencyKey: String): ReversalOutcome {
             refundedOrderIds.add(orderId)
+            refundIdempotencyKeys.add(idempotencyKey)
             return if (orderId in failReversalFor) {
                 ReversalOutcome.Failed("FAILED", "forced by test")
             } else {
-                ReversalOutcome.Reversed
+                ReversalOutcome.Reversed(providerReference = "test-refund-ref")
             }
         }
     }

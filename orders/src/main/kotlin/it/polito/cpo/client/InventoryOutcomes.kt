@@ -28,6 +28,14 @@ enum class InventoryRefusalCode {
 
     /** Hold endpoint only: the key was reused with a different payload. */
     IDEMPOTENCY_CONFLICT,
+
+    /**
+     * Refund endpoint only: the reservation exists but is not CONFIRMED (and not already REFUNDED,
+     * which is not a refusal at all — see [RefundReservationOutcome.Refunded]). Reachable only if
+     * Orders and Inventory disagree about whether the sale ever completed, since Orders only ever
+     * calls the refund endpoint for an order it has itself moved out of CONFIRMED.
+     */
+    RESERVATION_NOT_CONFIRMED,
     ;
 
     /**
@@ -93,4 +101,30 @@ sealed interface HoldOutcome {
      * (doc:297).
      */
     data class Rejected(val code: InventoryRefusalCode, val detail: String?) : HoldOutcome
+}
+
+/**
+ * Result of the Inventory post-sale refund command (ADR-014's `CONFIRMED -> REFUNDED` reservation
+ * transition, called from `RefundOrchestrator` after the payment reversal has succeeded).
+ *
+ * As with [ConfirmReservationOutcome], an unknown outcome has no variant here and can only be thrown,
+ * so it propagates to the refund consumer, the offset is not committed, and it cannot be
+ * pattern-matched into "the seat return failed" (invariant 8's shape, applied to the refund).
+ */
+sealed interface RefundReservationOutcome {
+
+    /**
+     * Inventory has committed the reservation as REFUNDED. Returned both for the first successful
+     * call and for a replay of an already-REFUNDED reservation — this endpoint is idempotent by
+     * state and takes no `Idempotency-Key`, unlike reserve and release.
+     */
+    data class Refunded(val reservationId: String) : RefundReservationOutcome
+
+    /**
+     * A definitive refusal. By the time this is called the payment has already been reversed
+     * (ADR-015's money-first ordering), so the customer already has their money: this leads to a
+     * [it.polito.cpo.model.ReconciliationKind.SEAT_RETURN_FAILURE] record and the order stays
+     * REFUNDING, never a terminal failure.
+     */
+    data class Refused(val code: InventoryRefusalCode, val detail: String?) : RefundReservationOutcome
 }
