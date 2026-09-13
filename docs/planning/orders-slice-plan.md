@@ -4,7 +4,7 @@ Working plan for the Orders slice owner. It is deliberately incomplete: only the
 the next one are written in detail. **When a step is finished, write the following step here before
 starting it.** This keeps each step doable in a fresh session without reconstructing context.
 
-Last updated: 2026-09-11.
+Last updated: 2026-09-13.
 
 ## Decisions already taken
 
@@ -447,7 +447,7 @@ and an order carries the refund rule and departure instant it was sold under.
 
 ## Step 3 — outcome
 
-Branch `feature/orders-offer-resolution`. Full build green at **331 tests, 0 failures** (+29).
+Merged as `4b537cc` (PR #100), CI green. Full build green at **334 tests, 0 failures** (+32).
 
 **The offer is resolved, and it is what the customer is charged.** `CatalogClient` /
 `WebClientCatalogClient` on their own `catalog-read` breaker and bulkhead with no retry, called from
@@ -483,6 +483,20 @@ instead of quietly recording euros.
 `termsVersion` is deliberately **not** exposed: it is an audit marker, and a client holding it might
 use it as a key into a catalogue that no longer has that revision.
 
+**One guard added after the step was written, and the reason is worth keeping.** Resolving the
+offer made `currency` and `price` travel from Catalog into fields Payments validates —
+`PaymentService` refuses a non-ISO-4217 currency and a non-positive amount with a `400`, and
+`WebClientPaymentClient` treats only `DECLINED` as definitive. So that `400` would have become an
+*unknown* outcome: the order parked in `PAYMENT_PENDING` holding a seat while the delivery retried to
+the dead-letter topic. A poison message rather than a clean failure, and the poison would be
+catalogue data. `resolveOffer` now checks the shape of both fields **before** the route and price
+comparisons — the ordering matters, because a garbage price compared against the request would answer
+`OFFER_PRICE_MISMATCH`, a `400` blaming the customer for a broken catalogue. It reuses
+`OFFER_UNRESOLVABLE` rather than adding a fifth code to an error model `api-design.md` calls frozen;
+the two cases are told apart by log level and metric tag, which is where an operator needs it.
+Unreachable today — the six seeded offers are compile-time constants — but the *path* is new, and it
+did not exist while the line was a literal `"EUR"`.
+
 **#98's economic half is in**, as planned: the façade now refuses a past `travelDate` with
 `TRAVEL_DATE_IN_THE_PAST`, the same code checkout uses, in front of the Inventory call rather than as
 a filter on its answer. Same-day departed runs are the rest of that issue, and the Catalog client
@@ -499,16 +513,27 @@ an absence, and an absence can only be reviewed by asserting it.
 **Deployment consequence, handled across both repositories.** Orders now reads
 `eurotransit.services.catalog.url`. `application.yaml` and `docker-compose.yml` carry it, and
 `EuroTransit-configuration` gained `EUROTRANSIT_SERVICES_CATALOG_URL` on the orders deployment with
-`orders.services.catalogUrl` in `values.yaml` — committed there as `5704120` on
-`feature/orders-money-path-hardening`, unpushed. Without it, in-cluster Orders falls back to
+`orders.services.catalogUrl` in `values.yaml` — merged there as `f54b04a` (configuration PR #33).
+Without it, in-cluster Orders falls back to
 `http://localhost:8081` and answers `503 OFFER_UNRESOLVABLE` to every offer checkout: harmless while
 the SPA sends no `offerId`, and an outage on the day #84 lands, which is why it goes in before that
 rather than with it. No NetworkPolicy change was needed — `allow-same-namespace` already permits
 pod-to-pod ingress, and catalog's Service is the usual ClusterIP on 8080.
 
+**Integrated, not deployed.** Both `ci.yml` and `docker-gitops.yml` trigger on a push to `main`, so
+merging to `dev` builds no image and updates no GitOps tag. This reaches a cluster only when `dev` is
+promoted to `main`; as of 2026-09-13 `dev` is 51 commits ahead of `main` and `main` 2 ahead of `dev`.
+Configuration PR #33 is already on that repository's `main`, which is harmless in exactly the way the
+PR described: the extra environment variable on an image that predates the change is ignored.
+
 **Not done here, deliberately:** `offerId` is still optional, so #93 is closed for every checkout
 that carries an offer and open for every checkout that does not. That flip is the one-line follow-up
 below, gated on #84 and not on anything in this step.
+
+**#93 and #98 were deliberately left open, each with a comment recording what landed and what
+remains.** Neither is honestly closeable: #93 is unfixed for the traffic the system actually serves,
+because the SPA sends no `offerId` yet; and #98's main ask — the same-day departed run — needs the
+departure instant per route, which this step makes reachable but does not implement.
 
 ### The follow-up that closes #93 completely (one line, gated on #84)
 
