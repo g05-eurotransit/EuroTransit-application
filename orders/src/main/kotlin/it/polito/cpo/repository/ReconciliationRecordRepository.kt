@@ -57,7 +57,12 @@ interface ReconciliationRecordRepository : CoroutineCrudRepository<Reconciliatio
      *
      * INVARIANT_VIOLATION is excluded on purpose: the order failing does not explain how the
      * impossible state arose, so it needs an operator. PAYMENT_REVERSAL_FAILURE is included because
-     * Orders only ever reaches a terminal state after the reversal succeeded.
+     * Orders only ever reaches a terminal state after the reversal succeeded. SEAT_RETURN_FAILURE is
+     * included for the same reason: REFUNDED is only ever committed after the seat return succeeded
+     * (RefundOrchestrator), so reaching it here means a previously-stuck seat return has since been
+     * resolved — by a redelivery, or by an operator retrying it. `REFUNDING` is not itself a
+     * "terminal transition" in the money sense, so this call must run from the REFUNDING -> REFUNDED
+     * commit specifically, not from entering REFUNDING.
      */
     @Modifying
     @Query(
@@ -66,7 +71,7 @@ interface ReconciliationRecordRepository : CoroutineCrudRepository<Reconciliatio
            SET status = 'RESOLVED', resolved_at = CURRENT_TIMESTAMP,
                resolved_by = 'system:terminal-state', updated_at = CURRENT_TIMESTAMP
          WHERE order_id = :orderId AND status = 'OPEN'
-           AND kind IN ('DELIVERY_EXHAUSTED', 'PAYMENT_REVERSAL_FAILURE')
+           AND kind IN ('DELIVERY_EXHAUSTED', 'PAYMENT_REVERSAL_FAILURE', 'SEAT_RETURN_FAILURE')
         """,
     )
     suspend fun closeAutoResolvable(orderId: UUID): Long

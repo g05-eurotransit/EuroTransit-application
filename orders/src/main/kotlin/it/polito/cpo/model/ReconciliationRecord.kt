@@ -50,9 +50,18 @@ enum class ReconciliationKind {
 
     /**
      * A provider reversal returned a definitive failure or repeatedly remained unknown. Stays open
-     * with the order in COMPENSATING — money is unresolved, so the order must not read as finished.
+     * with the order in COMPENSATING (checkout compensation) or REFUNDING (a post-sale refund) —
+     * money is unresolved either way, so the order must not read as finished.
      */
     PAYMENT_REVERSAL_FAILURE,
+
+    /**
+     * A post-sale refund (ADR-015) reversed the money but Inventory definitively refused to return
+     * the seat. Stays open with the order in REFUNDING: the customer already has their money, and one
+     * resaleable seat is withheld until an operator looks. There is no checkout-side counterpart —
+     * the checkout pipeline releases a hold, it never asks Inventory to un-sell one.
+     */
+    SEAT_RETURN_FAILURE,
 }
 
 enum class ReconciliationStatus { OPEN, RESOLVED }

@@ -81,6 +81,32 @@ class ReconciliationService(
     }
 
     /**
+     * Records that a post-sale refund's seat return definitively failed after its payment reversal
+     * had already succeeded (ADR-015). Self-transacting, like [recordPaymentReversalFailure]: it is
+     * not paired with a state change, since the order is left exactly where it is, in REFUNDING.
+     */
+    suspend fun recordSeatReturnFailure(
+        orderId: UUID,
+        orderState: String,
+        correlationId: String,
+        failureClass: String,
+        detail: String?,
+    ): ReconciliationRecord {
+        val record = txOperator.executeAndAwait {
+            upsert(
+                orderId = orderId,
+                kind = ReconciliationKind.SEAT_RETURN_FAILURE,
+                orderState = orderState,
+                correlationId = correlationId,
+                failureClass = failureClass,
+                detail = detail,
+            )
+        }!!
+        countRequired(record)
+        return record
+    }
+
+    /**
      * Records that automatic redelivery gave up on an event. Self-transacting, and it deliberately
      * leaves the durable checkout phase untouched: the phase is what tells a later redrive where to
      * resume from, so an incident report must not disturb it.
