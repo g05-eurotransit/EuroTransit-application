@@ -552,73 +552,142 @@ key stored in the previous 24 hours.
 
 ## Step 4 — The refund: state machine, endpoint, and durable reversal
 
-The last part of the refund, and the first one that moves money backwards. Everything it needs now
-exists: ADR-015 has the decisions, `V13`/`V14` have the offer and its frozen terms, and Inventory's
-post-sale transition is already live — `POST /api/inventory/reservations/{reservationId}/refund`
-taking `{orderId}`, verified in `ReservationService:255`, so this step is blocked on nobody.
+The last part of the refund, and the first that moves money backwards. ADR-015 has the decisions,
+`V13`/`V14` have the offer and its frozen terms, and Inventory's post-sale transition is already
+live. Blocked by nobody.
 
-**Check first, because it is cheap and it decides the shape of 4a.** `markConfirmed` clears
-`payment_method_token` but **keeps** `reservation_id` (`OrderRepository:84`), and `PaymentClient.refund`
-takes `(orderId, idempotencyKey)` rather than a token. So a confirmed order already carries
-everything the reversal and the seat return need, and no new column is required for either.
+This step is written to be handed to someone — or something — that did not take the decisions. Hence
+the two sections before the content: what to check before writing a line, and what may and may not
+be re-decided while writing.
 
-### 4a — The states, and the trap in `isTerminal`
+### Verified before writing — facts, not assumptions
 
-`CONFIRMED -> REFUNDING -> REFUNDED`, with no `REFUND_FAILED` (ADR-015). Two things follow that are
-easy to get wrong and expensive to discover:
+Each of these was read in the code on 2026-09-13. They are here so the implementation does not
+re-derive them, and so a wrong one is caught as a contradiction rather than absorbed as a surprise.
 
-- **`OrderStatus.isTerminal` is about to mean two different things.** Today it answers one question —
-  "may the `order-placed` consumer acknowledge without a remote call?" — and both new states must
-  answer *yes* to it, or a redelivered checkout event would restart a refunded sale. But the refund's
-  own consumer needs the opposite answer for `REFUNDING`, which is precisely a state it must resume.
-  Do not overload the property: give the refund its own predicate and leave `isTerminal` meaning what
-  the checkout pipeline already relies on, with a comment on each saying which consumer it serves.
-- **`runStage`'s `when` is exhaustive over `OrderStatus`**, so adding the two states will not compile
-  until each has an arm. That is the forcing function ADR-015 counts on — the right arm is the
-  `error("unreachable: terminal states are filtered by the loop")` branch, not a new stage.
+- **Inventory's endpoint exists and is not the shape the other two are.**
+  `POST /api/inventory/reservations/{reservationId}/refund`, body `{orderId}`, returns
+  `ReservationResponse` (`ReservationController:62`, `ReservationService:255`). It is idempotent **by
+  state**: an already-`REFUNDED` reservation returns the same response instead of erroring
+  (`ReservationService:269`), and it takes **no `Idempotency-Key` header**, unlike reserve and
+  release. Do not invent one for it.
+- **A confirmed order already carries everything the reversal needs.** `markConfirmed` clears
+  `payment_method_token` but **keeps** `reservation_id` (`OrderRepository:84-90`), and
+  `PaymentClient.refund(orderId, idempotencyKey)` takes no token. **No new column is needed for
+  either call** — `V15` is only for the refund's own bookkeeping.
+- **`OrderStatus.isTerminal` has five call sites and they do not all ask the same question.**
+  `CheckoutOrchestrator:378` (may the `order-placed` consumer acknowledge without a remote call?) and
+  `:398` (should the pipeline loop stop?), `ReconciliationOperationsService:68` and `:151`,
+  `OrderPlacedDeadLetterListener:79`. **Read all five before touching it.** Both new states must
+  answer *yes* to the checkout consumer, or a redelivered `order-placed` restarts a refunded sale —
+  while the refund's own consumer needs the opposite answer for `REFUNDING`, which is exactly a state
+  it must resume. Give the refund its own predicate; do not overload this one.
+- **`runStage`'s `when` is exhaustive over `OrderStatus`**, so the new states will not compile until
+  each has an arm. That is the forcing function, and the correct arm is the existing
+  `error("unreachable: terminal states are filtered by the loop")` branch — not a new stage.
+- **`ReconciliationKind` has three values today** — `DELIVERY_EXHAUSTED`, `INVARIANT_VIOLATION`,
+  `PAYMENT_REVERSAL_FAILURE` (`ReconciliationRecord.kt:40`). `SEAT_RETURN_FAILURE` is new.
+- **The database clock is read as `CURRENT_TIMESTAMP` in SQL**, as `ReconciliationRecordRepository`
+  does throughout. Read the comment at `OrderRepository:178` first: it warns that comparing a plain
+  `TIMESTAMP` against `CURRENT_TIMESTAMP` silently offsets by the session time zone. `departure_at`
+  is `TIMESTAMPTZ` precisely so this comparison is safe — do not undo that by pulling the value into
+  the JVM to compare it there.
+- **A new outbox event type needs no connector change, but does need a topic.** Debezium routes by
+  the `type` column (`route.by.field: type`, `route.topic.replacement: ${routedByValue}` in
+  `platform/connectors/base/orders-outbox-connect.yaml`), so a new type lands on a topic of the same
+  name automatically. But `auto.create.topics.enable: "false"`
+  (`platform/strimzi/kafka-cluster.yaml:37`) and every topic is declared by hand in
+  `platform/strimzi/kafka-topics.yaml`. **The new topic and its `-dlt` must be added in
+  `EuroTransit-configuration` or the refund event is written to the outbox and goes nowhere** — a
+  silent failure in the cluster and nowhere else.
+- **Next migration number is `V15`.**
+- **`feature/issue-70-readable-notifications` still has no PR** and rewrites the notification payload
+  in `money-path-contracts` plus both emission points in `CheckoutOrchestrator`. If this step emits a
+  refund notification, read that branch first rather than writing a third variant of the same thing.
 
-Plus `V15`: the transition timestamps and the reversal reference, whatever 4b turns out to need.
+### Settled, open, and stop-and-ask
+
+**Settled — implement, do not re-litigate.** All from ADR-015: `CONFIRMED -> REFUNDING -> REFUNDED`
+with deliberately no `REFUND_FAILED`; the refund's own outbox event and consumer, never the
+`order-placed` pipeline; money reversed first and seat returned second; `pay-refund-{orderId}` as a
+separate idempotency namespace; the cutoff evaluated against the Orders database clock; and a replay
+of a pre-cutoff key returning its original result even after the cutoff.
+
+**Open — decide while implementing, and write the decision down in the outcome.** The response shape
+of the refund endpoint (probably `OrderView`, like `cancel`). Whether a refund emits a
+`notification-requested` event, given the `#70` collision above. What `GET /api/orders/{id}` shows
+while an order sits in `REFUNDING`. The exact names of the refusal codes.
+
+**Stop and ask — do not decide alone.** Anything that changes what `isTerminal` means for the
+checkout consumer. Any change to a public contract beyond adding refusal codes, since
+`api-design.md` calls the error model frozen. Anything that needs a change inside `payments` or
+`inventory` — those are other people's slices, and the answer is a message, not a commit.
+
+**A standing check, regardless of what this plan says.** Before calling the step done, list every
+value this change causes to cross a service boundary, and verify what the receiving service does
+with it. Step 3 shipped a latent poison-message path precisely because nobody asked that question
+until two days after the feature was written: Payments validates currency and amount and answers
+`400`, and `WebClientPaymentClient:78` treats only `DECLINED` as definitive, so that `400` would have
+parked an order in `PAYMENT_PENDING` holding a seat. The guard that fixed it was not in any plan.
+
+### 4a — The states and `V15`
+
+Add `REFUNDING` and `REFUNDED` to `OrderStatus` with the predicate split described above, then let
+the compiler find the call sites. `V15` carries the refund's own bookkeeping: when it was requested,
+when it completed, and the provider reversal reference. Keep the columns nullable — every order that
+predates this step has none of them.
 
 ### 4b — The endpoint and the durable trigger
 
-- `POST /api/orders/{orderId}/refund`, owner or `operations`, with an `Idempotency-Key` under the
-  `pay-refund-{orderId}` namespace — **never** `refund-{orderId}`, which checkout compensation
-  already consumes and which would make Payments replay the compensation's stored result: a `200`
-  while no money moves.
-- Refuse, each with its own code: an order not `CONFIRMED`; an order with no `offer_id` (nothing was
-  bought under terms, and every order predating V13 is in this set); `refundable = false`; and past
-  the cutoff — `departure_at - refund_cutoff_minutes_before_departure` compared against the **Orders
-  database clock**, not a JVM clock, for the reason invariant 4 gives for hold expiry.
-- **The replay rule is the subtle one**, and it is worth its own test: a key accepted *before* the
-  cutoff must still return its original result when the retry arrives *after* it, while a new request
-  after the cutoff is refused. Two opposite behaviours on one time condition, and the idempotency
-  record is what tells them apart.
-- Commit `REFUNDING` and its outbox row in one transaction, exactly as checkout commits `ACCEPTED`
-  plus `order-placed`. A **separate topic and a separate consumer** — not the `order-placed` pipeline,
-  whose `CONFIRMED`-is-terminal rule must stay exactly as it is.
+`POST /api/orders/{orderId}/refund`, owner or `operations`, mirroring `cancel`'s ownership rule: a
+non-owner gets `404`, never `403`.
+
+Refuse, each with its own code: the order is not `CONFIRMED`; it has no `offer_id` (nothing was sold
+under terms — every order predating `V13` is in this set); `refundable` is false; or the request is
+past `departure_at` minus `refund_cutoff_minutes_before_departure`, compared in SQL against
+`CURRENT_TIMESTAMP`.
+
+**The replay rule deserves its own test, because it is two opposite behaviours on one condition.** A
+key accepted *before* the cutoff must still return its original result when the retry arrives
+*after* it, while a new request after the cutoff is refused. The idempotency record is what
+distinguishes them — `findIdempotentRequest` before the cutoff check, not after.
+
+Commit `REFUNDING` and the outbox row in one transaction, exactly as checkout commits `ACCEPTED`
+plus `order-placed` (`CheckoutOrchestrator` step 4 of `checkout`, and `orderOutboxRow`). Then a new
+listener modelled on `OrderPlacedEventListener`: same correlation-id seeding into MDC and Reactor
+context, same poison-versus-retryable distinction, same `orders.events.consumed{topic,result}`
+counter.
 
 ### 4c — The reversal, in the order ADR-015 fixed
 
-Money first, seat second. The reversal to Payments, then `InventoryClient` gains a
-`refundReservation(reservationId, orderId)` beside hold/confirm/release — on the money-path resilience
-chain, unlike this step's read clients. If the seat return fails definitively the customer already has
-their money and a `SEAT_RETURN_FAILURE` reconciliation record stays open; an unknown outcome from
-either call throws, leaves the row in `REFUNDING`, and lets redelivery converge — no `catch`, same as
-the checkout pipeline.
+Money first. `PaymentClient.refund(orderId, "pay-refund-$orderId")` — **never** `refund-{orderId}`,
+which checkout compensation already consumes and which would make Payments replay the compensation's
+stored result: a `200` while no money moves.
 
-A refunded order should emit a `notification-requested` event like a confirmation does. Note the
-collision risk: `feature/issue-70-readable-notifications` rewrites both notification payloads in
-`CheckoutOrchestrator` (~:420 and ~:679) and the shared payload in `money-path-contracts`. Read that
-branch before writing a third one.
+Seat second. `InventoryClient` gains `refundReservation(reservationId, orderId)` beside
+hold/confirm/release — on the money-path resilience chain, unlike step 3's read clients. If it fails
+definitively the customer already has their money, so a `SEAT_RETURN_FAILURE` record stays open and
+the order stays in `REFUNDING`. An unknown outcome from either call throws, leaves the row where it
+is, and lets redelivery converge: no `catch`, exactly as the checkout pipeline.
 
-**Done when:** a confirmed refundable order inside its cutoff is refunded end to end — money reversed,
-seat back to `AVAILABLE`, order `REFUNDED`; each refusal has its own code and a test; a failed seat
-return leaves `REFUNDING` with an open reconciliation record rather than a terminal state; and the
-pre-cutoff replay returns its original result after the cutoff.
+### Cross-repository, and it must not be discovered late
+
+The new topic and its `-dlt` in `platform/strimzi/kafka-topics.yaml`. Unlike step 3's catalog URL,
+**this one has an ordering constraint**: without the topic, Debezium writes the outbox row and the
+event is never delivered, so the refund silently never runs in the cluster while looking fine in
+tests. Open that configuration PR alongside this step, not after it.
+
+**Done when:** a confirmed refundable order inside its cutoff is refunded end to end — money
+reversed, seat back to `AVAILABLE`, order `REFUNDED`; each refusal has its own code and a test; a
+failed seat return leaves `REFUNDING` with an open reconciliation record rather than a terminal
+state; the pre-cutoff replay returns its original result after the cutoff; and the standing
+boundary-check above has been done and its result recorded.
 
 ### Then, and only then
 
 - **#98's second half** — the same-day departed-run filter on the façade. It needs the departure
-  instant per route, and the Catalog client from step 3 is exactly what supplies it.
+  instant per route; `GET /api/catalog/routes/{routeId}` already returns `departureTime` and
+  `departureZone`, so the remaining question is only whether a departed run answers `404` or `200`
+  with everything unavailable.
 - **Step 5**, the Orders canary, whose two broken gates are already written up under "Findings that
   change the picture" with the attributable per-pod metrics to replace them.
