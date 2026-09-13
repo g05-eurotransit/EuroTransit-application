@@ -78,6 +78,15 @@ class Order(
     // the departure station's zone. The refund compares this one stored instant against the database
     // clock: no zone arithmetic on the refund path, and no dependency on Catalog being reachable then.
     val departureAt: OffsetDateTime? = null,
+    // The refund's own bookkeeping (ADR-015, V15). None of these decide eligibility — that is
+    // refundable/refundCutoffMinutesBeforeDeparture/departureAt above, evaluated against the database
+    // clock at the moment of the CONFIRMED -> REFUNDING transition. These three only record what
+    // happened once a refund was accepted: when, and (once the reversal succeeds) the provider
+    // reference and when it completed. Written by the database clock (CURRENT_TIMESTAMP), not the
+    // JVM, for the same reason departureAt is compared against it rather than against `now()`.
+    var refundRequestedAt: OffsetDateTime? = null,
+    var refundedAt: OffsetDateTime? = null,
+    var refundProviderReference: String? = null,
 ) : Persistable<UUID> {
 
     @Transient

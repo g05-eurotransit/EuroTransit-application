@@ -25,6 +25,7 @@ import java.time.OffsetDateTime
 import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 
 /**
@@ -295,6 +296,107 @@ class OrderTransitionsIntegrationTest {
         assertNull(stored.refundCutoffMinutesBeforeDeparture)
         assertNull(stored.offerTermsVersion)
         assertNull(stored.departureAt)
+    }
+
+    // --- post-sale refund (ADR-015) -----------------------------------------------------------------
+
+    @Test
+    fun `markRefunding accepts only CONFIRMED, and only a refundable order inside its cutoff`() = runBlocking {
+        val refused = ALL_STATES - OrderStatus.CONFIRMED
+        refused.forEach { from ->
+            // Every eligibility field is set to what would otherwise be accepted, so a refusal from a
+            // non-CONFIRMED state proves the status predicate is what refused it, not a missing field.
+            val id = seed(
+                from,
+                offerId = "of-002",
+                refundable = true,
+                refundCutoffMinutesBeforeDeparture = 60,
+                departureAt = OffsetDateTime.now().plusDays(1),
+            )
+            assertEquals(0L, orders.markRefunding(id), "expected $from to be refused")
+            assertEquals(from, statusOf(id), "expected $from to be left untouched")
+        }
+
+        val id = seed(
+            OrderStatus.CONFIRMED,
+            offerId = "of-002",
+            refundable = true,
+            refundCutoffMinutesBeforeDeparture = 60,
+            departureAt = OffsetDateTime.now().plusDays(1),
+        )
+        assertEquals(1L, orders.markRefunding(id))
+        val order = orders.findById(id)!!
+        assertEquals(OrderStatus.REFUNDING, order.status)
+        assertNotNull(order.refundRequestedAt)
+    }
+
+    @Test
+    fun `markRefunding refuses an order with no offer`() = runBlocking {
+        val id = seed(OrderStatus.CONFIRMED) // no offerId, no refund terms
+        assertEquals(0L, orders.markRefunding(id))
+        assertEquals(OrderStatus.CONFIRMED, statusOf(id))
+    }
+
+    @Test
+    fun `markRefunding refuses an offer that is not refundable`() = runBlocking {
+        val id = seed(OrderStatus.CONFIRMED, offerId = "of-001", refundable = false)
+        assertEquals(0L, orders.markRefunding(id))
+        assertEquals(OrderStatus.CONFIRMED, statusOf(id))
+    }
+
+    @Test
+    fun `markRefunding refuses a request past the cutoff`() = runBlocking {
+        // departure_at - cutoff is 30 minutes in the past: CURRENT_TIMESTAMP is no longer before it.
+        val id = seed(
+            OrderStatus.CONFIRMED,
+            offerId = "of-002",
+            refundable = true,
+            refundCutoffMinutesBeforeDeparture = 60,
+            departureAt = OffsetDateTime.now().minusMinutes(30),
+        )
+        assertEquals(0L, orders.markRefunding(id))
+        assertEquals(OrderStatus.CONFIRMED, statusOf(id))
+    }
+
+    @Test
+    fun `a null cutoff means refundable right up to departure itself`() = runBlocking {
+        // No cutoff column set (null), so only departure_at itself is the boundary. Still comfortably
+        // in the future, so the refund is accepted.
+        val id = seed(
+            OrderStatus.CONFIRMED,
+            offerId = "of-005",
+            refundable = true,
+            refundCutoffMinutesBeforeDeparture = null,
+            departureAt = OffsetDateTime.now().plusMinutes(5),
+        )
+        assertEquals(1L, orders.markRefunding(id))
+        assertEquals(OrderStatus.REFUNDING, statusOf(id))
+    }
+
+    @Test
+    fun `markRefunded accepts only REFUNDING and refuses to repeat itself`() = runBlocking {
+        assertRowsAffected(
+            accepting = setOf(OrderStatus.REFUNDING),
+            resultingIn = OrderStatus.REFUNDED,
+        ) { id -> orders.markRefunded(id, "prov-ref-1") }
+    }
+
+    @Test
+    fun `markRefunded stamps refunded_at and the provider reference`() = runBlocking {
+        val id = seed(
+            OrderStatus.CONFIRMED,
+            offerId = "of-002",
+            refundable = true,
+            refundCutoffMinutesBeforeDeparture = 60,
+            departureAt = OffsetDateTime.now().plusDays(1),
+        )
+        orders.markRefunding(id)
+
+        assertEquals(1L, orders.markRefunded(id, "prov-ref-42"))
+        val order = orders.findById(id)!!
+        assertEquals(OrderStatus.REFUNDED, order.status)
+        assertNotNull(order.refundedAt)
+        assertEquals("prov-ref-42", order.refundProviderReference)
     }
 
     // --- helpers ---------------------------------------------------------------------------------
