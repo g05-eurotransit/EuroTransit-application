@@ -14,6 +14,7 @@ import it.polito.cpo.observability.ApiException
 import it.polito.cpo.service.CheckoutOrchestrator
 import it.polito.cpo.service.CustomerFailureCode
 import it.polito.cpo.service.OrderService
+import it.polito.cpo.service.RefundOrchestrator
 import org.springframework.http.HttpStatus
 import org.springframework.security.core.annotation.AuthenticationPrincipal
 import org.springframework.security.oauth2.jwt.Jwt
@@ -27,6 +28,7 @@ import java.util.UUID
 class OrderController(
     private val orderService: OrderService,
     private val checkoutOrchestrator: CheckoutOrchestrator,
+    private val refundOrchestrator: RefundOrchestrator,
     private val inventoryReadClient: InventoryReadClient,
 ) {
 
@@ -197,6 +199,34 @@ class OrderController(
 
         // Cancellable only while unpaid; the orchestrator throws ApiException(409) otherwise.
         return toView(checkoutOrchestrator.cancel(orderId))
+    }
+
+    /**
+     * Requests a post-sale refund (ADR-015). Same ownership rule as [cancel]: owner or `operations`,
+     * 404 rather than 403 for anyone else, so the API never reveals that another customer's order
+     * exists.
+     *
+     * Returns `202 Accepted`, not `200`: unlike [cancel] — which commits a terminal state
+     * synchronously — this commits only the *acceptance* of a refund whose money and seat reversal
+     * are driven asynchronously by [RefundOrchestrator]'s own consumer. The body still reflects that:
+     * the order is `REFUNDING`, not yet `REFUNDED`.
+     *
+     * Requires `Idempotency-Key`, unlike [cancel]: ADR-015's replay rule — a key accepted before the
+     * refund cutoff must return its original result even after the cutoff, while a genuinely new
+     * request after it is refused — needs a stored record to tell the two apart, which `cancel` has
+     * no equivalent of.
+     */
+    @PostMapping("/{orderId}/refund")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    suspend fun refund(
+        @PathVariable orderId: UUID,
+        @RequestHeader("Idempotency-Key") idempotencyKey: String,
+        @AuthenticationPrincipal jwt: Jwt,
+    ): OrderView {
+        val userId = jwt.subject ?: throw ResponseStatusException(HttpStatus.UNAUTHORIZED, "Missing subject claim")
+        val roles = jwt.getClaim<Map<String, Any>>("realm_access")?.get("roles") as? List<*>
+        val isStaff = roles?.contains("operations") == true
+        return refundOrchestrator.refund(orderId, idempotencyKey, userId, isStaff)
     }
 
     private fun toView(order: it.polito.cpo.model.Order): OrderView {

@@ -68,3 +68,24 @@ data class NotificationRequestedPayload(
     val routeId: String? = null,
     val travelDate: LocalDate? = null,
 )
+
+/**
+ * Durable trigger for the post-sale refund (ADR-015). Its own event and its own topic, deliberately
+ * not routed through `order-placed`: that pipeline's terminal-state rule requires `CONFIRMED` to stay
+ * terminal, so reusing it would force `CONFIRMED` to become resumable and let a redelivered
+ * `order-placed` restart a completed checkout.
+ *
+ * Produced by Orders' `RefundOrchestrator.refund` in the same transaction as the
+ * `CONFIRMED -> REFUNDING` commit, and consumed by that same service's own listener — never by the
+ * checkout consumer.
+ */
+data class RefundRequestedEvent(
+    val eventId: UUID = UUID.randomUUID(),
+    val eventType: String = "refund-requested",
+    val schemaVersion: Int = 1,
+    val occurredAt: LocalDateTime = LocalDateTime.now(),
+    val correlationId: String,
+    val orderId: UUID,
+    val principalId: String,
+    val payload: Map<String, Any?> = emptyMap()
+)

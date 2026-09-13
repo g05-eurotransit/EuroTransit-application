@@ -163,6 +163,43 @@ class OrdersSecurityConfigTests @Autowired constructor(
     }
 
     @Test
+    fun `refund is reachable for the customer role`() {
+        webTestClient.post()
+            .uri("/api/orders/order-123/refund")
+            .headers { it.setBearerAuth("customer-token") }
+            .exchange()
+            .expectStatus().isOk
+    }
+
+    @Test
+    fun `refund is reachable for the operations role`() {
+        webTestClient.post()
+            .uri("/api/orders/order-123/refund")
+            .headers { it.setBearerAuth("operations-token") }
+            .exchange()
+            .expectStatus().isOk
+    }
+
+    @Test
+    fun `refund rejects anonymous requests`() {
+        webTestClient.post()
+            .uri("/api/orders/order-123/refund")
+            .exchange()
+            .expectStatus().isUnauthorized
+    }
+
+    @Test
+    fun `refund rejects a service credential`() {
+        // Same rule as cancel: a service token drives internal calls and must not be able to refund
+        // a customer's order.
+        webTestClient.post()
+            .uri("/api/orders/order-123/refund")
+            .headers { it.setBearerAuth("service-token") }
+            .exchange()
+            .expectStatus().isForbidden
+    }
+
+    @Test
     fun `reconciliation redrive accepts only the operations role`() {
         webTestClient.post()
             .uri("/api/orders/order-123/reconciliation/redrive")
@@ -279,6 +316,9 @@ class OrdersSecurityConfigTests @Autowired constructor(
 
         @PostMapping("/api/orders/{orderId}/cancel")
         fun cancelOrder(@PathVariable orderId: String): Map<String, String> = mapOf("orderId" to orderId)
+
+        @PostMapping("/api/orders/{orderId}/refund")
+        fun refundOrder(@PathVariable orderId: String): Map<String, String> = mapOf("orderId" to orderId)
 
         @PostMapping("/api/orders/{orderId}/reconciliation/redrive")
         fun redrive(@PathVariable orderId: String): Map<String, String> = mapOf("orderId" to orderId)
