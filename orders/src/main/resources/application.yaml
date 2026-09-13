@@ -104,3 +104,11 @@ eurotransit:
       url: http://localhost:8082
     payments:
       url: http://localhost:8085
+    # Resolved per checkout to price the offer and freeze its refund terms. Unlike inventory and
+    # payments this one needs no service credential: GET /api/catalog/** is permitAll.
+    #
+    # 8081 is the port catalog declares for itself. Note that a bare-metal local run collides with
+    # Keycloak, which the compose stack publishes on the same host port; inside compose there is no
+    # collision because EUROTRANSIT_SERVICES_CATALOG_URL points at http://catalog:8080.
+    catalog:
+      url: http://localhost:8081

@@ -44,16 +44,29 @@ class ResilienceConfiguration {
         // for the ten seconds the breaker stays open no checkout can create a hold. The threshold is
         // tighter than checkout's because a seat map has no business being slow.
         registry.circuitBreaker("inventory-read", circuitBreakerConfig(slowCall = Duration.ofSeconds(1)))
+        // The Catalog offer lookup, for the same isolation reason one step further along: it runs
+        // inside the synchronous checkout entry, so a Catalog problem that opened the "inventory" or
+        // "payments" breaker would take down the pipeline for orders that were already accepted and
+        // have nothing to do with Catalog. Its own instance confines the damage to the one thing it
+        // can legitimately stop — accepting new checkouts that carry an offer.
+        registry.circuitBreaker("catalog-read", circuitBreakerConfig(slowCall = Duration.ofSeconds(1)))
         return registry
     }
 
     /**
-     * Note what is NOT here: there is no `inventory-read` retry, and its absence is the decision.
+     * Note what is NOT here: there is no `inventory-read` retry and no `catalog-read` retry, and
+     * both absences are the decision.
      *
      * A stale seat map is not worth a retry — the answer is advisory and the customer can ask again
      * by reloading — while retrying read traffic is precisely how a struggling dependency becomes an
      * outage: three attempts per call triples the load on Inventory at the moment it is least able
      * to serve it. [WebClientInventoryReadClient] therefore composes bulkhead and breaker only.
+     *
+     * The offer lookup is not advisory — a checkout is refused when it fails — but it sits in front
+     * of a synchronous response the customer is waiting on, and retrying there spends their latency
+     * budget on a dependency that is already struggling. Failing fast hands the retry to the client,
+     * which can make it with a fresh idempotency decision; [WebClientCatalogClient] composes bulkhead
+     * and breaker only.
      */
     @Bean
     fun retryRegistry(): RetryRegistry {
@@ -72,6 +85,9 @@ class ResilienceConfiguration {
         // traffic"): saturating the seat-map pool sheds seat-map load and leaves the twenty
         // money-path permits untouched.
         registry.bulkhead("inventory-read", bulkheadConfig())
+        // Saturating the offer-lookup pool stops new checkouts carrying an offer and leaves the
+        // twenty money-path permits free for the orders already in the pipeline.
+        registry.bulkhead("catalog-read", bulkheadConfig())
         return registry
     }
 

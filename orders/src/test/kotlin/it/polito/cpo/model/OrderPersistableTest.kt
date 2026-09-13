@@ -25,6 +25,7 @@ class OrderPersistableTest {
         seats = "1A,1B",
         travelDate = LocalDate.now().plusDays(3),
         totalAmount = BigDecimal("100.00"),
+        currency = "EUR",
         createdAt = LocalDateTime.now()
     )
 

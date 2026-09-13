@@ -3,11 +3,14 @@ package it.polito.cpo.service
 import io.r2dbc.postgresql.codec.Json
 import tools.jackson.databind.ObjectMapper
 import it.polito.cpo.client.AuthorizationOutcome
+import it.polito.cpo.client.CatalogClient
 import it.polito.cpo.client.ConfirmReservationOutcome
 import it.polito.cpo.client.HoldOutcome
 import it.polito.cpo.client.InventoryClient
 import it.polito.cpo.client.InventoryRefusalCode
+import it.polito.cpo.client.OfferOutcome
 import it.polito.cpo.client.PaymentClient
+import it.polito.cpo.client.ResolvedOffer
 import it.polito.cpo.client.ReversalOutcome
 import it.polito.cpo.contracts.payments.PaymentRequest
 import it.polito.cpo.contracts.inventory.ReservationRequest
@@ -32,11 +35,13 @@ import org.springframework.http.HttpStatus
 import org.springframework.stereotype.Service
 import org.springframework.transaction.reactive.TransactionalOperator
 import org.springframework.transaction.reactive.executeAndAwait
+import java.math.BigDecimal
 import java.security.MessageDigest
 import java.time.Duration
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.util.UUID
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Checkout money-path coordinator.
@@ -63,6 +68,7 @@ class CheckoutOrchestrator(
     private val orderService: OrderService,
     private val inventoryClient: InventoryClient,
     private val paymentClient: PaymentClient,
+    private val catalogClient: CatalogClient,
     private val outboxEventRepository: OutboxEventRepository,
     private val reconciliationService: ReconciliationService,
     private val objectMapper: ObjectMapper,
@@ -79,6 +85,22 @@ class CheckoutOrchestrator(
          * exception beats spinning on the consumer thread.
          */
         const val MAX_STEPS = 6
+
+        /**
+         * What an order is priced in when the checkout carried no offer to resolve a currency from.
+         *
+         * This is the literal that used to sit in the authorization call, moved to the one place
+         * where it is recorded as an assumption about a specific order rather than asserted about
+         * every payment. It disappears when `offerId` becomes required (issue #84).
+         */
+        const val ASSUMED_CURRENCY = "EUR"
+
+        /**
+         * The shape Payments accepts, mirrored here so a malformed one is caught before it is
+         * persisted. Kept as a shape check and not a list of known codes: Orders has no business
+         * deciding which currencies exist.
+         */
+        val ISO_CURRENCY = Regex("^[A-Z]{3}$")
     }
 
     /** One delivery's working state. [reservationId] is seeded from the row, so a resume needs no lookup. */
@@ -147,9 +169,15 @@ class CheckoutOrchestrator(
             return objectMapper.readValue(existing.responseBody, CheckoutResponse::class.java)
         }
 
+        // 2. Resolve the offer against Catalog, which is what makes the amount below trustworthy
+        //    (issue #93). Deliberately after the idempotency check: a replay must return the stored
+        //    result from the original decision, and re-resolving would make an accepted order
+        //    unreplayable the moment Catalog went down or its price changed.
+        val offer = request.offerId?.let { resolveOffer(it, request) }
+
         meterRegistry.counter("orders.checkout.started").increment()
 
-        // 2. Create order in ACCEPTED status (keep the payment token so the async pipeline can resume)
+        // 3. Create order in ACCEPTED status (keep the payment token so the async pipeline can resume)
         val orderId = UUID.randomUUID()
         val order = Order(
             id = orderId,
@@ -158,16 +186,24 @@ class CheckoutOrchestrator(
             routeId = request.routeId,
             seats = request.seats.joinToString(","),
             travelDate = request.travelDate,
-            totalAmount = request.totalAmount,
+            // The resolved price, not the requested one. They are equal in value — a mismatch was
+            // rejected above — but only this one came from Catalog, and persisting the request's
+            // number would leave the authorization sourced from the client after all.
+            totalAmount = offer?.price ?: request.totalAmount,
+            currency = offer?.currency ?: ASSUMED_CURRENCY,
             createdAt = LocalDateTime.now(),
             paymentMethodToken = request.paymentMethodToken,
             recipientEmail = recipientEmail,
-            // Recorded as claimed, not resolved: there is no Catalog client yet, so this is not
-            // checked against the route and its price is not compared with totalAmount (issue #93).
             offerId = request.offerId,
+            // The refund terms as they read at the moment of sale, frozen because Catalog keeps no
+            // history of them (ADR-015 and V14).
+            refundable = offer?.refundPolicy?.refundable,
+            refundCutoffMinutesBeforeDeparture = offer?.refundPolicy?.cutoffMinutesBeforeDeparture,
+            offerTermsVersion = offer?.termsVersion,
+            departureAt = offer?.departureAt(request.travelDate),
         ).apply { setAsNew(true) }
 
-        // 3. Persist order + idempotency + the order-placed outbox row atomically (fixes the
+        // 4. Persist order + idempotency + the order-placed outbox row atomically (fixes the
         //    order/idempotency and order/Kafka dual-write). Debezium relays the outbox row.
         val response = CheckoutResponse(orderId, OrderStatus.ACCEPTED)
         val responseBody = objectMapper.writeValueAsString(response)
@@ -185,8 +221,124 @@ class CheckoutOrchestrator(
         return response
     }
 
+    /**
+     * Resolves [offerId] against Catalog and checks the request against it, or rejects the checkout.
+     *
+     * Three things are verified, and each answers a different question: that the offer **exists**,
+     * that it belongs to the **route** being booked, and that its **price** is the amount the client
+     * asked to be charged. Until this existed, `totalAmount` arrived from the browser and was
+     * validated against nothing — a checkout submitted with `0.01` was authorized for one cent and
+     * confirmed as a normal sale, because Payments authorizes what it is given and Inventory has no
+     * notion of price (issue #93).
+     *
+     * A mismatch is a `400`, never a silent correction to the true price: charging an amount other
+     * than the one the customer was shown is its own bug, and a worse one than refusing the request.
+     *
+     * Synchronous and fail-closed by design. The alternative placements are both worse: validating
+     * inside the pipeline would turn a fixable mistake into a `FAILED` order discovered minutes
+     * later, and trusting the client's amount when Catalog is unreachable would reopen #93 precisely
+     * when nobody is watching. The cost is stated plainly — while Catalog is down, checkouts
+     * carrying an offer are refused — and it is a `503`, which says "ask again" rather than "you are
+     * wrong".
+     */
+    private suspend fun resolveOffer(offerId: String, request: CheckoutRequest): ResolvedOffer {
+        val outcome = try {
+            catalogClient.getOffer(offerId)
+        } catch (cancellation: CancellationException) {
+            // A disconnected client is not a Catalog failure; swallowing it into a 503 would report a
+            // dependency problem that never happened.
+            throw cancellation
+        } catch (failure: Exception) {
+            meterRegistry.counter("orders.checkout.rejected", "reason", "offer_unresolvable").increment()
+            logger.warn("Catalog could not resolve offer {}; refusing the checkout", offerId, failure)
+            throw ApiException(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "OFFER_UNRESOLVABLE",
+                "The offer could not be verified right now. Please try again.",
+                cause = failure,
+            )
+        }
+
+        val offer = when (outcome) {
+            is OfferOutcome.Found -> outcome.offer
+            OfferOutcome.NotFound -> reject(
+                "OFFER_NOT_FOUND",
+                "Offer $offerId does not exist",
+                mapOf("offerId" to offerId),
+            )
+        }
+
+        // Is this offer usable at all? Checked **before** the two comparisons below, and the order
+        // is the point: a garbage price compared against the request would come back as
+        // OFFER_PRICE_MISMATCH, a 400 blaming the customer for a broken catalogue.
+        //
+        // These two fields are checked and no others because these two leave Orders and enter
+        // fields Payments validates: `PaymentService` rejects a non-ISO-4217 currency and a
+        // non-positive amount with a 400, and `WebClientPaymentClient` treats only DECLINED as
+        // definitive — so that 400 becomes an *unknown* outcome. The order would sit in
+        // PAYMENT_PENDING holding a seat while the delivery is retried to the dead-letter topic: a
+        // poison message rather than a clean failure, and the poison would be catalogue data.
+        // Refusing here turns it into one rejected checkout.
+        //
+        // Unreachable today — the six seeded offers are compile-time constants — and the path is
+        // new: this used to be a literal "EUR" and a client-supplied number, so it could not be
+        // malformed, only wrong.
+        if (!ISO_CURRENCY.matches(offer.currency) || offer.price <= BigDecimal.ZERO) {
+            // Deliberately the same public code as an unreachable Catalog. To a caller both mean
+            // "no trustworthy offer could be obtained", and a fifth code added to an error model
+            // api-design.md calls frozen is not worth a case that needs someone to ship a malformed
+            // offer first. The two are told apart where an operator actually needs it: `error`
+            // rather than `warn`, and a different metric tag.
+            meterRegistry.counter("orders.checkout.rejected", "reason", "offer_malformed").increment()
+            logger.error(
+                "Catalog returned an unusable offer {}: price={} currency={}",
+                offerId, offer.price, offer.currency,
+            )
+            throw ApiException(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "OFFER_UNRESOLVABLE",
+                "The offer could not be verified right now. Please try again.",
+            )
+        }
+
+        if (offer.routeId != request.routeId) {
+            // Cheap to get wrong in a client that keeps the offer across a route change, and
+            // expensive to leave: the seats would be held on one route and the refund terms taken
+            // from an offer for another.
+            reject(
+                "OFFER_ROUTE_MISMATCH",
+                "Offer $offerId is not sold on route ${request.routeId}",
+                mapOf("offerId" to offerId, "routeId" to offer.routeId),
+            )
+        }
+
+        // compareTo, not equals: BigDecimal("24.90") != BigDecimal("24.9") by equals, and rejecting a
+        // correct amount because the client sent one fewer trailing zero would be a bug of its own.
+        if (offer.price.compareTo(request.totalAmount) != 0) {
+            reject(
+                "OFFER_PRICE_MISMATCH",
+                "Offer $offerId costs ${offer.price} ${offer.currency}, not ${request.totalAmount}",
+                // Catalog data, already public on the offers endpoint: telling the client the real
+                // price lets it re-render rather than guess.
+                mapOf("offerId" to offerId, "price" to offer.price, "currency" to offer.currency),
+            )
+        }
+
+        return offer
+    }
+
+    /** A `400` on the checkout entry, counted under the same rejection meter as the date guard. */
+    private fun reject(code: String, message: String, details: Map<String, Any?>): Nothing {
+        meterRegistry.counter("orders.checkout.rejected", "reason", code.lowercase()).increment()
+        throw ApiException(HttpStatus.BAD_REQUEST, code, message, details)
+    }
+
     // Canonical, order-independent fingerprint of the checkout payload (SHA-256 hex). Used to tell a
     // genuine retry (same payload -> replay) from a key reuse with a different payload (-> 409).
+    //
+    // It hashes what the client *asked for* — the requested amount included — and deliberately not
+    // the price resolved from Catalog. The resolved price is an output of the request, so feeding it
+    // back in would make a retry of an unchanged payload hash differently after a catalogue edit.
     private fun fingerprint(userId: String, request: CheckoutRequest): String {
         val canonical = buildString {
             append(userId).append('|')
@@ -335,8 +487,17 @@ class CheckoutOrchestrator(
             PaymentRequest(
                 orderId = ctx.orderId,
                 principalId = ctx.order.userId,
+                // Both read off the order, which is where the checkout entry put the *resolved*
+                // offer's price and currency. Read from the row rather than re-resolved here on
+                // purpose: the pipeline is asynchronous and may resume days later, so a price edit
+                // in Catalog — or Catalog simply being down — must not change what this order
+                // authorizes. The currency used to be a hardcoded "EUR" on this line while the
+                // amount came from the request, so the two were never checked against each other.
+                //
+                // An order placed without an offerId carries an unvalidated amount and the assumed
+                // currency: that is the part of #93 that stays open until the SPA sends the field.
                 amount = ctx.order.totalAmount,
-                currency = "EUR",
+                currency = ctx.order.currency,
                 paymentMethodToken = paymentToken,
             ),
             idempotencyKey = "pay-${ctx.orderId}",

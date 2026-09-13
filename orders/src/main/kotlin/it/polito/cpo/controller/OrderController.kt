@@ -10,6 +10,7 @@ import it.polito.cpo.controller.dtos.OrderView
 import it.polito.cpo.controller.dtos.SeatAvailabilityView
 import it.polito.cpo.controller.dtos.SeatView
 import it.polito.cpo.model.OrderStatus
+import it.polito.cpo.observability.ApiException
 import it.polito.cpo.service.CheckoutOrchestrator
 import it.polito.cpo.service.CustomerFailureCode
 import it.polito.cpo.service.OrderService
@@ -116,6 +117,23 @@ class OrderController(
         @RequestParam routeId: String,
         @RequestParam travelDate: LocalDate,
     ): SeatAvailabilityView {
+        // Issue #98, first half. `POST /api/orders` rejects a past travel date with this same code,
+        // and this endpoint forwarded one to Inventory unchallenged — so a customer could be shown a
+        // seat map for a train that left last week and only be told at checkout. The same answer
+        // from both endpoints is the point: a client that handles one handles the other.
+        //
+        // Second line of defence, not the fix: which seats exist for a past date is Inventory's own
+        // truth and is #97. The remaining half of #98 — a *same-day* run that has already departed —
+        // needs the departure instant per route, which the Catalog client added in this change now
+        // makes reachable.
+        if (travelDate.isBefore(LocalDate.now())) {
+            throw ApiException(
+                HttpStatus.BAD_REQUEST,
+                "TRAVEL_DATE_IN_THE_PAST",
+                "Travel date $travelDate is in the past",
+            )
+        }
+
         // No ownership check and no principal use: there is no owned resource here. Authentication
         // is still required — the security chain covers this path with the customer/operations rule
         // — because this is a step of the checkout, not public browsing.
@@ -123,9 +141,13 @@ class OrderController(
 
         val seats = when (outcome) {
             is SeatAvailabilityOutcome.Found -> outcome.seats
-            // Inventory conflates "unknown route" with "sold out" behind one 404 (raised on #68).
-            // Until that is split, 404 is the honest answer: reporting an empty seat map for a route
-            // that does not exist would look like a sold-out train.
+            // Inventory answers one 404 for two different cases (#96): an unknown route, and a
+            // known route with no seats provisioned for that travel date. Until those are split,
+            // re-raising it is the honest answer — reporting an empty seat map for a route that does
+            // not exist would read as a departed or unbookable train.
+            //
+            // A sold-out run is NOT one of those cases and never reaches here: its seat rows exist
+            // as HELD/SOLD, so Inventory returns them and every seat is simply unavailable.
             SeatAvailabilityOutcome.NotFound ->
                 throw ResponseStatusException(HttpStatus.NOT_FOUND, "No seats for this route and date")
         }
@@ -188,6 +210,7 @@ class OrderController(
             seats = order.seats.split(","),
             travelDate = order.travelDate,
             totalAmount = order.totalAmount,
+            currency = order.currency,
             createdAt = order.createdAt,
             reservationExpiresAt = order.reservationExpiresAt,
             failureCode = failure?.name,
@@ -195,6 +218,9 @@ class OrderController(
             // wording into every historical row.
             failureMessage = failure?.customerMessage,
             offerId = order.offerId,
+            refundable = order.refundable,
+            refundCutoffMinutesBeforeDeparture = order.refundCutoffMinutesBeforeDeparture,
+            departureAt = order.departureAt,
         )
     }
 }

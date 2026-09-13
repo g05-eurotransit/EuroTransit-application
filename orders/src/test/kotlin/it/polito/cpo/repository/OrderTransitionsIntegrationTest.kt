@@ -243,6 +243,60 @@ class OrderTransitionsIntegrationTest {
         assertNull(orders.findById(id)!!.offerId)
     }
 
+    @Test
+    fun `the frozen refund terms survive a round-trip`() = runBlocking {
+        // Proves V14 and the entity mapping agree. These are the inputs the refund decides on, and
+        // an order that silently forgot them would be unrefundable with no sign of why.
+        val id = seed(
+            OrderStatus.CONFIRMED,
+            offerId = "of-002",
+            refundable = true,
+            refundCutoffMinutesBeforeDeparture = 5,
+            offerTermsVersion = 3,
+        )
+
+        val stored = orders.findById(id)!!
+        assertEquals(true, stored.refundable)
+        assertEquals(5, stored.refundCutoffMinutesBeforeDeparture)
+        assertEquals(3, stored.offerTermsVersion)
+    }
+
+    @Test
+    fun `the departure instant comes back as the same moment, not the same local time`() = runBlocking {
+        // The reason the column is TIMESTAMPTZ. A departure written without its offset would come
+        // back reinterpreted in the session's zone, and the refund cutoff — a duration before this
+        // instant — would move by that offset, differently on each side of a DST boundary.
+        val departure = OffsetDateTime.parse("2026-10-01T07:00:00+02:00")
+        val id = seed(OrderStatus.CONFIRMED, offerId = "of-002", departureAt = departure)
+
+        assertEquals(departure.toInstant(), orders.findById(id)!!.departureAt!!.toInstant())
+    }
+
+    @Test
+    fun `the currency is persisted beside the amount`() = runBlocking {
+        // The pair the authorization is built from. They used to come from two different places —
+        // the amount from the request, the currency from a literal — and only one was ever checked.
+        val id = seed(OrderStatus.CONFIRMED, offerId = "of-004", currency = "CHF")
+
+        val stored = orders.findById(id)!!
+        assertEquals("CHF", stored.currency)
+        assertEquals(0, BigDecimal("10.00").compareTo(stored.totalAmount))
+    }
+
+    @Test
+    fun `an order without an offer has no refund terms and still defaults to euros`() = runBlocking {
+        // The currency column is NOT NULL, so an offer-less checkout has to write something; "EUR"
+        // is the old hardcode, now recorded per order instead of asserted at payment time.
+        val id = seed(OrderStatus.CONFIRMED)
+
+        val stored = orders.findById(id)!!
+        assertEquals("EUR", stored.currency)
+        assertNull(stored.refundable)
+        assertNull(stored.refundCutoffMinutesBeforeDeparture)
+        assertNull(stored.offerTermsVersion)
+        assertNull(stored.departureAt)
+    }
+
     // --- helpers ---------------------------------------------------------------------------------
 
     /**
@@ -274,6 +328,11 @@ class OrderTransitionsIntegrationTest {
         status: OrderStatus,
         paymentMethodToken: String? = null,
         offerId: String? = null,
+        currency: String = "EUR",
+        refundable: Boolean? = null,
+        refundCutoffMinutesBeforeDeparture: Int? = null,
+        offerTermsVersion: Int? = null,
+        departureAt: OffsetDateTime? = null,
     ): UUID {
         val id = UUID.randomUUID()
         orders.save(
@@ -285,10 +344,15 @@ class OrderTransitionsIntegrationTest {
                 seats = "A1",
                 travelDate = LocalDate.now().plusDays(3),
                 totalAmount = BigDecimal("10.00"),
+                currency = currency,
                 createdAt = LocalDateTime.now(),
                 paymentMethodToken = paymentMethodToken,
                 recipientEmail = "user-transitions@example.com",
                 offerId = offerId,
+                refundable = refundable,
+                refundCutoffMinutesBeforeDeparture = refundCutoffMinutesBeforeDeparture,
+                offerTermsVersion = offerTermsVersion,
+                departureAt = departureAt,
             ).apply { setAsNew(true) },
         )
         return id

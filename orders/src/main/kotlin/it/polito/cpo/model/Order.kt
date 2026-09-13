@@ -21,6 +21,13 @@ class Order(
     // Without it a seat is sold once and for all rather than for one run (issue #64).
     val travelDate: LocalDate,
     val totalAmount: BigDecimal,
+    // The currency of [totalAmount]. Required and deliberately not defaulted: a default here is what
+    // would quietly restore the bug the column exists to remove — the authorization used to carry a
+    // hardcoded "EUR" beside an amount that came from somewhere else entirely.
+    //
+    // Resolved from the offer when the checkout carried one. A checkout without an offer writes
+    // "EUR" explicitly at the call site, so the assumption is recorded rather than implied.
+    val currency: String,
     val createdAt: LocalDateTime,
     // Sandbox payment reference kept only until the order reaches a terminal state, so the
     // asynchronous pipeline can reconstruct the payment request. Cleared on CONFIRMED/FAILED.
@@ -44,13 +51,30 @@ class Order(
     // returned by the public API, so it never carries an invariant violation or a provider code.
     // Set only on the terminal FAILED transition; null in every other state.
     var failureCode: String? = null,
-    // Which offer was bought, as claimed by the client. The post-sale refund (ADR-015) resolves its
-    // policy and cutoff from the offer's terms, so an order without it cannot be refunded.
+    // Which offer was bought. Resolved against Catalog at checkout: it exists, it belongs to
+    // routeId, and its price is the one in totalAmount — so unlike in V13, this is a validated value
+    // and the fields below were read from it.
     //
-    // NOT a validated value: nothing resolves it against Catalog, checks that it belongs to
-    // routeId, or compares totalAmount against its price (issue #93). Nullable until the SPA sends
-    // it (issue #84); making it required in the same change would break checkout outright.
+    // Still nullable until the SPA sends it (issue #84). While it is optional, an order with no
+    // offer is an order whose amount was never checked against anything, which is the part of issue
+    // #93 that stays open; it also has no refund terms, and the refund endpoint refuses it.
     val offerId: String? = null,
+    // The refund rule the customer accepted, resolved from the offer at checkout and frozen here.
+    //
+    // Stored as the rule and not merely as [offerTermsVersion] because Catalog keeps no history: it
+    // resolves offers from a flat list of current ones, so a version marker alone would point at
+    // terms that may since have been edited. ADR-015's goal, by the means that reaches it.
+    //
+    // Null together, for an order placed without an offer: it has no refund terms and the refund
+    // endpoint refuses it.
+    val refundable: Boolean? = null,
+    val refundCutoffMinutesBeforeDeparture: Int? = null,
+    // Audit marker for which revision of the rule above was accepted. Not a substitute for it.
+    val offerTermsVersion: Int? = null,
+    // When this run departs, composed once at checkout as travelDate + the offer's departure time in
+    // the departure station's zone. The refund compares this one stored instant against the database
+    // clock: no zone arithmetic on the refund path, and no dependency on Catalog being reachable then.
+    val departureAt: OffsetDateTime? = null,
 ) : Persistable<UUID> {
 
     @Transient

@@ -75,6 +75,7 @@ services:
       ORDERS_SERVICE_TOKEN_URI: http://keycloak:8080/realms/eurotransit/protocol/openid-connect/token
       EUROTRANSIT_SERVICES_INVENTORY_URL: http://inventory:8080
       EUROTRANSIT_SERVICES_PAYMENTS_URL: http://payments:8080
+      EUROTRANSIT_SERVICES_CATALOG_URL: http://catalog:8080
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
     expose:
       - "8080"

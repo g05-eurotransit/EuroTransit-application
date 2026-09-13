@@ -4,7 +4,7 @@ Working plan for the Orders slice owner. It is deliberately incomplete: only the
 the next one are written in detail. **When a step is finished, write the following step here before
 starting it.** This keeps each step doable in a fresh session without reconstructing context.
 
-Last updated: 2026-09-10.
+Last updated: 2026-09-11.
 
 ## Decisions already taken
 
@@ -67,8 +67,8 @@ counter-proposal to negotiate.
 | 0 | Unblock everyone else: four messages, no code | **done** (2026-09-10) |
 | 1 | Seat availability façade on Orders | **done** — merged as `a3ce792` |
 | 2 | Refund part 1 — the ADR and `offerId` in the checkout contract | **done** — see the outcome below |
-| 3 | Refund part 2 — Catalog client and policy resolution | **next, detailed below** |
-| 4 | Refund part 3 — refund state machine and endpoint | to be written |
+| 3 | Refund part 2 — Catalog client and policy resolution | **done** — see the outcome below |
+| 4 | Refund part 3 — refund state machine and endpoint | **next, detailed below** |
 | 5 | Orders canary with metric-gated promote/abort | to be written; findings already recorded below |
 | 6 | Chaos experiments, postmortem, agent log | to be written |
 
@@ -106,9 +106,16 @@ only `/routes`, `/routes/{routeId}` and `/offers`, and `RouteRepository` has no 
 without it Orders would fetch the whole catalogue per checkout. The comment also lists the two
 existing offers whose prose does not map cleanly to a rule (of-002, of-003).
 
-**0.4 — Open points posted on #68.** The `404 ROUTE_NOT_FOUND` that conflates "unknown route" with
-"sold out", and the missing filter for departed same-day seats that ADR-014 now returns to
-`AVAILABLE`.
+**0.4 — Open points posted on #68.** The `404 ROUTE_NOT_FOUND` that conflates two cases behind one
+code, and the missing filter for departed same-day seats that ADR-014 now returns to `AVAILABLE`.
+
+**Corrected 2026-09-10, after reading `SeatService`.** The 404 was described here as conflating
+"unknown route" with "sold out". That is wrong, and worth having right so nobody fixes the wrong
+thing: the branch throws when the seat query returns **zero rows** (`SeatService:28`), and a
+sold-out run has rows — `HELD`/`SOLD` — so it correctly returns `200` with every seat `false`. The
+real ambiguity is "no such route" versus "route exists, no seats provisioned for that travel date".
+Split into #96; the departed-seat filter into #97 (past dates, Inventory) and #98 (same-day, the
+Orders façade, because it needs Catalog's departure time and zone).
 
 Links: [#72](https://github.com/g05-eurotransit/EuroTransit-application/issues/72#issuecomment-5616516176) ·
 [#85](https://github.com/g05-eurotransit/EuroTransit-application/issues/85#issuecomment-5616518795) ·
@@ -221,8 +228,10 @@ Merged as `a3ce792` (PR #92), CI green. Full build was green at **289 tests, 0 f
   per seat and no ids.
 - `api-design.md`: the row naming Catalog as the caller corrected, the façade documented.
 
-Deliberately left for Inventory, both raised on #68: the 404 that conflates an unknown route with a
-sold-out one, and the missing filter for departed same-day seats.
+Deliberately left for Inventory, both raised on #68 and now split out of it: the ambiguous 404
+(#96 — see the correction under step 0.4; it is route-versus-date, not route-versus-sold-out) and the
+missing filter for departed seats (#97 for past dates, which Inventory can fix alone, and #98 for the
+same-day case, which is the façade's because it needs Catalog's departure time and zone).
 
 Still open before the frontend can consume it: the sweeper (#81 / configuration PR #31) must be
 enabled, or seats held by abandoned checkouts read as permanently unavailable.
@@ -347,12 +356,15 @@ fingerprint rollover called out as the thing to review.
 This is the step that turns `offerId` from a recorded string into something Orders can make a money
 decision on. It closes **#93** and produces the inputs ADR-015's refund needs.
 
-**It is blocked, and by a specific thing rather than by #85 as a whole.** What is needed first is
-`GET /api/catalog/offers/{offerId}` — it does not exist today, `CatalogController` exposes only
-`/routes`, `/routes/{routeId}` and `/offers`, and without it Orders would fetch the whole catalogue
-on every checkout. The machine-readable refund rule and the route zone (the rest of #85) block only
-3b below. Check #85 before starting: if the endpoint has landed and the fields have not, do 3a and
-stop.
+**Unblocked as of 2026-09-11.** #85 landed whole in PR #99 (`cf470d2`) and is closed: both the by-id
+endpoint that 3a needs and the refund fields that 3b needs arrived together, so the split below is
+now sequencing inside one step rather than a decision about scope.
+
+What the merged contract gives, which is more than was asked for and changes 3b:
+`GET /api/catalog/offers/{offerId}` returns `OfferDetail` carrying `price`, `currency`, `conditions`,
+`refundPolicy(refundable, cutoffMinutesBeforeDeparture)`, `termsVersion`, **and the route's
+`departureTime` and `departureZone` denormalized onto the offer**. So resolving one offer takes one
+call: no second lookup on `/routes/{routeId}` to learn when the train leaves.
 
 ### 3a — Resolve the offer and validate the amount (needs only the by-id endpoint)
 
@@ -371,7 +383,12 @@ stop.
   charging a different amount than the client displayed is its own bug.
 - **Persist the resolved price**, and treat `totalAmount` from the request as a consistency check
   only. The authorization sent to Payments must use the resolved value, which is the actual fix for
-  #93 — `CheckoutOrchestrator:327` currently sends `ctx.order.totalAmount` straight from the request.
+  #93 — `CheckoutOrchestrator:338` currently sends `ctx.order.totalAmount` straight from the request.
+- **Take the currency from the offer too.** The line below the amount (`:339`) hardcodes
+  `currency = "EUR"`, and `OfferDetail` carries a real `currency`. Latent today — all six seeded
+  offers are EUR — but two of the routes are cross-border (Milano–Zurich, Torino–Lyon), so the first
+  CHF offer would be authorized as euros at the same number. Resolve it with the price, persist it
+  beside the amount, and send it to Payments. Same bug as #93, one field over.
 - **The fingerprint stays as it is.** It hashes what the client asked for, and that is the right
   input for telling a retry from a key reuse; the resolved price is an output.
 
@@ -379,14 +396,16 @@ stop.
 
 - **Store the terms on the order, not just the version marker.** #86 asked for the offer version so
   a later catalogue edit cannot rewrite what a customer accepted — but a version only protects that
-  if Catalog keeps history, and Catalog is an in-memory repository of six offers with no history at
-  all. So persist the resolved rule itself (refundable, cutoff duration) and keep the version beside
-  it as an audit marker. This is a correction to the #86 wording, not a re-litigation of it: same
-  goal, and the version alone does not reach it.
-- **Store the departure instant, computed once at checkout** as `travelDate + departureTime` in the
-  route's zone, as `TIMESTAMPTZ` like `reservation_expires_at`. The refund then compares one stored
-  instant against the database clock, with no zone arithmetic on the refund path and no dependency
-  on Catalog being reachable at refund time.
+  if Catalog keeps history. **Now verified rather than assumed:** `InMemoryCatalogRepository:53`
+  resolves with `offers.find { it.offerId == offerId }` over a flat list of current offers, and
+  nothing anywhere keeps a previous `termsVersion`. So persist the resolved rule itself (refundable,
+  cutoff duration) and keep the version beside it as an audit marker. This is a correction to the #86
+  wording, not a re-litigation of it: same goal, and the version alone does not reach it.
+- **Store the departure instant, computed once at checkout** as `travelDate + departureTime` in
+  `departureZone`, as `TIMESTAMPTZ` like `reservation_expires_at`. Both fields come back on the same
+  `OfferDetail`, so this is arithmetic on one response. The refund then compares one stored instant
+  against the database clock, with no zone arithmetic on the refund path and no dependency on Catalog
+  being reachable at refund time.
 - **Migration `V14`**, and the fields on `Order` and — where the SPA needs them to decide whether to
   show a refund button — on `OrderView`.
 
@@ -409,6 +428,172 @@ free the moment the field is mandatory, because every string then has fixed arit
 earlier: changing the canonical string while the field is optional is what the conditional append
 exists to avoid, and it would break every idempotency key stored in the previous 24 hours.
 
-**Done when:** a checkout with a mismatched amount is rejected, the amount sent to Payments is the
-resolved one, #93 is closed or explicitly reduced to the `offerId`-optional case, and — if 3b was in
-scope — an order carries the refund rule and departure instant it was sold under.
+### Cheap to fold in here: the past-date guard on the façade (#98)
+
+Filed after this step was written. `GET /api/orders/seat-availability` forwards a `travelDate` in the
+past to Inventory unchallenged, while `POST /api/orders` rejects one with `TRAVEL_DATE_IN_THE_PAST`.
+One guard, no dependency on anything in this step, and it is already in a file this step touches.
+
+It is only half of #98: the same-day departed-run filter needs the departure instant per route and is
+the rest of that issue. Worth noting that the Catalog client built here is exactly what it will need,
+so #98 becomes doable immediately after this step rather than blocked. #97 fixes the past-date case in
+Inventory, which is where the seat map's own truth belongs; this guard is the second line of defence.
+
+**Done when:** a checkout with a mismatched amount is rejected, the amount and currency sent to
+Payments are the resolved ones, #93 is closed or explicitly reduced to the `offerId`-optional case,
+and an order carries the refund rule and departure instant it was sold under.
+
+---
+
+## Step 3 — outcome
+
+Branch `feature/orders-offer-resolution`. Full build green at **331 tests, 0 failures** (+29).
+
+**The offer is resolved, and it is what the customer is charged.** `CatalogClient` /
+`WebClientCatalogClient` on their own `catalog-read` breaker and bulkhead with no retry, called from
+the synchronous checkout entry — never from the pipeline, so a wrong price is a `400` the customer
+can fix rather than a `FAILED` order they find later. Three checks, each its own code:
+`OFFER_NOT_FOUND`, `OFFER_ROUTE_MISMATCH`, `OFFER_PRICE_MISMATCH`. Amounts compare by value, so
+`24.9` and `24.90` agree; a mismatch is refused and never silently corrected.
+
+The resolved price and currency are persisted and `stageAuthorize` sends those, which is the actual
+fix for **#93** — it read `ctx.order.totalAmount` straight from the request beside a hardcoded
+`"EUR"`. Read off the row rather than re-resolved at pipeline time on purpose: the pipeline is
+asynchronous and may resume much later, so a catalogue edit must not change what an accepted order
+authorizes.
+
+**Fail closed, stated as a cost rather than discovered as one.** Catalog unreachable is
+`503 OFFER_UNRESOLVABLE`, not an acceptance on trust — a `503` and not a `400` because the request
+was fine. While Catalog is down, checkouts *carrying an offer* stop; offer-less ones never touch
+Catalog and keep working, which is asserted rather than assumed. Recorded in ADR-015 as an
+amendment, because the tempting alternative reopens #93 silently.
+
+**The refund terms are frozen, and the version marker turned out not to be enough.** #86 asked for
+`termsVersion` so a later edit could not rewrite what a customer accepted; that only holds if Catalog
+keeps history, and `InMemoryCatalogRepository:53` resolves against a flat list of current offers with
+no previous revision stored anywhere. So `V14` persists the rule itself — `refundable`,
+`refund_cutoff_minutes_before_departure` — with `offer_terms_version` beside it as an audit marker,
+plus `departure_at` as `TIMESTAMPTZ`, composed once at checkout from `travelDate + departureTime` in
+the station's zone. The refund then compares one stored instant against the database clock: no zone
+arithmetic on the refund path and no Catalog call at refund time. Same migration adds `currency`
+`NOT NULL`, backfilled and the default dropped as V9 does, so a future insert that forgets it fails
+instead of quietly recording euros.
+
+`OrderView` gains `currency`, `refundable`, `refundCutoffMinutesBeforeDeparture` and `departureAt`.
+`termsVersion` is deliberately **not** exposed: it is an audit marker, and a client holding it might
+use it as a key into a catalogue that no longer has that revision.
+
+**#98's economic half is in**, as planned: the façade now refuses a past `travelDate` with
+`TRAVEL_DATE_IN_THE_PAST`, the same code checkout uses, in front of the Inventory call rather than as
+a filter on its answer. Same-day departed runs are the rest of that issue, and the Catalog client
+built here is exactly what they need.
+
+Tests worth naming: `an unreachable Catalog fails the checkout closed rather than trusting the
+amount`, `the price that is persisted is the resolved one, not the one the client sent` (equal value,
+different scale — it proves which number was stored), `a replay returns the stored result without
+resolving the offer again` (resolution sits *after* the idempotency check, so an accepted order stays
+replayable once Catalog goes down), `the authorization charges the amount and currency stored on the
+order`, and `a failing offer lookup is attempted once, unlike the money path` — the missing retry is
+an absence, and an absence can only be reviewed by asserting it.
+
+**Deployment consequence, handled across both repositories.** Orders now reads
+`eurotransit.services.catalog.url`. `application.yaml` and `docker-compose.yml` carry it, and
+`EuroTransit-configuration` gained `EUROTRANSIT_SERVICES_CATALOG_URL` on the orders deployment with
+`orders.services.catalogUrl` in `values.yaml` — committed there as `5704120` on
+`feature/orders-money-path-hardening`, unpushed. Without it, in-cluster Orders falls back to
+`http://localhost:8081` and answers `503 OFFER_UNRESOLVABLE` to every offer checkout: harmless while
+the SPA sends no `offerId`, and an outage on the day #84 lands, which is why it goes in before that
+rather than with it. No NetworkPolicy change was needed — `allow-same-namespace` already permits
+pod-to-pod ingress, and catalog's Service is the usual ClusterIP on 8080.
+
+**Not done here, deliberately:** `offerId` is still optional, so #93 is closed for every checkout
+that carries an offer and open for every checkout that does not. That flip is the one-line follow-up
+below, gated on #84 and not on anything in this step.
+
+### The follow-up that closes #93 completely (one line, gated on #84)
+
+Unchanged from what step 3 was written with, and repeated here so it is not lost: when the SPA sends
+`offerId`, make it required **and** make the offer segment of the checkout fingerprint unconditional
+in the same change. Step 2 appends it only when present, so an offer-less payload hashes as it did
+before the field shipped; the cost is a canonical string with variable arity, where a
+`paymentMethodToken` of `tok|of-001` with no offer collides with the token `tok` and offer `of-001`.
+Reachable only with a crafted token and the worst outcome is a replay of the caller's own order, which
+is why it was not worth length prefixes and a dual-fingerprint transition. It disappears for free once
+every string has fixed arity. **Not a day earlier:** changing the canonical string while the field is
+optional is exactly what the conditional append exists to avoid, and it would 409 every idempotency
+key stored in the previous 24 hours.
+
+---
+
+## Step 4 — The refund: state machine, endpoint, and durable reversal
+
+The last part of the refund, and the first one that moves money backwards. Everything it needs now
+exists: ADR-015 has the decisions, `V13`/`V14` have the offer and its frozen terms, and Inventory's
+post-sale transition is already live — `POST /api/inventory/reservations/{reservationId}/refund`
+taking `{orderId}`, verified in `ReservationService:255`, so this step is blocked on nobody.
+
+**Check first, because it is cheap and it decides the shape of 4a.** `markConfirmed` clears
+`payment_method_token` but **keeps** `reservation_id` (`OrderRepository:84`), and `PaymentClient.refund`
+takes `(orderId, idempotencyKey)` rather than a token. So a confirmed order already carries
+everything the reversal and the seat return need, and no new column is required for either.
+
+### 4a — The states, and the trap in `isTerminal`
+
+`CONFIRMED -> REFUNDING -> REFUNDED`, with no `REFUND_FAILED` (ADR-015). Two things follow that are
+easy to get wrong and expensive to discover:
+
+- **`OrderStatus.isTerminal` is about to mean two different things.** Today it answers one question —
+  "may the `order-placed` consumer acknowledge without a remote call?" — and both new states must
+  answer *yes* to it, or a redelivered checkout event would restart a refunded sale. But the refund's
+  own consumer needs the opposite answer for `REFUNDING`, which is precisely a state it must resume.
+  Do not overload the property: give the refund its own predicate and leave `isTerminal` meaning what
+  the checkout pipeline already relies on, with a comment on each saying which consumer it serves.
+- **`runStage`'s `when` is exhaustive over `OrderStatus`**, so adding the two states will not compile
+  until each has an arm. That is the forcing function ADR-015 counts on — the right arm is the
+  `error("unreachable: terminal states are filtered by the loop")` branch, not a new stage.
+
+Plus `V15`: the transition timestamps and the reversal reference, whatever 4b turns out to need.
+
+### 4b — The endpoint and the durable trigger
+
+- `POST /api/orders/{orderId}/refund`, owner or `operations`, with an `Idempotency-Key` under the
+  `pay-refund-{orderId}` namespace — **never** `refund-{orderId}`, which checkout compensation
+  already consumes and which would make Payments replay the compensation's stored result: a `200`
+  while no money moves.
+- Refuse, each with its own code: an order not `CONFIRMED`; an order with no `offer_id` (nothing was
+  bought under terms, and every order predating V13 is in this set); `refundable = false`; and past
+  the cutoff — `departure_at - refund_cutoff_minutes_before_departure` compared against the **Orders
+  database clock**, not a JVM clock, for the reason invariant 4 gives for hold expiry.
+- **The replay rule is the subtle one**, and it is worth its own test: a key accepted *before* the
+  cutoff must still return its original result when the retry arrives *after* it, while a new request
+  after the cutoff is refused. Two opposite behaviours on one time condition, and the idempotency
+  record is what tells them apart.
+- Commit `REFUNDING` and its outbox row in one transaction, exactly as checkout commits `ACCEPTED`
+  plus `order-placed`. A **separate topic and a separate consumer** — not the `order-placed` pipeline,
+  whose `CONFIRMED`-is-terminal rule must stay exactly as it is.
+
+### 4c — The reversal, in the order ADR-015 fixed
+
+Money first, seat second. The reversal to Payments, then `InventoryClient` gains a
+`refundReservation(reservationId, orderId)` beside hold/confirm/release — on the money-path resilience
+chain, unlike this step's read clients. If the seat return fails definitively the customer already has
+their money and a `SEAT_RETURN_FAILURE` reconciliation record stays open; an unknown outcome from
+either call throws, leaves the row in `REFUNDING`, and lets redelivery converge — no `catch`, same as
+the checkout pipeline.
+
+A refunded order should emit a `notification-requested` event like a confirmation does. Note the
+collision risk: `feature/issue-70-readable-notifications` rewrites both notification payloads in
+`CheckoutOrchestrator` (~:420 and ~:679) and the shared payload in `money-path-contracts`. Read that
+branch before writing a third one.
+
+**Done when:** a confirmed refundable order inside its cutoff is refunded end to end — money reversed,
+seat back to `AVAILABLE`, order `REFUNDED`; each refusal has its own code and a test; a failed seat
+return leaves `REFUNDING` with an open reconciliation record rather than a terminal state; and the
+pre-cutoff replay returns its original result after the cutoff.
+
+### Then, and only then
+
+- **#98's second half** — the same-day departed-run filter on the façade. It needs the departure
+  instant per route, and the Catalog client from step 3 is exactly what supplies it.
+- **Step 5**, the Orders canary, whose two broken gates are already written up under "Findings that
+  change the picture" with the attributable per-pod metrics to replace them.

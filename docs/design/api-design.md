@@ -124,11 +124,33 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
   - `travelDate` is the ISO day being travelled (`"2026-09-01"`). A route plus a seat does not identify
     a bookable thing on its own: Inventory keys seats by `(route_id, travel_date, seat_id)`, so the same
     physical seat is sold separately for each day.
-  - `offerId` records which offer is being bought. It is **optional and unvalidated**: Orders has no
-    Catalog client yet, so nothing checks that the offer exists, that it belongs to `routeId`, or that
-    its price matches `totalAmount` (issue #93). It is stored so that the post-sale refund can resolve
-    the terms the customer accepted (ADR-015); it is not yet a priced or trusted value. It becomes
-    required once the SPA sends it (issue #84).
+  - `offerId` records which offer is being bought, and **when present it decides the price**. Orders
+    resolves it against `GET /api/catalog/offers/{offerId}` inside the synchronous entry and rejects
+    the checkout unless the offer exists, is sold on `routeId`, and costs exactly `totalAmount`:
+    - `400 OFFER_NOT_FOUND` — no such offer.
+    - `400 OFFER_ROUTE_MISMATCH` — the offer is sold on another route. `details.routeId` carries the
+      route it does belong to.
+    - `400 OFFER_PRICE_MISMATCH` — the amount disagrees with the offer. `details.price` and
+      `details.currency` carry the real price so a client can re-render rather than guess. The
+      request is refused rather than silently corrected: charging an amount other than the one the
+      customer was shown is its own bug. Amounts are compared by value, so `24.9` and `24.90` agree.
+    - `503 OFFER_UNRESOLVABLE` — Catalog could not be reached, so the price could not be verified.
+      **The checkout fails closed**: this is a deliberate availability trade, because accepting the
+      client's amount when the check cannot be made reopens issue #93 at the moment nobody is
+      watching. A `503` rather than a `400` because the request was fine — the answer is "ask again".
+  - What gets authorized is the **resolved** price and currency, not the requested ones. `totalAmount`
+    is a consistency check on what the client displayed. The currency comes from the offer too: it
+    used to be a `"EUR"` literal on the authorization call while the amount came from the request, so
+    the two were never checked against each other — latent while every seeded offer is EUR, and not
+    latent on the first CHF offer for one of the cross-border routes.
+  - The order also freezes the offer's refund terms — refundability, the cutoff, the accepted
+    `termsVersion`, and the departure instant composed from `travelDate` and the station's zone — so
+    a later catalogue edit cannot rewrite what the customer accepted and the refund needs no Catalog
+    call. See ADR-015.
+  - `offerId` stays **optional**: the SPA does not send it yet (issue #84), and requiring it would
+    reject every checkout until that lands. A checkout without it is still accepted with its amount
+    unvalidated, which is the part of issue #93 that only the SPA can close. It becomes required, and
+    the validation above unconditional, once the SPA sends it.
   - Requires an authenticated customer identity.
   - Returns `202 Accepted` with an `orderId` and initial status after the request has been accepted for processing.
   - Rejects a `travelDate` in the past with `400 TRAVEL_DATE_IN_THE_PAST`. Orders deliberately checks no
@@ -161,6 +183,11 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     public anonymous route, and would leave nowhere to create a hold if issue #72 is ever accepted.
   - `travelDate` is required, not optional: seats are keyed by `(route_id, travel_date, seat_id)`,
     so a route alone does not identify a bookable seat.
+  - Rejects a `travelDate` in the past with `400 TRAVEL_DATE_IN_THE_PAST`, the same code `POST
+    /api/orders` uses, so a client that handles one handles the other (issue #98). It is a second
+    line of defence rather than the fix — which seats exist for a past date is Inventory's own truth,
+    tracked in #97. Filtering a *same-day* run that has already departed needs the departure instant
+    per route and is the remaining half of #98.
   - Inventory's `HELD` and `SOLD` are deliberately collapsed into one flag, and no reservation id,
     order id, or principal is returned: distinguishing held from sold reports another customer's
     in-flight checkout.
@@ -170,15 +197,28 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
   - Browsing traffic is isolated from the money path by a separate `inventory-read` circuit breaker
     and bulkhead, a tighter timeout, and **no retry** — a stale seat map is not worth a retry, and
     retrying read traffic is how a slow dependency becomes an outage.
-  - `404` when Inventory reports no seats for the route and date. Inventory currently conflates an
-    unknown route with a sold-out one behind the same code; raised on #68.
+  - `404` when Inventory reports no seats for the route and date. Inventory returns one code for two
+    different cases — an unknown route, and a known route with no seats provisioned for that travel
+    date — so the façade has nothing better to say than to re-raise it; tracked in #96. A sold-out
+    run is not one of those cases: its seat rows exist, so it is a `200` with every seat unavailable.
 
 - `GET /api/orders/{orderId}`
   - Returns the current order status: accepted, reserving, payment-pending, confirming-inventory, compensating, confirmed, failed, or cancelled.
   - Includes `travelDate`, distinct from `createdAt`: the day of travel, not the day of purchase.
+  - Includes `currency` beside `totalAmount`, so an amount is never presented without the unit it was
+    actually authorized in.
   - Includes `offerId` when the checkout carried one, so a client can show what was bought and decide
     whether to offer a refund: an order without an offer has no refund terms and the refund endpoint
     will refuse it (ADR-015). Null on orders placed before the field existed.
+  - With it, the refund terms the order was sold under: `refundable`,
+    `refundCutoffMinutesBeforeDeparture` (null when not refundable, and null when refundable right up
+    to departure), and `departureAt` — the offset-bearing instant the cutoff counts back from,
+    already composed from the travel date and the departure station's zone so no client has to do
+    that arithmetic. All three are null together for an order placed without an offer.
+    These let a client render the right thing; **eligibility is still decided server-side** against
+    the Orders database clock (ADR-015). The accepted `termsVersion` is deliberately not exposed: it
+    is an audit marker, and a client holding it might use it as a key into a catalogue that no longer
+    has that revision.
   - Once seats are held, includes `reservationExpiresAt`: the Inventory hold deadline, carried as an
     offset-bearing instant because it is produced by the Inventory database clock and consumed by a
     browser in an unknown zone. It is the deadline for the *checkout* to converge — covering crash,
