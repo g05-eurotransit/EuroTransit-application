@@ -443,3 +443,39 @@ state means an operator, not a customer, discovers a stuck reversal.
   at the cost of a window where a customer has neither ticket nor refund.
 - **Reusing `refund-{orderId}`.** One key scheme instead of two, but it makes Payments replay the
   compensation result for a commercial refund — a silent no-op reported as success.
+
+### Amended when the endpoint was implemented
+
+Four things were decided while building the state machine and the endpoint that this ADR should
+carry, because each is easier to undo than to rediscover.
+
+**`REFUNDING` and `REFUNDED` both answer `true` from `OrderStatus.isTerminal`, but the refund's own
+consumer never asks that predicate.** The checkout consumer's `order-placed` redelivery guard
+(`isTerminal`) has to say "yes, leave this alone" for both new states, or a stale `order-placed`
+redelivery would try to restart an order that has since been refunded. `REFUNDING` is nonetheless the
+resume point for a *different* consumer — `RefundOrchestrator`'s own, triggered by `refund-requested`
+— which decides whether to resume by comparing `order.status` against `REFUNDING` directly, never by
+negating `isTerminal`. Overloading one predicate with two questions ("is the checkout done" and "is
+the refund done") would have made the second one silently wrong the moment the first one had to be
+`true` for `REFUNDING`.
+
+**Both remote calls are safe to repeat unconditionally on every delivery, so the resume needs no
+"which step already ran" bookkeeping.** `pay-refund-{orderId}` is a deterministic idempotency key at
+Payments; Inventory's refund endpoint is idempotent by reservation state, not by key. A redelivery —
+whether it arrives before either call ran, after the reversal alone succeeded, or after both did —
+simply repeats both, exactly as `stageHold`/`stageCompensate` already rely on their own downstream
+idempotency rather than tracking progress locally.
+
+**A failed *payment* reversal during a commercial refund reuses `PAYMENT_REVERSAL_FAILURE`, the same
+kind checkout compensation opens.** Nothing about that reconciliation kind is specific to
+`COMPENSATING`; the record layout takes an `orderState` precisely so the same kind can describe either
+non-terminal money-in-doubt state. `SEAT_RETURN_FAILURE` is the only genuinely new kind, because
+nothing on the checkout side ever asks Inventory to un-sell a seat — release only ever touches a
+`HELD` row.
+
+**A closed set enumerated in a `CHECK` constraint needs a migration, not just a new enum value.**
+`reconciliation_records.kind` is constrained to the three names known when `V8` was written; adding
+`SEAT_RETURN_FAILURE` to `ReconciliationKind` without widening that constraint would have made the
+first seat-return failure of a real refund fail its own incident write with a constraint violation —
+discovered in a cluster, not at compile time, since nothing before this feature ever inserted a fourth
+kind. `V16` widens it.

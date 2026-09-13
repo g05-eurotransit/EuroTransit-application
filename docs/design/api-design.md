@@ -29,12 +29,14 @@ EuroTransit is designed as an enterprise-grade system. Public APIs must assume a
 | `GET /api/orders` | External | Required | Customer scope; always scoped to the caller's own orders, with no operations widening |
 | `GET /api/orders/seat-availability` | External | Required | Customer scope; no owned resource, so no ownership check — it is a checkout step, not public browsing |
 | `GET /api/orders/{orderId}` | External | Required | Order owner or privileged operations scope |
+| `POST /api/orders/{orderId}/refund` | External | Required | Order owner or privileged operations scope, same ownership rule as `cancel` (404, never 403, for anyone else) |
 | `POST /api/orders/{orderId}/reconciliation/redrive` | Internal operations | Required operations credential | Operations role only; redrives an open reconciliation record through the Orders outbox |
 | `POST /api/orders/{orderId}/reconciliation/{recordId}/resolve` | Internal operations | Required operations credential | Operations role only; records evidence-backed resolution of a terminal invariant incident |
 | `GET /api/inventory/availability` | Internal | Required service credential | Orders service only; read behind the Orders façade, no propagated user context required |
 | `POST /api/inventory/reservations` | Internal | Required service credential plus propagated user context | Orders service only; order owner context required |
 | `PUT /api/inventory/reservations/{reservationId}/confirmation` | Internal | Required service credential plus propagated user context | Orders service only; confirms the reservation for its owning order |
 | `DELETE /api/inventory/reservations/{reservationId}` | Internal | Required service credential plus propagated user context | Orders service only; compensation for owned order |
+| `POST /api/inventory/reservations/{reservationId}/refund` | Internal | Required service credential | Orders service only; post-sale seat return for a refund (ADR-014/ADR-015), idempotent by reservation state, no `Idempotency-Key` |
 | `POST /api/payments/authorize` | Internal | Required service credential plus propagated user context | Orders service only; payment belongs to owned order |
 | `POST /api/payments/refund` | Internal | Required service credential plus propagated user context | Orders service only; idempotently reverses payment for a failed checkout |
 | `GET /api/notifications` | External | Required | Authenticated customer can read only their own notifications |
@@ -47,7 +49,7 @@ EuroTransit is designed as an enterprise-grade system. Public APIs must assume a
 | `Authorization`    | Protected external APIs and internal service calls according to the endpoint security summary                                                                                       | Carries a bearer JWT for public APIs or service identity for internal calls.                                                                            |
 | `X-User-Id`        | Internal service-to-service calls (e.g. `POST /api/inventory/reservations`)                                                                                                         | Explicitly propagates the original customer identity when the `Authorization` header carries a service account token instead of the user token.         |
 | `X-Correlation-Id` | All internal calls, logs, and Kafka events                                                                                                                                          | Public clients may provide it; the gateway generates one if absent; services must propagate it unchanged through one checkout flow.                     |
-| `Idempotency-Key`  | `POST /api/orders`, both `POST /api/orders/{orderId}/reconciliation/**` operations, `POST /api/inventory/reservations`, `POST /api/payments/authorize`, `POST /api/payments/refund` | Identifies one mutating attempt. It is not an authorization credential and must be scoped with caller/user context, operation, and request fingerprint. |
+| `Idempotency-Key`  | `POST /api/orders`, `POST /api/orders/{orderId}/refund`, both `POST /api/orders/{orderId}/reconciliation/**` operations, `POST /api/inventory/reservations`, `POST /api/payments/authorize`, `POST /api/payments/refund` | Identifies one mutating attempt. It is not an authorization credential and must be scoped with caller/user context, operation, and request fingerprint. |
 
 Idempotency keys are generated at the caller boundary for the operation they protect:
 
@@ -55,7 +57,7 @@ Idempotency keys are generated at the caller boundary for the operation they pro
 - Public clients reuse that key only for retries of the same checkout attempt.
 - A new checkout attempt uses a new key, even if the request payload is identical.
 - Orders consumes the public checkout key and stores it with `principalId`, operation, request fingerprint, and result.
-- Orders generates separate downstream keys for internal operations, derived from the immutable order id. The scheme is `inv-{orderId}` for the seat reservation, `pay-{orderId}` for payment authorization, `rel-{orderId}` for hold release, and `refund-{orderId}` for payment reversal.
+- Orders generates separate downstream keys for internal operations, derived from the immutable order id. The scheme is `inv-{orderId}` for the seat reservation, `pay-{orderId}` for payment authorization, `rel-{orderId}` for hold release, `refund-{orderId}` for a checkout compensation's payment reversal, and `pay-refund-{orderId}` for a post-sale refund's payment reversal (ADR-015) — a distinct namespace, because reusing `refund-{orderId}` would make Payments replay the compensation's stored result for a commercial refund.
 - Inventory and Payments store their received keys scoped by operation, service caller/user context where applicable, request fingerprint, and result.
 - Reusing the same key with the same logical payload returns the current idempotent business result.
 - Reusing the same key with a different logical payload returns `409 Conflict`.
@@ -216,7 +218,7 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     run is not one of those cases: its seat rows exist, so it is a `200` with every seat unavailable.
 
 - `GET /api/orders/{orderId}`
-  - Returns the current order status: accepted, reserving, payment-pending, confirming-inventory, compensating, confirmed, failed, or cancelled.
+  - Returns the current order status: accepted, reserving, payment-pending, confirming-inventory, compensating, confirmed, failed, cancelled, refunding, or refunded. The last two are a separate durable process (ADR-015), reachable only from confirmed.
   - Includes `travelDate`, distinct from `createdAt`: the day of travel, not the day of purchase.
   - Includes `currency` beside `totalAmount`, so an amount is never presented without the unit it was
     actually authorized in.
@@ -252,6 +254,29 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
   - Accepted only while the order is `accepted` or `reserving`. From `payment-pending` onward it
     returns `409 ORDER_NOT_CANCELLABLE`, which is what closes the cancellation race before money
     moves; post-sale cancellation is a separate business process and cannot use hold release.
+- `POST /api/orders/{orderId}/refund`
+  - The post-sale refund (ADR-015): reverses the payment and returns the seat for a `confirmed`
+    order, money first. Requires the authenticated customer to own the order, or an operations role;
+    same 404-for-non-owner rule as `cancel`.
+  - Requires an `Idempotency-Key`, unlike `cancel`: the replay rule below needs a stored record to
+    distinguish a retried acceptance from a new request.
+  - Returns `202 Accepted` with the order now `refunding`, not `200`: unlike `cancel`, which commits
+    a terminal state synchronously, this commits only the acceptance of a refund whose reversal runs
+    asynchronously through its own `refund-requested` trigger and consumer — never the `order-placed`
+    pipeline, so a redelivered checkout event can never restart a completed sale.
+  - Refuses, each with its own `409` code: `ORDER_NOT_CONFIRMED` (wrong state, including an order
+    already refunding or refunded), `ORDER_HAS_NO_OFFER` (no offer, so no refund terms — every order
+    predating the offer fields is in this set), `OFFER_NOT_REFUNDABLE` (the offer's terms say no),
+    and `REFUND_CUTOFF_PASSED` (past `departureAt` minus the offer's cutoff, evaluated against the
+    Orders database clock, not a JVM clock, so two replicas agree at the boundary).
+  - **The replay rule is two opposite behaviours on one time condition.** An `Idempotency-Key`
+    already accepted before the cutoff returns its original result even when the retry arrives after
+    it; a genuinely new request after the cutoff is refused. The stored idempotency record is what
+    tells the two apart.
+  - The reversal itself: `pay-refund-{orderId}` against Payments (never `refund-{orderId}`, which
+    checkout compensation already consumes), then the reservation's refund against Inventory. If the
+    seat return fails definitively after the money is already reversed, the order stays `refunding`
+    with an open reconciliation incident — there is no `refund_failed` terminal state.
 - Orders persists order state in `orders_db`.
 - `POST /api/orders/{orderId}/reconciliation/redrive`
   - Requires an operations credential and an idempotency key. A service credential is refused with
@@ -296,6 +321,16 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
 - `DELETE /api/inventory/reservations/{reservationId}`
   - Releases a hold when payment fails, the order is cancelled, or the 10-minute hold expires.
   - Is idempotent by reservation state, operates only on `HELD`, never releases `CONFIRMED`/`SOLD`, and does not require an `Idempotency-Key`.
+- `POST /api/inventory/reservations/{reservationId}/refund`
+  - Transitions a `CONFIRMED` reservation to `REFUNDED` and its seats back to available (ADR-014),
+    for the owning `orderId`. Called by Orders' post-sale refund (ADR-015) only after the payment
+    reversal has already succeeded.
+  - Idempotent **by reservation state**, not by key: a replay against an already-`REFUNDED`
+    reservation returns the same `200` instead of erroring, and the endpoint takes no
+    `Idempotency-Key` at all — unlike reserve and release.
+  - Refusals: `404 RESERVATION_NOT_FOUND`, `409 RESERVATION_ORDER_CONFLICT` (belongs to another
+    order), `409 RESERVATION_NOT_CONFIRMED` (any state but `CONFIRMED` or `REFUNDED`),
+    `409 RESERVATION_SEAT_CONFLICT` (seat count mismatch during the refund).
 
 ### Payments
 
@@ -355,6 +390,7 @@ Consumers must be idempotent because Kafka delivery is treated as at-least-once.
 | `payment-refund-failed`  | Payments  | Orders                                        | Indicates a refund attempt failed and may need manual reconciliation.                                            |
 | `order-confirmed`        | Orders    | Notifications, observability consumers        | Indicates the order is complete and customer notification can be sent.                                           |
 | `notification-requested` | Orders    | Notifications                                 | Optional explicit notification command if separated from `order-confirmed`.                                      |
+| `refund-requested`       | Orders    | Orders (its own consumer only)                | Durable trigger for the post-sale refund (ADR-015): `confirmed` was accepted into `refunding`, and the reversal must run. Never consumed by the `order-placed` pipeline. |
 
 ### `notification-requested` payload
 

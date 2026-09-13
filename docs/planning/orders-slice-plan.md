@@ -781,6 +781,143 @@ becomes wrong silently: the amount would simply be a multiple of what it should 
 filed as an issue — there is nothing to do until Catalog wants it — but it is the question to ask
 giacomodipalma before any such offer is seeded.
 
+## Step 4 — outcome
+
+Branch `feature/orders-refund`. Full build green at **363 tests, 0 failures** (+29 over step 3's 334).
+
+**The refund runs end to end, exactly in ADR-015's order.** `POST /api/orders/{orderId}/refund`
+validates a `CONFIRMED`, offered, refundable, in-cutoff order and — in one transaction — commits
+`REFUNDING` plus a `refund-requested` outbox row, then returns `202 Accepted` with the order still
+`REFUNDING` (not `200`, unlike `cancel`: the reversal is asynchronous, so the response cannot claim
+more than acceptance). `RefundRequestedEventListener` / `RefundOrchestrator.processRefundRequested`
+— modelled line-for-line on `OrderPlacedEventListener` / `CheckoutOrchestrator.processOrderPlaced` —
+reverses the payment first (`pay-refund-{orderId}`, never `refund-{orderId}`), then returns the seat
+(`InventoryClient.refundReservation`, on the money-path resilience chain), then commits `REFUNDED`.
+Neither remote call needs "which step already ran" bookkeeping: `pay-refund-{orderId}` is a
+deterministic idempotency key at Payments and Inventory's refund is idempotent by reservation state,
+so a redelivery at any point simply repeats both safely.
+
+**`V15`** added the refund's own bookkeeping (`refund_requested_at`, `refunded_at`,
+`refund_provider_reference`, all nullable). **`V16`**, not anticipated when this step was written,
+widened `reconciliation_records`'s `ck_reconciliation_kind` `CHECK` constraint to admit
+`SEAT_RETURN_FAILURE` — see the standing-check finding below.
+
+**Refusals, each its own `409`:** `ORDER_NOT_CONFIRMED`, `ORDER_HAS_NO_OFFER`,
+`OFFER_NOT_REFUNDABLE`, `REFUND_CUTOFF_PASSED`. Not-found/not-owned is `404 ORDER_NOT_FOUND`, same
+rule as `cancel`. The cutoff is enforced in the same atomic `UPDATE` that commits `REFUNDING`
+(`CURRENT_TIMESTAMP`, never the JVM clock), and idempotency is checked *before* that update — which
+is what makes the replay rule fall out of the ordering rather than needing a special case: a key
+accepted before the cutoff replays its stored `202` even after the cutoff passes, while a genuinely
+new request in the same state after the cutoff is refused.
+
+### Every decision the plan left open, and what was chosen
+
+- **Response shape:** `OrderView`, as guessed, but `202 Accepted` rather than `200` — the order is
+  `REFUNDING`, not settled, when the response is written.
+- **`GET /api/orders/{orderId}` during `REFUNDING`:** no new fields. The existing `status` field
+  already shows `REFUNDING`/`REFUNDED`; `refund_requested_at`/`refunded_at` stay internal
+  (reconciliation-facing, not customer-facing) to keep the response shape from growing without a
+  concrete SPA need.
+- **Notification on completion:** **not emitted**, deliberately. `feature/issue-70-readable-notifications`
+  (no PR, diverged from before step 3) rewrites `NotificationRequestedPayload` and both of
+  `CheckoutOrchestrator`'s emission points; adding a third variant now, on top of a payload shape
+  that branch is actively changing, is exactly the collision the verified-facts note warned about.
+  A refunded order is fully visible on `GET /api/orders/{orderId}`; only the customer email is
+  deferred, and it is a small, easy follow-up once that branch's shape lands.
+- **Refusal code names:** `ORDER_NOT_CONFIRMED`, `ORDER_HAS_NO_OFFER`, `OFFER_NOT_REFUNDABLE`,
+  `REFUND_CUTOFF_PASSED` — all `409`, matching the existing convention (`ORDER_NOT_CANCELLABLE`,
+  `ORDER_ALREADY_TERMINAL`, `RECONCILIATION_ALREADY_RESOLVED`, ...): this codebase uses `409` for
+  every "valid resource, wrong current state" refusal and never `422`, so `409` for all four keeps
+  that convention rather than introducing the first `422`.
+
+### Decisions the plan did not mention at all
+
+- **`OrderStatus.isTerminal` now answers `true` for `REFUNDING` and `REFUNDED` too** (both new
+  states), so the checkout consumer, the dead-letter listener, and the reconciliation
+  redrive/resolve endpoints all keep treating a refunding-or-refunded order as settled from the
+  checkout pipeline's point of view. The refund's own consumer never reads this predicate; it
+  compares `order.status` against `REFUNDING` directly. One consequence worth naming: the generic
+  `POST /api/orders/{orderId}/reconciliation/redrive` now refuses a `REFUNDING` order with
+  `409 ORDER_ALREADY_TERMINAL`, which is a slightly odd word for a non-terminal-in-the-money-sense
+  state — but redriving *that* tool for a `REFUNDING` order was never going to do anything useful
+  anyway (it re-triggers `order-placed`, which the checkout consumer would just acknowledge), so
+  refusing loudly is better than accepting and silently doing nothing. No operator redrive path was
+  built for a stuck refund in this step; see "not done" below.
+- **A failed *payment* reversal during the refund reuses `PAYMENT_REVERSAL_FAILURE`**, the same
+  reconciliation kind checkout compensation opens, rather than a new kind. Nothing about that kind
+  is specific to `COMPENSATING` — the record carries its own `orderState` — so `SEAT_RETURN_FAILURE`
+  is the only genuinely new kind this step needed.
+- **`closeAutoResolvable` now also closes `SEAT_RETURN_FAILURE`**, on the same reasoning that already
+  covers `PAYMENT_REVERSAL_FAILURE`: `REFUNDED` is only ever committed after the seat return
+  succeeds, so reaching it means any earlier seat-return incident has since resolved.
+- **`ReversalOutcome.Reversed` was widened to carry `providerReference`** (was a bare `data object`).
+  Payments already returns `refundReference` on the wire; this step is the first caller that needs
+  to persist it (`V15`), so the client-side type was widened to stop discarding it. Checkout
+  compensation ignores the new field — nothing on `Order` records a compensation's reference, only a
+  commercial refund's.
+- **A new `InventoryRefusalCode.RESERVATION_NOT_CONFIRMED`** was added — purely an Orders-side
+  addition to a client-owned enum, mapping a refusal `ReservationService.refundReservation` (ADR-014)
+  already returns and that Orders simply had no client-side representation for yet.
+- **The idempotency fingerprint for `refund` is just `orderId`** (plus the operation name), since the
+  endpoint takes no body — mirroring `ReconciliationOperationsService`'s redrive/resolve fingerprints
+  rather than checkout's payload-shaped one.
+- **No dedicated `refund-requested-dlt` consumer was built.** The topic and its `-dlt` exist (see
+  below), so an exhausted delivery lands somewhere instead of vanishing, but nothing opens a
+  reconciliation incident from it the way `OrderPlacedDeadLetterListener` does for checkout. The
+  step's own text asked only for "a new listener modelled on `OrderPlacedEventListener`" (singular);
+  a DLT-side incident consumer is a reasonable next increment, not built here.
+
+### The standing boundary check
+
+Every value this change sends across a service boundary, and what the receiving side does with it:
+
+- **Orders → Payments:** `orderId` + `pay-refund-{orderId}` to the existing `/api/payments/refund`.
+  Same shapes checkout compensation already sends; verified safe by the plan's own findings (no
+  uniqueness constraint on the authorization, idempotency keyed by the key itself).
+- **Payments → Orders:** `refundReference` (a Stripe sandbox id, well under 255 characters) is now
+  persisted into `refund_provider_reference VARCHAR(255)`. Checked the generator
+  (`StripeSandboxProvider`) — an opaque provider id, not user input, comfortably inside the column.
+- **Orders → Inventory:** `reservationId` (path) + `orderId` (body) to
+  `/api/inventory/reservations/{reservationId}/refund`. Both already-stored, immutable values; the
+  four refusal codes the real `ReservationService.refundReservation` can return were all read from
+  its source and mapped (`RESERVATION_NOT_FOUND`, `RESERVATION_ORDER_CONFLICT`,
+  `RESERVATION_NOT_CONFIRMED`, `RESERVATION_SEAT_CONFLICT`); an unrecognised code would rethrow as
+  unknown rather than being silently swallowed.
+- **A value crossing into a database CHECK constraint, not a service boundary in the network sense,
+  but the same class of mistake the standing check exists to catch: `ReconciliationKind.SEAT_RETURN_FAILURE.name`
+  written into `reconciliation_records.kind`.** `V8`'s constraint enumerates the three kinds known
+  when it was written; inserting a fourth failed it. Caught by the new integration test
+  (`RefundPipelineIntegrationTest`, the seat-return-failure case), not by inspection — the same way
+  step 3's poison-message path was found only once something tried to exercise it. Fixed by `V16`.
+  **This is the one genuine finding of this step's standing check**, in the same spirit as step 3's:
+  discovered by running the code against real Postgres, not by reading it.
+- **Orders → itself, via Kafka:** `RefundRequestedEvent` on `refund-requested`. Cross-repository, and
+  handled the same way step 3 handled the Catalog URL — except, per the step's own warning, this one
+  *has* an ordering constraint: the topic must exist before this ships, or the outbox row is written
+  and never delivered. `refund-requested` and `refund-requested-dlt` were added to
+  `EuroTransit-configuration`'s `platform/strimzi/kafka-topics.yaml` (local commit
+  `9eb72e8` on branch `feature/orders-refund-kafka-topics`, not pushed) sized like `order-placed` /
+  `order-placed-dlt`. No Debezium connector change needed: `orders-outbox-connect.yaml` already
+  routes by the `type` column for any value, which is exactly the property that made adding
+  `notification-requested` free before it.
+
+### Not done here, deliberately
+
+- **No refund notification email**, and why, above.
+- **No operator redrive/resolve tooling specific to a stuck `REFUNDING` order.** A stuck seat return
+  leaves a `SEAT_RETURN_FAILURE` incident visible through the existing reconciliation gauges and logs,
+  but there is no endpoint to re-trigger just the seat return, and the generic redrive endpoint is the
+  wrong tool for it (see above). Worth a small follow-up, not required by this step's "done when".
+- **`orders.pipeline.inflight` was not extended to `REFUNDING`.** That gauge's own doc comment scopes
+  it to "the phases the synchronous Inventory confirmation introduces" — the checkout pipeline
+  specifically — and step 5 (the Orders canary) is where the gauge set for the whole service is
+  being reworked anyway (see the two broken gates already on file). Touching it here risked scope
+  creep into step 5's territory for a metric nobody asked for in this step's "done when".
+- **Step 5 itself was not written.** Writing it properly is its own investigation, the same size of
+  effort step 4's own writing took; it is left as "to be written" for the next session, as the plan's
+  own convention asks.
+
+
 ---
 
 # Handover — 2026-09-16
