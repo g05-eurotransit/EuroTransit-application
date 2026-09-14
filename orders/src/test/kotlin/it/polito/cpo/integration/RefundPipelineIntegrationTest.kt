@@ -9,6 +9,7 @@ import it.polito.cpo.client.InventoryRefusalCode
 import it.polito.cpo.client.PaymentClient
 import it.polito.cpo.client.RefundReservationOutcome
 import it.polito.cpo.client.ReversalOutcome
+import it.polito.cpo.contracts.events.RefundRequestedEvent
 import it.polito.cpo.contracts.inventory.ReservationRequest
 import it.polito.cpo.contracts.payments.PaymentRequest
 import it.polito.cpo.model.OrderStatus
@@ -18,11 +19,13 @@ import it.polito.cpo.observability.ApiException
 import it.polito.cpo.repository.OrderRepository
 import it.polito.cpo.repository.OutboxEventRepository
 import it.polito.cpo.repository.ReconciliationRecordRepository
+import it.polito.cpo.service.ReconciliationOperationsService
 import it.polito.cpo.service.RefundOrchestrator
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.apache.kafka.clients.producer.ProducerRecord
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
@@ -31,6 +34,7 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Import
 import org.springframework.context.annotation.Primary
 import org.springframework.kafka.core.KafkaTemplate
+import org.springframework.kafka.support.KafkaHeaders
 import org.springframework.kafka.test.context.EmbeddedKafka
 import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder
 import org.springframework.test.context.DynamicPropertyRegistry
@@ -39,6 +43,7 @@ import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import reactor.core.publisher.Mono
+import tools.jackson.databind.ObjectMapper
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -102,6 +107,8 @@ class RefundPipelineIntegrationTest {
     @Autowired private lateinit var payment: ControllableRefundPaymentClient
     @Autowired private lateinit var reconciliationRepository: ReconciliationRecordRepository
     @Autowired private lateinit var meterRegistry: MeterRegistry
+    @Autowired private lateinit var operations: ReconciliationOperationsService
+    @Autowired private lateinit var objectMapper: ObjectMapper
 
     @Test
     fun `a refundable confirmed order is refunded end to end through the outbox and Kafka`() = runBlocking {
@@ -161,6 +168,88 @@ class RefundPipelineIntegrationTest {
         assertEquals(ReconciliationKind.SEAT_RETURN_FAILURE.name, open.single().kind)
     }
 
+    @Test
+    fun `redriving a stuck refund retries the reversal instead of closing its incident`() = runBlocking {
+        // Correction 1's regression guard: OrderStatus.isTerminal answers true for REFUNDING (so the
+        // CHECKOUT consumer leaves it alone), but redrive must not take that as "this order is done".
+        // Before the fix, redrive's terminal branch called closeStaleFor, which now also closes
+        // SEAT_RETURN_FAILURE -- silently destroying the only durable record that a human was needed,
+        // with the gauge dropping to zero and the seat left SOLD forever.
+        val orderId = seedConfirmedOrder()
+        inventory.refuseWith[orderId] = InventoryRefusalCode.RESERVATION_SEAT_CONFLICT
+
+        refundOrchestrator.refund(orderId, "it-redrive-seed-${UUID.randomUUID()}", "user-1", isStaff = false)
+        relayRefundRequested(orderId)
+        awaitCondition {
+            reconciliationRepository.findAllByOrderIdAndStatus(orderId, ReconciliationStatus.OPEN.name).toList().isNotEmpty()
+        }
+        assertEquals(OrderStatus.REFUNDING, orderRepository.findById(orderId)!!.status)
+
+        val redriveResponse = operations.redrive(orderId, "it-redrive-${UUID.randomUUID()}", "ops-1")
+        assertEquals(OrderStatus.REFUNDING, redriveResponse.orderStatus)
+
+        // The incident must still be open immediately after redrive returns -- not closed as a side
+        // effect of an order that merely answers `isTerminal == true`.
+        val stillOpen = reconciliationRepository.findAllByOrderIdAndStatus(orderId, ReconciliationStatus.OPEN.name).toList()
+        assertEquals(1, stillOpen.size)
+        assertEquals(ReconciliationKind.SEAT_RETURN_FAILURE.name, stillOpen.single().kind)
+
+        // Redrive re-emitted refund-requested (not order-placed), so clearing the forced refusal and
+        // relaying the newest row lets the refund actually converge this time.
+        assertEquals(2, outboxRows(orderId, "refund-requested").size)
+        assertTrue(outboxRows(orderId, "order-placed").isEmpty())
+        inventory.refuseWith.remove(orderId)
+        relayLatestRefundRequested(orderId)
+
+        val order = awaitStatus(orderId, OrderStatus.REFUNDED)
+        assertNotNull(order.refundedAt)
+        assertTrue(
+            reconciliationRepository.findAllByOrderIdAndStatus(orderId, ReconciliationStatus.OPEN.name).toList().isEmpty(),
+            "the incident should close once REFUNDED actually commits",
+        )
+    }
+
+    @Test
+    fun `redriving an already REFUNDED order is refused as terminal, and closes stale records`() = runBlocking {
+        // The other half of the same decision: REFUNDED is genuinely settled, so redrive's existing
+        // terminal handling is correct and must not change for it.
+        val orderId = seedConfirmedOrder()
+        refundOrchestrator.refund(orderId, "it-redrive-refunded-${UUID.randomUUID()}", "user-1", isStaff = false)
+        relayRefundRequested(orderId)
+        awaitStatus(orderId, OrderStatus.REFUNDED)
+
+        val ex = assertFailsWith<ApiException> {
+            operations.redrive(orderId, "it-redrive-terminal-${UUID.randomUUID()}", "ops-1")
+        }
+        assertEquals("ORDER_ALREADY_TERMINAL", ex.code)
+    }
+
+    @Test
+    fun `an exhausted refund-requested delivery for a stuck refund opens a durable incident`() = runBlocking {
+        // Correction 2's regression guard. Before RefundRequestedDeadLetterListener existed, an
+        // unknown outcome that exhausted all retries left the order in REFUNDING with no
+        // reconciliation record at all: no alert, and no redrive path either (redrive requires an
+        // open record).
+        val orderId = seedConfirmedOrder()
+        // Move the order to REFUNDING directly: this test is about the dead-letter path, not about
+        // how the order got there.
+        refundOrchestrator.refund(orderId, "it-dlt-seed-${UUID.randomUUID()}", "user-1", isStaff = false)
+        assertEquals(OrderStatus.REFUNDING, orderRepository.findById(orderId)!!.status)
+
+        sendRefundDeadLetter(orderId, "org.apache.kafka.common.errors.TimeoutException", "simulated dependency timeout")
+
+        awaitCondition {
+            reconciliationRepository.findAllByOrderIdAndStatus(orderId, ReconciliationStatus.OPEN.name).toList().isNotEmpty()
+        }
+        val open = reconciliationRepository.findAllByOrderIdAndStatus(orderId, ReconciliationStatus.OPEN.name).toList()
+        assertEquals(1, open.size)
+        assertEquals(ReconciliationKind.DELIVERY_EXHAUSTED.name, open.single().kind)
+
+        // And it is now redrivable, which is the entire point of recording it.
+        val response = operations.redrive(orderId, "it-dlt-redrive-${UUID.randomUUID()}", "ops-1")
+        assertEquals(OrderStatus.REFUNDING, response.orderStatus)
+    }
+
     // --- helpers ------------------------------------------------------------------------------------
 
     private suspend fun seedConfirmedOrder(
@@ -192,11 +281,34 @@ class RefundPipelineIntegrationTest {
         return orderId
     }
 
-    // Stands in for Debezium: reads the committed refund-requested outbox row for this order and
+    // Stands in for Debezium: reads the committed refund-requested outbox row(s) for this order and
     // publishes the JSON payload to Kafka, keyed by aggregate id (the order id).
     private suspend fun relayRefundRequested(orderId: UUID) {
         outboxRows(orderId, "refund-requested")
             .forEach { kafkaTemplate.send("refund-requested", it.aggregateId, it.payload.asString()) }
+    }
+
+    // Relays only the newest refund-requested row. Needed once a redrive adds a second one: replaying
+    // both would drive the consumer twice for what should be one resumed attempt.
+    private suspend fun relayLatestRefundRequested(orderId: UUID) {
+        outboxRows(orderId, "refund-requested")
+            .maxByOrNull { it.createdAt }
+            ?.let { kafkaTemplate.send("refund-requested", it.aggregateId, it.payload.asString()) }
+    }
+
+    // Sends a record to refund-requested-dlt with the headers DeadLetterPublishingRecoverer would
+    // have attached, mirroring CheckoutPipelineIntegrationTest's sendDeadLetter for order-placed-dlt.
+    private fun sendRefundDeadLetter(orderId: UUID, exceptionFqcn: String, message: String) {
+        val event = RefundRequestedEvent(correlationId = "corr-dlt", orderId = orderId, principalId = "user-1")
+        val record = ProducerRecord<String, String>(
+            "refund-requested-dlt",
+            orderId.toString(),
+            objectMapper.writeValueAsString(event),
+        )
+        record.headers().add(KafkaHeaders.DLT_ORIGINAL_TOPIC, "refund-requested".toByteArray())
+        record.headers().add(KafkaHeaders.DLT_EXCEPTION_FQCN, exceptionFqcn.toByteArray())
+        record.headers().add(KafkaHeaders.DLT_EXCEPTION_MESSAGE, message.toByteArray())
+        kafkaTemplate.send(record)
     }
 
     private suspend fun outboxRows(orderId: UUID, type: String) =
