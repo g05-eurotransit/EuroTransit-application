@@ -113,6 +113,7 @@ export function NavBar() {
                 >
                   {initials(displayName)}
                 </span>
+                <span className="fw-semibold text-dark d-none d-lg-inline">{displayName}</span>
                 <Button variant="outline-primary" className="fw-semibold" onClick={() => void auth.signoutRedirect()}>
                   Sign out
                 </Button>
