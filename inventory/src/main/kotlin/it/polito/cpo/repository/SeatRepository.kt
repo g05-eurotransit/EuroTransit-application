@@ -17,6 +17,17 @@ interface SeatRepository : CoroutineCrudRepository<Seat, String> {
     fun findByRouteIdAndTravelDate(routeId: String, travelDate: LocalDate): Flow<Seat>
 
     /**
+     * Checks if any seats exist for a given route across all dates.
+     */
+    suspend fun existsByRouteId(routeId: String): Boolean
+
+    /**
+     * Retrieves the current database date.
+     */
+    @Query("SELECT CURRENT_DATE")
+    suspend fun getCurrentDate(): LocalDate
+
+    /**
      * Updates available seats to held for a route, date and reservation when all seats are available.
      */
     @Modifying
