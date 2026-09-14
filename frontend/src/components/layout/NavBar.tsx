@@ -28,7 +28,14 @@ export function NavBar() {
           EuroTransit
         </Navbar.Brand>
         <Navbar.Toggle aria-controls="main-nav" />
-        <Navbar.Collapse id="main-nav" className="justify-content-end">
+        <Navbar.Collapse id="main-nav">
+          <Nav className="me-auto">
+            {auth.isAuthenticated && (
+              <Nav.Link as={Link} to="/orders" className="fw-semibold text-dark">
+                My tickets
+              </Nav.Link>
+            )}
+          </Nav>
           <Nav className="align-items-center gap-3">
             {auth.isAuthenticated && (
               <Dropdown

@@ -6,6 +6,7 @@ import { BrowsePage } from "./pages/BrowsePage";
 import { SeatSelectionPage } from "./pages/SeatSelectionPage";
 import { CheckoutPage } from "./pages/CheckoutPage";
 import { OrderStatusPage } from "./pages/OrderStatusPage";
+import { OrdersListPage } from "./pages/OrdersListPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 
 export function App() {
@@ -29,6 +30,14 @@ export function App() {
             element={
               <ProtectedRoute>
                 <CheckoutPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/orders"
+            element={
+              <ProtectedRoute>
+                <OrdersListPage />
               </ProtectedRoute>
             }
           />

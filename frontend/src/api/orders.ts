@@ -16,12 +16,15 @@ export interface CheckoutRequest {
   travelDate: string;
   totalAmount: number;
   paymentMethodToken: string;
+  offerId?: string;
 }
 
 export interface CheckoutResponse {
   orderId: string;
   status: OrderStatus;
 }
+
+export type FailureCode = "SEATS_UNAVAILABLE" | "PAYMENT_DECLINED" | "CHECKOUT_FAILED";
 
 export interface OrderView {
   orderId: string;
@@ -33,6 +36,24 @@ export interface OrderView {
   totalAmount: number;
   createdAt: string;
   reservationExpiresAt?: string | null;
+  failureCode?: FailureCode | null;
+  failureMessage?: string | null;
+}
+
+export interface ListOrdersResponse {
+  orders: OrderView[];
+  nextCursor: string | null;
+}
+
+export interface SeatView {
+  seatId: string;
+  available: boolean;
+}
+
+export interface SeatAvailabilityView {
+  routeId: string;
+  travelDate: string;
+  seats: SeatView[];
 }
 
 /**
@@ -57,6 +78,32 @@ export function placeOrder(
 
 export function getOrder(orderId: string, signal?: AbortSignal): Promise<OrderView> {
   return apiFetch<OrderView>(`/orders/${encodeURIComponent(orderId)}`, { auth: true, signal });
+}
+
+/** Scoped to the authenticated customer, newest first. Pass back `nextCursor` as `cursor` to page. */
+export function listOrders(
+  opts: { status?: OrderStatus; cursor?: string | null; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<ListOrdersResponse> {
+  const params = new URLSearchParams();
+  if (opts.status) params.set("status", opts.status);
+  if (opts.cursor) params.set("cursor", opts.cursor);
+  if (opts.limit) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  return apiFetch<ListOrdersResponse>(`/orders${qs ? `?${qs}` : ""}`, { auth: true, signal });
+}
+
+/**
+ * Advisory seat map for the picker: a seat shown free can still lose the hold race, so
+ * `SEATS_UNAVAILABLE` at checkout stays the authoritative answer and must still be handled.
+ */
+export function getSeatAvailability(
+  routeId: string,
+  travelDate: string,
+  signal?: AbortSignal,
+): Promise<SeatAvailabilityView> {
+  const params = new URLSearchParams({ routeId, travelDate });
+  return apiFetch<SeatAvailabilityView>(`/orders/seat-availability?${params}`, { auth: true, signal });
 }
 
 /** Terminal states: polling can stop once one of these is reached. */
