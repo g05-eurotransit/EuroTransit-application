@@ -330,34 +330,67 @@ class RefundOrchestratorTest {
     }
 
     @Test
-    fun `a key accepted before the cutoff still replays its original result after the cutoff`() = runTest {
+    fun `a key accepted before the cutoff still replays its original result after the cutoff has since passed`() = runTest {
         // Two opposite behaviours on the same time condition (ADR-015): a replay of an already-
         // accepted key must win over a cutoff that has since passed, while a brand new request in the
-        // same state must not.
+        // same state must not. The earlier version of this test drove that through two real refund()
+        // calls, but the first call always moves the order to REFUNDING -- so the "replay" it proved
+        // was a replay for an order no longer CONFIRMED, which would have been refused with
+        // ORDER_NOT_CONFIRMED regardless of the cutoff, not REFUND_CUTOFF_PASSED. It never actually
+        // exercised the cutoff arm of the replay rule.
+        //
+        // This version isolates it: the order is left CONFIRMED with its cutoff already passed --
+        // a *fresh* request against this exact row would be refused with REFUND_CUTOFF_PASSED, and
+        // only REFUND_CUTOFF_PASSED, since every other precondition holds -- while the idempotency
+        // store is seeded directly with the response an earlier, in-time acceptance would have stored
+        // (mirroring exactly what refund() itself writes: the fingerprint over orderId, and an
+        // OrderView with the order in REFUNDING). The replay must win by running before the cutoff
+        // check, not after.
         val orderId = UUID.randomUUID()
-        val service = FakeOrderService().apply { ordersById[orderId] = refundableOrder(orderId) }
+        val order = refundableOrder(orderId, departureAt = OffsetDateTime.now().minusMinutes(30))
+        val service = FakeOrderService().apply { ordersById[orderId] = order }
         val orchestrator = orchestratorFor(service)
 
-        val first = orchestrator.refund(orderId, "idem-1", "user-1", isStaff = false)
-        assertEquals(OrderStatus.REFUNDING, first.status)
+        val key = "idem-precutoff"
+        val storedView = OrderView(
+            orderId = orderId,
+            userId = order.userId,
+            status = OrderStatus.REFUNDING,
+            routeId = order.routeId,
+            seats = order.seats.split(","),
+            travelDate = order.travelDate,
+            totalAmount = order.totalAmount,
+            currency = order.currency,
+            createdAt = order.createdAt,
+            offerId = order.offerId,
+            refundable = order.refundable,
+            refundCutoffMinutesBeforeDeparture = order.refundCutoffMinutesBeforeDeparture,
+            departureAt = order.departureAt,
+        )
+        service.idempotencyStore[key] = IdempotentRequest(
+            key, mapper.writeValueAsString(storedView), LocalDateTime.now(), "user-1", "refund", refundFingerprint(orderId),
+        )
 
-        // Time (and the order's own state) have moved on: a *fresh* request would now be refused, not
-        // on the cutoff (the order is not even CONFIRMED any more) but the same principle applies.
-        // departureAt is immutable on Order, so the row is replaced rather than mutated in place --
-        // status is kept as the first call left it (REFUNDING).
-        service.ordersById[orderId] = refundableOrder(orderId, status = OrderStatus.REFUNDING, departureAt = OffsetDateTime.now().minusMinutes(30))
+        // Sanity check on the premise: a *different* key against this same, already-past-cutoff row
+        // is refused on the cutoff specifically, proving the row really is in the state the replay
+        // has to overcome.
+        val fresh = assertThrows<ApiException> { orchestrator.refund(orderId, "idem-fresh", "user-1", isStaff = false) }
+        assertEquals("REFUND_CUTOFF_PASSED", fresh.code)
 
-        val replay = orchestrator.refund(orderId, "idem-1", "user-1", isStaff = false)
+        val replay = orchestrator.refund(orderId, key, "user-1", isStaff = false)
 
-        // Compared as instants, not by raw equality: the idempotency store round-trips through JSON,
-        // and an OffsetDateTime's offset is free to come back re-expressed (e.g. normalised to `Z`)
-        // for the same instant -- the same reason OrderTransitionsIntegrationTest compares instants
-        // rather than raw equality for a TIMESTAMPTZ round-trip. The property under test is that the
-        // replay is the SAME result, not that JSON preserves an offset's spelling.
-        assertEquals(first.orderId, replay.orderId)
-        assertEquals(first.status, replay.status)
-        assertEquals(first.departureAt?.toInstant(), replay.departureAt?.toInstant())
+        assertEquals(orderId, replay.orderId)
+        assertEquals(OrderStatus.REFUNDING, replay.status)
+        // And the row itself was never touched by the replay: no eligibility check, no transition
+        // attempted -- it is CONFIRMED exactly as this test seeded it.
+        assertEquals(OrderStatus.CONFIRMED, service.ordersById[orderId]!!.status)
     }
+
+    /** Mirrors `RefundOrchestrator`'s private fingerprint: just the operation and the order id. */
+    private fun refundFingerprint(orderId: UUID): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest("refund|$orderId".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
 
     @Test
     fun `a different key for the same order after acceptance is refused, not replayed`() = runTest {

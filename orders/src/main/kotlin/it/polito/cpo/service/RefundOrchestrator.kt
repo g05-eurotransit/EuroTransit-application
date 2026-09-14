@@ -142,9 +142,18 @@ class RefundOrchestrator(
     }
 
     /**
-     * The four static preconditions markRefunding's SQL also enforces. Checked here first so the
+     * The three static preconditions markRefunding's SQL also enforces, checked here first so the
      * common case gets a precise code without needing the 0-rows re-read, and re-run after a 0-rows
-     * result to isolate the one condition that SQL predicate alone cannot distinguish: the cutoff.
+     * result to isolate the one condition a static check cannot: the cutoff.
+     *
+     * Does **not** check `departureAt != null` even though `markRefunding`'s SQL requires
+     * `departure_at IS NOT NULL` too: `CheckoutOrchestrator` writes `offerId`, `refundable` and
+     * `departureAt` together from the same resolved offer (V13/V14), so `refundable == true` implies
+     * `departureAt != null` for every row this code can reach today. If that coupling is ever broken
+     * — a future migration, a decoupled write path — a row with `refundable = true` and a null
+     * `departureAt` would pass every check here, fail `markRefunding`'s SQL, and be reported as
+     * `REFUND_CUTOFF_PASSED`, which would be the wrong reason. Worth an explicit check only if that
+     * coupling stops holding.
      */
     private fun requireEligible(order: Order) {
         if (order.status != OrderStatus.CONFIRMED) {

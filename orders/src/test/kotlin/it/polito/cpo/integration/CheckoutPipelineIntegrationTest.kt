@@ -359,6 +359,11 @@ class CheckoutPipelineIntegrationTest {
         val order = awaitTerminal(response.orderId)
         assertEquals(OrderStatus.FAILED, order.status)
         assertTrue(payment.refundedOrderIds.contains(response.orderId))
+        // Checkout compensation must use its own idempotency namespace, never the post-sale refund's
+        // pay-refund-{orderId} (ADR-015): the two must not alias, or Payments could replay one
+        // reversal's stored result for the other.
+        assertTrue(payment.refundIdempotencyKeys.contains("refund-${response.orderId}"))
+        assertFalse(payment.refundIdempotencyKeys.contains("pay-refund-${response.orderId}"))
         assertTrue(inventory.releasedReservationIds.contains("res-${response.orderId}"))
         // An ordinary race against the deadline opens no incident.
         assertTrue(openRecords(response.orderId).isEmpty())
@@ -865,16 +870,12 @@ class CheckoutPipelineIntegrationTest {
             releasedReservationIds.add(reservationId)
         }
 
-        val refundedReservationIds = CopyOnWriteArrayList<String>()
-
-        /** orderId -> a definitive refusal to answer the seat return with. */
-        val refuseRefundWith = ConcurrentHashMap<UUID, InventoryRefusalCode>()
-
-        override suspend fun refundReservation(reservationId: String, orderId: UUID): RefundReservationOutcome {
-            refuseRefundWith[orderId]?.let { return RefundReservationOutcome.Refused(it, "forced by test") }
-            refundedReservationIds.add(reservationId)
-            return RefundReservationOutcome.Refunded(reservationId)
-        }
+        // The checkout pipeline never calls this: compensation only ever releases a HELD hold
+        // (releaseSeats above). The post-sale refund's own use of it is exercised by
+        // RefundPipelineIntegrationTest's own doubles, not this file's. Implemented only to satisfy
+        // InventoryClient, and kept trivial on purpose so an unused knob does not accumulate here.
+        override suspend fun refundReservation(reservationId: String, orderId: UUID): RefundReservationOutcome =
+            RefundReservationOutcome.Refunded(reservationId)
     }
 
     /**
