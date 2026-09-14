@@ -14,9 +14,9 @@ import org.springframework.stereotype.Component
  * Publishes how many orders sit in each non-terminal checkout phase, and how old the oldest one is.
  *
  * These are the observability counterpart of the phases the synchronous Inventory confirmation
- * introduces. An order stranded in `PAYMENT_PENDING`, `CONFIRMING_INVENTORY` or `COMPENSATING` has
- * money committed somewhere and has not converged, and unlike a failure it produces no event of its
- * own — nothing else in the system would ever mention it. A counter cannot express "one has been stuck
+ * introduces, plus `REFUNDING` (ADR-015): an order stranded in any of them has money committed or
+ * reversed somewhere and has not converged, and unlike a failure it produces no event of its own —
+ * nothing else in the system would ever mention it. A counter cannot express "one has been stuck
  * for an hour" once its rate window has passed, so the gauge is required rather than a nicety
  * (docs/design/reservation-confirmation.md, Observability Requirements).
  */
@@ -73,6 +73,7 @@ class PipelineStateGaugeJob(
             OrderStatus.PAYMENT_PENDING,
             OrderStatus.CONFIRMING_INVENTORY,
             OrderStatus.COMPENSATING,
+            OrderStatus.REFUNDING,
         )
     }
 }

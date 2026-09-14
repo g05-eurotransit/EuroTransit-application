@@ -225,18 +225,30 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
     /**
      * Feeds the non-terminal pipeline gauges. An order stranded in one of these phases is the failure
      * mode the synchronous confirmation introduces — money is committed somewhere and the checkout has
-     * not converged — so it needs to be observable by age, not just by count.
+     * not converged — so it needs to be observable by age, not just by count. `REFUNDING` belongs here
+     * for the same reason: money already reversed (or a definitive seat-return refusal recorded) and
+     * the order has not reached `REFUNDED`.
      *
-     * `created_at` is `TIMESTAMP WITHOUT TIME ZONE`, so the age is computed against `LOCALTIMESTAMP`.
-     * Comparing it with `CURRENT_TIMESTAMP` would silently offset every age by the session time zone.
+     * `created_at` is `TIMESTAMP WITHOUT TIME ZONE`, so its age is computed against `LOCALTIMESTAMP`;
+     * comparing it with `CURRENT_TIMESTAMP` would silently offset every age by the session time zone.
+     * `REFUNDING`'s age is measured differently and deliberately **not** from `created_at`: that column
+     * is the *purchase* time, and a ticket bought months ago and refunded moments ago would otherwise
+     * report an age of months the instant it enters `REFUNDING` — firing every age threshold on a
+     * refund seconds old. `refund_requested_at` (`V15`) is when the refund itself was accepted, and it
+     * is `TIMESTAMPTZ`, so it is compared against `CURRENT_TIMESTAMP`, not `LOCALTIMESTAMP`.
      */
     @Query(
         """
-        SELECT status                                                              AS status,
-               COUNT(*)                                                            AS order_count,
-               COALESCE(MAX(EXTRACT(EPOCH FROM (LOCALTIMESTAMP - created_at))), 0) AS oldest_age_seconds
+        SELECT status AS status,
+               COUNT(*) AS order_count,
+               COALESCE(MAX(
+                   CASE WHEN status = 'REFUNDING'
+                        THEN EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - refund_requested_at))
+                        ELSE EXTRACT(EPOCH FROM (LOCALTIMESTAMP - created_at))
+                   END
+               ), 0) AS oldest_age_seconds
           FROM orders
-         WHERE status IN ('PAYMENT_PENDING', 'CONFIRMING_INVENTORY', 'COMPENSATING')
+         WHERE status IN ('PAYMENT_PENDING', 'CONFIRMING_INVENTORY', 'COMPENSATING', 'REFUNDING')
          GROUP BY status
         """,
     )
