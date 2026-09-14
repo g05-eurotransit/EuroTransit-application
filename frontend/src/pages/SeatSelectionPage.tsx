@@ -93,13 +93,6 @@ export function SeatSelectionPage() {
         onClick={() => toggleSeat(seat.seatId)}
       >
         {seat.seatId}
-        {!seat.available && (
-          <i
-            className="bi bi-x-lg position-absolute top-50 start-50 translate-middle"
-            style={{ fontSize: "1.75rem", color: "#adb5bd" }}
-            aria-hidden="true"
-          />
-        )}
       </Button>
     );
   }
