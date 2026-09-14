@@ -47,10 +47,12 @@ class SeatServiceTest {
     }
 
     @Test
-    fun `getAvailability throws ApiException 404 when no seats found`(): Unit = runBlocking {
+    fun `getAvailability throws ApiException ROUTE_NOT_FOUND when route does not exist at all`(): Unit = runBlocking {
         val repository = Mockito.mock(SeatRepository::class.java)
         Mockito.`when`(repository.findByRouteIdAndTravelDate("invalid-route", travelDate))
             .thenReturn(emptyFlow())
+        Mockito.`when`(repository.existsByRouteId("invalid-route"))
+            .thenReturn(false)
 
         val service = SeatService(repository)
         
@@ -62,5 +64,25 @@ class SeatServiceTest {
         
         assertEquals(HttpStatus.NOT_FOUND, exception.status)
         assertEquals("ROUTE_NOT_FOUND", exception.code)
+    }
+
+    @Test
+    fun `getAvailability throws ApiException NO_SEATS_FOR_DATE when route exists but not for the given date`(): Unit = runBlocking {
+        val repository = Mockito.mock(SeatRepository::class.java)
+        Mockito.`when`(repository.findByRouteIdAndTravelDate("valid-route", travelDate))
+            .thenReturn(emptyFlow())
+        Mockito.`when`(repository.existsByRouteId("valid-route"))
+            .thenReturn(true)
+
+        val service = SeatService(repository)
+        
+        val exception = assertThrows(ApiException::class.java) {
+            runBlocking {
+                service.getAvailability("valid-route", travelDate)
+            }
+        }
+        
+        assertEquals(HttpStatus.NOT_FOUND, exception.status)
+        assertEquals("NO_SEATS_FOR_DATE", exception.code)
     }
 }
