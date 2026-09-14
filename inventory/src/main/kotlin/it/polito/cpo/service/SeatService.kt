@@ -18,6 +18,11 @@ class SeatService(
      * Retrieves all seats for a given route and travel date, mapping them to privacy-safe DTOs.
      */
     suspend fun getAvailability(routeId: String, travelDate: LocalDate): SeatAvailabilityResponse {
+        val currentDate = seatRepository.getCurrentDate()
+        if (travelDate.isBefore(currentDate)) {
+            throw ApiException(HttpStatus.BAD_REQUEST, "TRAVEL_DATE_IN_THE_PAST", "Cannot query availability for past dates")
+        }
+
         val seats = seatRepository.findByRouteIdAndTravelDate(routeId, travelDate).map { seat ->
             SeatDto(
                 seatId = seat.seatId,

@@ -22,6 +22,7 @@ class SeatServiceTest {
     @Test
     fun `getAvailability returns mapped privacy-safe seats when route and date exist`() = runBlocking {
         val repository = Mockito.mock(SeatRepository::class.java)
+        Mockito.`when`(repository.getCurrentDate()).thenReturn(LocalDate.now())
         Mockito.`when`(repository.findByRouteIdAndTravelDate("route-1", travelDate))
             .thenReturn(flowOf(
                 Seat("route-1", travelDate, "1A", "AVAILABLE"),
@@ -49,6 +50,7 @@ class SeatServiceTest {
     @Test
     fun `getAvailability throws ApiException ROUTE_NOT_FOUND when route does not exist at all`(): Unit = runBlocking {
         val repository = Mockito.mock(SeatRepository::class.java)
+        Mockito.`when`(repository.getCurrentDate()).thenReturn(LocalDate.now())
         Mockito.`when`(repository.findByRouteIdAndTravelDate("invalid-route", travelDate))
             .thenReturn(emptyFlow())
         Mockito.`when`(repository.existsByRouteId("invalid-route"))
@@ -69,6 +71,7 @@ class SeatServiceTest {
     @Test
     fun `getAvailability throws ApiException NO_SEATS_FOR_DATE when route exists but not for the given date`(): Unit = runBlocking {
         val repository = Mockito.mock(SeatRepository::class.java)
+        Mockito.`when`(repository.getCurrentDate()).thenReturn(LocalDate.now())
         Mockito.`when`(repository.findByRouteIdAndTravelDate("valid-route", travelDate))
             .thenReturn(emptyFlow())
         Mockito.`when`(repository.existsByRouteId("valid-route"))
@@ -84,5 +87,23 @@ class SeatServiceTest {
         
         assertEquals(HttpStatus.NOT_FOUND, exception.status)
         assertEquals("NO_SEATS_FOR_DATE", exception.code)
+    }
+
+    @Test
+    fun `getAvailability throws ApiException TRAVEL_DATE_IN_THE_PAST when date is before current db date`(): Unit = runBlocking {
+        val pastDate = LocalDate.now().minusDays(1)
+        val repository = Mockito.mock(SeatRepository::class.java)
+        Mockito.`when`(repository.getCurrentDate()).thenReturn(LocalDate.now())
+
+        val service = SeatService(repository)
+        
+        val exception = assertThrows(ApiException::class.java) {
+            runBlocking {
+                service.getAvailability("valid-route", pastDate)
+            }
+        }
+        
+        assertEquals(HttpStatus.BAD_REQUEST, exception.status)
+        assertEquals("TRAVEL_DATE_IN_THE_PAST", exception.code)
     }
 }
