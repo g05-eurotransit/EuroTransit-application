@@ -18,6 +18,12 @@ function formatDate(iso: string): string {
   });
 }
 
+const FAILURE_COPY: Record<string, string> = {
+  SEATS_UNAVAILABLE: "The seats you selected were taken by another customer first. Choose different seats and try again.",
+  PAYMENT_DECLINED: "Your payment was declined. Try another payment method.",
+};
+const GENERIC_FAILURE_COPY = "This order could not be completed. Please try again.";
+
 const STATUS_VARIANT: Record<OrderStatus, string> = {
   CONFIRMED: "success",
   FAILED: "danger",
@@ -154,9 +160,14 @@ export function OrderStatusPage() {
               Your booking is confirmed.
             </Alert>
           )}
-          {(order.status === "FAILED" || order.status === "CANCELLED") && (
+          {order.status === "FAILED" && (
             <Alert variant="danger" className="mb-0">
-              This order did not complete.
+              {(order.failureCode && FAILURE_COPY[order.failureCode]) ?? GENERIC_FAILURE_COPY}
+            </Alert>
+          )}
+          {order.status === "CANCELLED" && (
+            <Alert variant="danger" className="mb-0">
+              This order was cancelled.
             </Alert>
           )}
         </Card.Body>

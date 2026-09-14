@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Button, Card, Col, Row } from "react-bootstrap";
+import { Alert, Button, Card, Col, Row, Spinner } from "react-bootstrap";
 import { BackButton } from "../components/BackButton";
 import { OrderSummaryCard } from "../components/OrderSummaryCard";
+import { getSeatAvailability, type SeatView } from "../api/orders";
+import { ApiError } from "../api/client";
 
 interface OfferState {
   routeId: string;
@@ -18,8 +20,22 @@ interface OfferState {
   conditions: string;
   travelDate: string;
 }
-const ROWS = [1, 2, 3];
-const COLS = ["A", "B"];
+
+function groupByRow(seats: SeatView[]): { row: string; seats: SeatView[] }[] {
+  const rows = new Map<string, SeatView[]>();
+  for (const seat of seats) {
+    const match = /^(\d+)([A-Za-z]+)$/.exec(seat.seatId);
+    const row = match ? match[1] : "";
+    if (!rows.has(row)) rows.set(row, []);
+    rows.get(row)!.push(seat);
+  }
+  return [...rows.entries()]
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([row, rowSeats]) => ({
+      row,
+      seats: rowSeats.sort((a, b) => a.seatId.localeCompare(b.seatId, undefined, { numeric: true })),
+    }));
+}
 
 export function SeatSelectionPage() {
   const location = useLocation();
@@ -27,10 +43,30 @@ export function SeatSelectionPage() {
   const state = location.state as OfferState | null;
 
   const [selectedSeats, setSelectedSeats] = useState<string[]>([]);
+  const [seats, setSeats] = useState<SeatView[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!state) navigate("/", { replace: true });
   }, [state, navigate]);
+
+  useEffect(() => {
+    if (!state) return;
+    const ac = new AbortController();
+    setSeats(null);
+    setError(null);
+    getSeatAvailability(state.routeId, state.travelDate, ac.signal)
+      .then((res) => setSeats(res.seats))
+      .catch((e) => {
+        if (e instanceof ApiError && e.kind === "network") return; // aborted
+        if (e instanceof ApiError && e.kind === "not_found") {
+          setError("No seats found for this route and date.");
+          return;
+        }
+        setError(e instanceof Error ? e.message : "Failed to load seat availability");
+      });
+    return () => ac.abort();
+  }, [state]);
 
   if (!state) return null;
   const offer: OfferState = state;
@@ -41,17 +77,29 @@ export function SeatSelectionPage() {
     );
   }
 
-  function seatButton(seatId: string) {
-    const selected = selectedSeats.includes(seatId);
+  function seatButton(seat: SeatView) {
+    const selected = selectedSeats.includes(seat.seatId);
     return (
       <Button
-        key={seatId}
+        key={seat.seatId}
         variant={selected ? "accent" : "outline-dark"}
-        className="fw-bold fs-5 text-nowrap"
-        style={{ width: "3.75rem", height: "3.5rem" }}
-        onClick={() => toggleSeat(seatId)}
+        className="fw-bold fs-5 text-nowrap position-relative"
+        style={{
+          width: "3.75rem",
+          height: "3.5rem",
+          ...(!seat.available && { backgroundColor: "#e9ecef", borderColor: "#ced4da" }),
+        }}
+        disabled={!seat.available}
+        onClick={() => toggleSeat(seat.seatId)}
       >
-        {seatId}
+        {seat.seatId}
+        {!seat.available && (
+          <i
+            className="bi bi-x-lg position-absolute top-50 start-50 translate-middle"
+            style={{ fontSize: "1.75rem", color: "#adb5bd" }}
+            aria-hidden="true"
+          />
+        )}
       </Button>
     );
   }
@@ -99,19 +147,34 @@ export function SeatSelectionPage() {
               <span className="d-inline-block rounded bg-accent" style={{ width: 22, height: 22 }} />
               <span className="fs-6 fw-semibold text-secondary-emphasis">Selected</span>
             </div>
+            <div className="d-flex align-items-center gap-2">
+              <span
+                className="d-inline-block rounded border"
+                style={{ width: 22, height: 22, backgroundColor: "#e9ecef", borderColor: "#ced4da" }}
+              />
+              <span className="fs-6 fw-semibold text-secondary-emphasis">Taken</span>
+            </div>
           </div>
 
           <Card className="border-2 border-primary-subtle rounded-4 p-4">
-            <div style={{ overflowX: "auto" }} className="pb-1">
-              {ROWS.map((row) => (
-                <div key={row} className="d-flex align-items-center gap-3 mb-3" style={{ width: "fit-content" }}>
-                  <div className="text-secondary-emphasis fw-semibold fs-5" style={{ width: 28 }}>
-                    {row}
+            {error && <Alert variant="danger">{error}</Alert>}
+            {!error && !seats && (
+              <div className="text-secondary-emphasis d-flex align-items-center gap-2">
+                <Spinner animation="border" size="sm" /> Loading seat map…
+              </div>
+            )}
+            {!error && seats && (
+              <div style={{ overflowX: "auto" }} className="pb-1">
+                {groupByRow(seats).map(({ row, seats: rowSeats }) => (
+                  <div key={row} className="d-flex align-items-center gap-3 mb-3" style={{ width: "fit-content" }}>
+                    <div className="text-secondary-emphasis fw-semibold fs-5" style={{ width: 28 }}>
+                      {row}
+                    </div>
+                    <div className="d-flex gap-2">{rowSeats.map((s) => seatButton(s))}</div>
                   </div>
-                  <div className="d-flex gap-2">{COLS.map((c) => seatButton(`${row}${c}`))}</div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </Card>
         </Col>
 

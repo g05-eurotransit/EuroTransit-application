@@ -29,6 +29,7 @@ interface CheckoutState {
   seats: string[];
   totalAmount: number;
   currency: string;
+  offerId: string;
 }
 
 let stripePromise: ReturnType<typeof loadStripe> | undefined;
@@ -103,14 +104,13 @@ function CheckoutForm({ order }: { order: CheckoutState }) {
     setSubmitting(true);
     setError(null);
 
-    const { token, error: tokenError } = await stripe.createToken(cardNumberElement);
-    if (tokenError || !token) {
-      setError(tokenError?.message ?? "Could not process the card.");
-      setSubmitting(false);
-      return;
-    }
-
     try {
+      const { token, error: tokenError } = await stripe.createToken(cardNumberElement);
+      if (tokenError || !token) {
+        setError(tokenError?.message ?? "Could not process the card.");
+        return;
+      }
+
       const res = await placeOrder(
         {
           routeId: order.routeId,
@@ -118,6 +118,7 @@ function CheckoutForm({ order }: { order: CheckoutState }) {
           travelDate: order.travelDate,
           totalAmount: order.totalAmount,
           paymentMethodToken: token.id,
+          offerId: order.offerId,
         },
         attemptKey, // reused if the user retries this same attempt
         newId(), // fresh correlation id per action
