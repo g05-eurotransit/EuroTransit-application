@@ -783,7 +783,8 @@ giacomodipalma before any such offer is seeded.
 
 ## Step 4 — outcome
 
-Branch `feature/orders-refund`. Full build green at **363 tests, 0 failures** (+29 over step 3's 334).
+Branch `feature/orders-refund`. Full build green at **368 tests, 0 failures** (+34 over step 3's 334;
+see "Corrected after an adversarial review" below for the last 5 and three fixes to the first 363).
 
 **The refund runs end to end, exactly in ADR-015's order.** `POST /api/orders/{orderId}/refund`
 validates a `CONFIRMED`, offered, refundable, in-cutoff order and — in one transaction — commits
@@ -833,16 +834,13 @@ new request in the same state after the cutoff is refused.
 ### Decisions the plan did not mention at all
 
 - **`OrderStatus.isTerminal` now answers `true` for `REFUNDING` and `REFUNDED` too** (both new
-  states), so the checkout consumer, the dead-letter listener, and the reconciliation
-  redrive/resolve endpoints all keep treating a refunding-or-refunded order as settled from the
-  checkout pipeline's point of view. The refund's own consumer never reads this predicate; it
-  compares `order.status` against `REFUNDING` directly. One consequence worth naming: the generic
-  `POST /api/orders/{orderId}/reconciliation/redrive` now refuses a `REFUNDING` order with
-  `409 ORDER_ALREADY_TERMINAL`, which is a slightly odd word for a non-terminal-in-the-money-sense
-  state — but redriving *that* tool for a `REFUNDING` order was never going to do anything useful
-  anyway (it re-triggers `order-placed`, which the checkout consumer would just acknowledge), so
-  refusing loudly is better than accepting and silently doing nothing. No operator redrive path was
-  built for a stuck refund in this step; see "not done" below.
+  states), so the checkout consumer and the checkout dead-letter listener keep treating a
+  refunding-or-refunded order as settled from the checkout pipeline's point of view. The refund's own
+  consumer never reads this predicate; it compares `order.status` against `REFUNDING` directly. **A
+  first version of this also let `ReconciliationOperationsService.redrive` reuse `isTerminal`
+  directly for `REFUNDING`, which was wrong and is corrected below** — redrive now resolves
+  `REFUNDING` to its own case before the generic terminal branch, re-emitting `refund-requested`
+  rather than treating the order as settled.
 - **A failed *payment* reversal during the refund reuses `PAYMENT_REVERSAL_FAILURE`**, the same
   reconciliation kind checkout compensation opens, rather than a new kind. Nothing about that kind
   is specific to `COMPENSATING` — the record carries its own `orderState` — so `SEAT_RETURN_FAILURE`
@@ -861,11 +859,9 @@ new request in the same state after the cutoff is refused.
 - **The idempotency fingerprint for `refund` is just `orderId`** (plus the operation name), since the
   endpoint takes no body — mirroring `ReconciliationOperationsService`'s redrive/resolve fingerprints
   rather than checkout's payload-shaped one.
-- **No dedicated `refund-requested-dlt` consumer was built.** The topic and its `-dlt` exist (see
-  below), so an exhausted delivery lands somewhere instead of vanishing, but nothing opens a
-  reconciliation incident from it the way `OrderPlacedDeadLetterListener` does for checkout. The
-  step's own text asked only for "a new listener modelled on `OrderPlacedEventListener`" (singular);
-  a DLT-side incident consumer is a reasonable next increment, not built here.
+- **A dedicated `refund-requested-dlt` consumer was added after an adversarial review** (see below);
+  it was not part of the original step-4 pass, whose text asked only for "a new listener modelled on
+  `OrderPlacedEventListener`" (singular) and read that as covering the happy-path consumer only.
 
 ### The standing boundary check
 
@@ -901,18 +897,47 @@ Every value this change sends across a service boundary, and what the receiving 
   routes by the `type` column for any value, which is exactly the property that made adding
   `notification-requested` free before it.
 
+### Corrected after an adversarial review
+
+The first pass above (363 tests) shipped two bugs that a subsequent review caught, both from the same
+root cause: reasoning about `REFUNDING` from inside the refund path instead of asking what an operator
+or a monitoring system would actually see. Both are the kind of thing that looks fine in every test
+that does not specifically go looking for them, which is exactly why they survived the standing check
+above — that check asked "what does the receiver do with this value," not "who else, besides the
+refund path itself, reads `OrderStatus.isTerminal` and what does *false-looks-like-true* mean to them."
+
+- **`redrive` was silently destroying the incident it was meant to retry.** `isTerminal` answers
+  `true` for `REFUNDING`, so `redrive`'s terminal branch ran for a stuck refund, calling
+  `closeStaleFor` — which now also closes `SEAT_RETURN_FAILURE` — before refusing with
+  `409 ORDER_ALREADY_TERMINAL`. An operator redriving a stuck refund would have cleared the only
+  record that said one was needed: gauge to zero, alert clears, seat stays `SOLD` forever, order
+  stays `REFUNDING` forever. `OrderPlacedDeadLetterListener` had the identical shape of bug on a
+  narrower path (an `order-placed` delivery exhausted while the order happens to be `REFUNDING`).
+  Fixed: `REFUNDING` is resolved to its own case in both places, before the generic terminal branch,
+  and nothing is closed for it. `redrive` now re-emits `refund-requested` for a `REFUNDING` order,
+  making it the operator's actual retry path for a stuck refund — closing the "not done" item the
+  first pass listed here.
+- **A stuck refund could vanish with no reconciliation record at all.** Every unknown outcome in the
+  reversal throws so redelivery can converge, but the shared error handler gives up after ~3 seconds,
+  and nothing consumed `refund-requested-dlt`. A routine Inventory pod roll (20-30s to become ready)
+  was enough to strand an order in `REFUNDING` with no incident, no alert, and no redrive path
+  (redrive requires one to exist). Fixed: `RefundRequestedDeadLetterListener`, modelled on
+  `OrderPlacedDeadLetterListener`, opens `DELIVERY_EXHAUSTED` — closing the other "not done" item.
+- **`REFUNDING` was missing from the pipeline gauges**, and was added — but not simply by appending it
+  to the existing query. `created_at` is purchase time, not refund-request time; using it for
+  `REFUNDING`'s age would report a months-old ticket refunded seconds ago as months stuck, firing
+  every threshold on a healthy refund and teaching whoever's on call to mute the alert. Its age comes
+  from `refund_requested_at` (`V15`) against `CURRENT_TIMESTAMP` instead.
+- Two lower-severity findings from the same review, fixed alongside: the cutoff-replay test was
+  rewritten because it never actually exercised the cutoff (see the test commit for why), and a
+  `CheckoutPipelineIntegrationTest` double carried two fields nothing asserted on, trimmed and
+  replaced with a real assertion that checkout compensation never uses the commercial refund's key.
+
+Full build after these fixes: **368 tests, 0 failures**.
+
 ### Not done here, deliberately
 
-- **No refund notification email**, and why, above.
-- **No operator redrive/resolve tooling specific to a stuck `REFUNDING` order.** A stuck seat return
-  leaves a `SEAT_RETURN_FAILURE` incident visible through the existing reconciliation gauges and logs,
-  but there is no endpoint to re-trigger just the seat return, and the generic redrive endpoint is the
-  wrong tool for it (see above). Worth a small follow-up, not required by this step's "done when".
-- **`orders.pipeline.inflight` was not extended to `REFUNDING`.** That gauge's own doc comment scopes
-  it to "the phases the synchronous Inventory confirmation introduces" — the checkout pipeline
-  specifically — and step 5 (the Orders canary) is where the gauge set for the whole service is
-  being reworked anyway (see the two broken gates already on file). Touching it here risked scope
-  creep into step 5's territory for a metric nobody asked for in this step's "done when".
+- **No refund notification email**, and why, above (unchanged by the review).
 - **Step 5 itself was not written.** Writing it properly is its own investigation, the same size of
   effort step 4's own writing took; it is left as "to be written" for the next session, as the plan's
   own convention asks.

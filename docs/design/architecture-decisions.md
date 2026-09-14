@@ -479,3 +479,24 @@ nothing on the checkout side ever asks Inventory to un-sell a seat — release o
 first seat-return failure of a real refund fail its own incident write with a constraint violation —
 discovered in a cluster, not at compile time, since nothing before this feature ever inserted a fourth
 kind. `V16` widens it.
+
+### Corrected after an adversarial review
+
+The paragraph above states that the refund's own consumer decides whether to resume "never by
+negating `isTerminal`" — correct, and the reason it had to be written down at all is that the
+operator-facing redrive endpoint initially got it wrong in exactly the way this paragraph warns
+against. `ReconciliationOperationsService.redrive` reused `isTerminal` directly, so a `REFUNDING`
+order hit the same terminal branch a truly finished order does, calling `closeStaleFor` — which now
+also closes `SEAT_RETURN_FAILURE` — before refusing the redrive. An operator retrying a stuck refund
+would have destroyed the incident that said one was stuck: gauge to zero, alert clears, seat left
+`SOLD` forever. `OrderPlacedDeadLetterListener` had the identical shape of bug on a narrower path.
+Both now resolve `REFUNDING` to its own case before the generic terminal branch, and `redrive`
+re-emits `refund-requested` for it rather than closing anything — making redrive the operator's
+actual retry path for a stuck refund, which ADR-015 assumed would exist but this implementation had
+not yet provided.
+
+Separately, `refund-requested-dlt` initially had no consumer. The shared error handler exhausts in
+about three seconds, so a dependency blip ordinary enough to be routine (an Inventory pod roll) could
+strand an order in `REFUNDING` with no reconciliation record at all — `recordSeatReturnFailure` only
+runs on a *definitive* refusal, never on an outcome that merely timed out. `RefundRequestedDeadLetterListener`,
+modelled on `OrderPlacedDeadLetterListener`, closes that gap by opening `DELIVERY_EXHAUSTED`.

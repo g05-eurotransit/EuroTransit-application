@@ -283,8 +283,15 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     `403`: it drives automated internal calls and must not be able to redrive a customer's checkout.
   - Accepts only orders with an open reconciliation record, otherwise
     `409 NO_OPEN_RECONCILIATION_RECORD`.
-  - Atomically stores the redrive result and writes a new `order-placed` outbox row, then returns `202 Accepted`.
-  - A terminal order returns `409 ORDER_ALREADY_TERMINAL` and closes any stale record as it refuses.
+  - Atomically stores the redrive result and writes a new outbox row, then returns `202 Accepted`. The
+    row's type depends on which durable process the order is currently in: `order-placed` for the
+    checkout pipeline, `refund-requested` for a `refunding` order (ADR-015) — this is also the
+    operator's retry path for a stuck refund (a seat return that keeps failing, say).
+  - A **genuinely** terminal order (`confirmed`, `failed`, `cancelled`, `refunded`) returns
+    `409 ORDER_ALREADY_TERMINAL` and closes any stale record as it refuses. `refunding` answers `true`
+    from the same internal terminal check the checkout consumer uses, but is deliberately **not**
+    treated as terminal here: the money or the seat may still be unresolved, and closing its incident
+    on redrive would be exactly the failure this endpoint exists to fix.
   - Never modifies Inventory, Payments, or terminal Orders state directly. The stored order status is
     what selects the resume action, so the endpoint holds no knowledge of which stage resumes.
 - `POST /api/orders/{orderId}/reconciliation/{recordId}/resolve`
