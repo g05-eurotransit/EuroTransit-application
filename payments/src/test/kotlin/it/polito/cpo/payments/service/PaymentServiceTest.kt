@@ -88,6 +88,26 @@ class PaymentServiceTest {
     }
 
     @Test
+    fun `refund - classifies the two idempotency namespaces and persists the reason`() = runTest {
+        val auth = PaymentAuthorization(
+            orderId = "order-123",
+            principalId = "user1",
+            amount = BigDecimal.TEN,
+            currency = "EUR",
+            status = PaymentAuthorization.STATUS_AUTHORIZED,
+            providerReference = "ch_123",
+            idempotencyKey = "key-123"
+        )
+        paymentAuthorizationRepository.saved.add(auth)
+
+        paymentService.refund("order-123", BigDecimal.TEN, "pay-refund-order-123")
+        assertEquals("COMMERCIAL", paymentRefundRepository.saved.last().reason)
+
+        paymentService.refund("order-123", BigDecimal.TEN, "refund-order-123")
+        assertEquals("COMPENSATION", paymentRefundRepository.saved.last().reason)
+    }
+
+    @Test
     fun `authorize - returns cached response on idempotency match`() = runTest {
         val record = IdempotencyRecord(
             idempotencyKey = "key-idem",
