@@ -42,3 +42,12 @@ $utilities-border-subtle: map-merge(
 body {
   overflow-x: hidden;
 }
+
+.nav-link-tickets {
+  transition: color 0.15s ease-in-out, transform 0.15s ease-in-out;
+
+  &:hover {
+    color: var(--bs-primary) !important;
+    transform: translateY(-1px);
+  }
+}

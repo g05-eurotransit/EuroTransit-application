@@ -1,4 +1,4 @@
-import { Link } from "react-router-dom";
+import { Link, NavLink } from "react-router-dom";
 import { useAuth } from "react-oidc-context";
 import { Navbar, Nav, Container, Button, Dropdown, Badge } from "react-bootstrap";
 import { useSilentSignInChecked } from "../../auth/SilentSignIn";
@@ -28,7 +28,20 @@ export function NavBar() {
           EuroTransit
         </Navbar.Brand>
         <Navbar.Toggle aria-controls="main-nav" />
-        <Navbar.Collapse id="main-nav" className="justify-content-end">
+        <Navbar.Collapse id="main-nav">
+          <Nav className="me-auto">
+            {auth.isAuthenticated && (
+              <NavLink
+                to="/orders"
+                className={({ isActive }) =>
+                  `nav-link nav-link-tickets ms-4 ${isActive ? "text-primary" : "text-dark"}`
+                }
+                style={{ fontWeight: 700, letterSpacing: "0.02em", fontSize: "1.05rem" }}
+              >
+                My tickets
+              </NavLink>
+            )}
+          </Nav>
           <Nav className="align-items-center gap-3">
             {auth.isAuthenticated && (
               <Dropdown
@@ -100,6 +113,7 @@ export function NavBar() {
                 >
                   {initials(displayName)}
                 </span>
+                <span className="fw-semibold text-dark d-none d-lg-inline">{displayName}</span>
                 <Button variant="outline-primary" className="fw-semibold" onClick={() => void auth.signoutRedirect()}>
                   Sign out
                 </Button>
