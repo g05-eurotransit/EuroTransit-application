@@ -87,15 +87,6 @@ class CheckoutOrchestrator(
         const val MAX_STEPS = 6
 
         /**
-         * What an order is priced in when the checkout carried no offer to resolve a currency from.
-         *
-         * This is the literal that used to sit in the authorization call, moved to the one place
-         * where it is recorded as an assumption about a specific order rather than asserted about
-         * every payment. It disappears when `offerId` becomes required (issue #84).
-         */
-        const val ASSUMED_CURRENCY = "EUR"
-
-        /**
          * The shape Payments accepts, mirrored here so a malformed one is caught before it is
          * persisted. Kept as a shape check and not a list of known codes: Orders has no business
          * deciding which currencies exist.
@@ -149,6 +140,19 @@ class CheckoutOrchestrator(
             )
         }
 
+        // Nothing downstream can price a checkout with no seats, and once the expected total is
+        // `price × seats.size` an empty list would make it zero — so a request carrying `0` would
+        // pass the price check that exists to stop exactly that. Refused before resolution, because
+        // it is wrong whatever the offer says.
+        if (request.seats.isEmpty()) {
+            meterRegistry.counter("orders.checkout.rejected", "reason", "seats_required").increment()
+            throw ApiException(
+                HttpStatus.BAD_REQUEST,
+                "SEATS_REQUIRED",
+                "A checkout must carry at least one seat",
+            )
+        }
+
         val fingerprint = fingerprint(userId, request)
 
         // 1. Check idempotency. Same key + same payload -> replay the stored result; same key + a
@@ -173,7 +177,7 @@ class CheckoutOrchestrator(
         //    (issue #93). Deliberately after the idempotency check: a replay must return the stored
         //    result from the original decision, and re-resolving would make an accepted order
         //    unreplayable the moment Catalog went down or its price changed.
-        val offer = request.offerId?.let { resolveOffer(it, request) }
+        val offer = resolveOffer(request.offerId, request)
 
         meterRegistry.counter("orders.checkout.started").increment()
 
@@ -186,21 +190,21 @@ class CheckoutOrchestrator(
             routeId = request.routeId,
             seats = request.seats.joinToString(","),
             travelDate = request.travelDate,
-            // The resolved price, not the requested one. They are equal in value — a mismatch was
-            // rejected above — but only this one came from Catalog, and persisting the request's
-            // number would leave the authorization sourced from the client after all.
-            totalAmount = offer?.price ?: request.totalAmount,
-            currency = offer?.currency ?: ASSUMED_CURRENCY,
+            // The resolved line total, not the requested one. They are equal in value — a mismatch
+            // was rejected above — but only this one is derived from Catalog's price, and persisting
+            // the request's number would leave the authorization sourced from the client after all.
+            totalAmount = offer.price.multiply(BigDecimal(request.seats.size)),
+            currency = offer.currency,
             createdAt = LocalDateTime.now(),
             paymentMethodToken = request.paymentMethodToken,
             recipientEmail = recipientEmail,
             offerId = request.offerId,
             // The refund terms as they read at the moment of sale, frozen because Catalog keeps no
             // history of them (ADR-015 and V14).
-            refundable = offer?.refundPolicy?.refundable,
-            refundCutoffMinutesBeforeDeparture = offer?.refundPolicy?.cutoffMinutesBeforeDeparture,
-            offerTermsVersion = offer?.termsVersion,
-            departureAt = offer?.departureAt(request.travelDate),
+            refundable = offer.refundPolicy.refundable,
+            refundCutoffMinutesBeforeDeparture = offer.refundPolicy.cutoffMinutesBeforeDeparture,
+            offerTermsVersion = offer.termsVersion,
+            departureAt = offer.departureAt(request.travelDate),
         ).apply { setAsNew(true) }
 
         // 4. Persist order + idempotency + the order-placed outbox row atomically (fixes the
@@ -312,15 +316,28 @@ class CheckoutOrchestrator(
             )
         }
 
+        // An offer price is per seat, so the amount to compare is the line total. Getting this wrong
+        // is not a rounding detail: comparing the unit price against the total rejected every
+        // checkout for two or more seats, and the single-seat tests could not see it because at a
+        // quantity of one the two are the same number.
+        val expectedTotal = offer.price.multiply(BigDecimal(request.seats.size))
+
         // compareTo, not equals: BigDecimal("24.90") != BigDecimal("24.9") by equals, and rejecting a
         // correct amount because the client sent one fewer trailing zero would be a bug of its own.
-        if (offer.price.compareTo(request.totalAmount) != 0) {
+        if (expectedTotal.compareTo(request.totalAmount) != 0) {
             reject(
                 "OFFER_PRICE_MISMATCH",
-                "Offer $offerId costs ${offer.price} ${offer.currency}, not ${request.totalAmount}",
+                "Offer $offerId costs ${offer.price} ${offer.currency} per seat, " +
+                    "so ${request.seats.size} seats cost $expectedTotal, not ${request.totalAmount}",
                 // Catalog data, already public on the offers endpoint: telling the client the real
-                // price lets it re-render rather than guess.
-                mapOf("offerId" to offerId, "price" to offer.price, "currency" to offer.currency),
+                // price lets it re-render rather than guess. `expectedTotal` is what the client got
+                // wrong; `price` is what it needs to recompute from.
+                mapOf(
+                    "offerId" to offerId,
+                    "price" to offer.price,
+                    "currency" to offer.currency,
+                    "expectedTotal" to expectedTotal,
+                ),
             )
         }
 
@@ -351,14 +368,16 @@ class CheckoutOrchestrator(
             append(request.travelDate).append('|')
             append(request.totalAmount.stripTrailingZeros().toPlainString()).append('|')
             append(request.paymentMethodToken)
-            // Appended only when present, so the canonical string of a request without an offer is
-            // byte-identical to the one this method produced before the field existed. Idempotency
-            // records live for 24 hours: hashing an empty segment unconditionally would make every
-            // key in flight across the deployment collide with its own stored fingerprint and get a
-            // 409 instead of a replay.
-            if (request.offerId != null) {
-                append('|').append(request.offerId)
-            }
+            // Unconditional now that the field is required, which also removes the collision the
+            // conditional form carried: with a variable number of separators, a paymentMethodToken
+            // of `tok|of-001` with no offer hashed identically to the token `tok` with offer
+            // `of-001`. Every canonical string now has fixed arity, so that cannot happen.
+            //
+            // This had to wait for the required field and could not land a day earlier: changing the
+            // canonical string while the offer was optional would have made every idempotency key
+            // stored in the previous 24 hours collide with its own stored fingerprint and answer 409
+            // to its own retry.
+            append('|').append(request.offerId)
         }
         return MessageDigest.getInstance("SHA-256")
             .digest(canonical.toByteArray(Charsets.UTF_8))
@@ -494,8 +513,9 @@ class CheckoutOrchestrator(
                 // authorizes. The currency used to be a hardcoded "EUR" on this line while the
                 // amount came from the request, so the two were never checked against each other.
                 //
-                // An order placed without an offerId carries an unvalidated amount and the assumed
-                // currency: that is the part of #93 that stays open until the SPA sends the field.
+                // Every order now carries a resolved offer, so both values are Catalog's. Orders
+                // placed before `offerId` became required still hold what their client claimed —
+                // there is no backfill, and no way to invent one.
                 amount = ctx.order.totalAmount,
                 currency = ctx.order.currency,
                 paymentMethodToken = paymentToken,

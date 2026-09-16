@@ -55,9 +55,12 @@ class Order(
     // routeId, and its price is the one in totalAmount — so unlike in V13, this is a validated value
     // and the fields below were read from it.
     //
-    // Still nullable until the SPA sends it (issue #84). While it is optional, an order with no
-    // offer is an order whose amount was never checked against anything, which is the part of issue
-    // #93 that stays open; it also has no refund terms, and the refund endpoint refuses it.
+    // The API field is required since #84 shipped, but this column stays nullable and the comment in
+    // V13 claiming it would be tightened to NOT NULL is wrong: orders placed before that change hold
+    // NULL and there is nothing to backfill them with, so the migration would fail on the first one.
+    // The correction lives here rather than in V13 because editing an applied migration changes its
+    // Flyway checksum and breaks startup on every environment that already ran it.
+    // An order with no offer has no refund terms, and the refund endpoint refuses it.
     val offerId: String? = null,
     // The refund rule the customer accepted, resolved from the offer at checkout and frozen here.
     //

@@ -410,7 +410,7 @@ class CheckoutOrchestratorTest {
         val service = FakeOrderService()
 
         val response = orchestratorFor(service).checkout(
-            request = CheckoutRequest(routeId = "R1", seats = listOf("1A", "1B"), travelDate = TRAVEL_DATE, totalAmount = BigDecimal("100.00"), paymentMethodToken = "test-token"),
+            request = CheckoutRequest(routeId = "R1", seats = listOf("1A", "1B"), travelDate = TRAVEL_DATE, totalAmount = BigDecimal("200.00"), paymentMethodToken = "test-token", offerId = "of-001"),
             idempotencyKey = "key-123",
             userId = "user-1",
             recipientEmail = "alice@example.com"
@@ -429,7 +429,7 @@ class CheckoutOrchestratorTest {
         service.seeded = IdempotentRequest("key-abc", mapper.writeValueAsString(storedResponse), LocalDateTime.now())
 
         val response = orchestratorFor(service).checkout(
-            request = CheckoutRequest(routeId = "R1", seats = listOf("2A"), travelDate = TRAVEL_DATE, totalAmount = BigDecimal("50.00"), paymentMethodToken = "test-token"),
+            request = CheckoutRequest(routeId = "R1", seats = listOf("2A"), travelDate = TRAVEL_DATE, totalAmount = BigDecimal("100.00"), paymentMethodToken = "test-token", offerId = "of-001"),
             idempotencyKey = "key-abc",
             userId = "user-1",
             recipientEmail = "alice@example.com"
@@ -450,7 +450,7 @@ class CheckoutOrchestratorTest {
 
         val ex = assertThrows<ApiException> {
             orchestratorFor(service).checkout(
-                request = CheckoutRequest(routeId = "R9", seats = listOf("9Z"), travelDate = TRAVEL_DATE, totalAmount = BigDecimal("999.00"), paymentMethodToken = "other-token"),
+                request = CheckoutRequest(routeId = "R1", seats = listOf("9Z"), travelDate = TRAVEL_DATE, totalAmount = BigDecimal("100.00"), paymentMethodToken = "other-token", offerId = "of-001"),
                 idempotencyKey = "key-x",
                 userId = "user-1",
                 recipientEmail = "alice@example.com"
@@ -490,6 +490,7 @@ class CheckoutOrchestratorTest {
                     travelDate = LocalDate.now().minusDays(1),
                     totalAmount = BigDecimal("100.00"),
                     paymentMethodToken = "test-token",
+                    offerId = "of-001",
                 ),
                 idempotencyKey = "key-past",
                 userId = "user-1",
@@ -515,6 +516,7 @@ class CheckoutOrchestratorTest {
                 travelDate = LocalDate.now(),
                 totalAmount = BigDecimal("100.00"),
                 paymentMethodToken = "test-token",
+                offerId = "of-001",
             ),
             idempotencyKey = "key-today",
             userId = "user-1",
@@ -535,6 +537,7 @@ class CheckoutOrchestratorTest {
             travelDate = date,
             totalAmount = BigDecimal("100.00"),
             paymentMethodToken = "test-token",
+            offerId = "of-001",
         )
 
         orchestrator.checkout(requestFor(TRAVEL_DATE), "key-dates", "user-1", "alice@example.com")
@@ -574,26 +577,27 @@ class CheckoutOrchestratorTest {
     }
 
     @Test
-    fun `a checkout without an offerId still succeeds and stores no offer`() = runTest {
+    fun `a checkout with no seats is refused before anything is resolved`() = runTest {
+        // This guard only became load-bearing when the expected total turned into `price x seats`:
+        // an empty list makes that total zero, so a request carrying 0 would satisfy the very check
+        // that exists to stop a client naming its own price.
         val service = FakeOrderService()
+        val catalog = StubCatalogClient()
 
-        val response = orchestratorFor(service).checkout(
-            request = CheckoutRequest(
-                routeId = "R1",
-                seats = listOf("1A"),
-                travelDate = TRAVEL_DATE,
-                totalAmount = BigDecimal("100.00"),
-                paymentMethodToken = "test-token",
-            ),
-            idempotencyKey = "key-no-offer",
-            userId = "user-1",
-            recipientEmail = "alice@example.com",
-        )
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service, catalog = catalog).checkout(
+                offerRequest(seats = emptyList(), totalAmount = BigDecimal.ZERO),
+                "key-no-seats",
+                "user-1",
+                "alice@example.com",
+            )
+        }
 
-        // The SPA does not send the field yet (issue #84). An unrefundable order is a smaller failure
-        // than a checkout that rejects every request until the frontend catches up.
-        assertEquals(OrderStatus.ACCEPTED, response.status)
-        assertNull(service.ordersById.values.single().offerId)
+        assertEquals("SEATS_REQUIRED", ex.code)
+        assertEquals(HttpStatus.BAD_REQUEST, ex.status)
+        // Refused before resolution: Catalog is never asked about a request that cannot be an order.
+        assertTrue(catalog.lookedUp.isEmpty())
+        assertTrue(service.ordersById.isEmpty())
     }
 
     @Test
@@ -620,38 +624,37 @@ class CheckoutOrchestratorTest {
     }
 
     @Test
-    fun `a key stored before the offer field existed still replays`() = runTest {
+    fun `a retry of the same payload replays instead of creating a second order`() = runTest {
         val service = FakeOrderService()
         val orchestrator = orchestratorFor(service)
-        val request = CheckoutRequest(
-            routeId = "R1",
-            seats = listOf("1A"),
-            travelDate = TRAVEL_DATE,
-            totalAmount = BigDecimal("100.00"),
-            paymentMethodToken = "test-token",
-        )
-        val firstOrderId = orchestrator.checkout(request, "key-rollout", "user-1", "alice@example.com").orderId
+        val request = offerRequest()
+        val firstOrderId = orchestrator.checkout(request, "key-retry", "user-1", "alice@example.com").orderId
 
-        // The offer segment is appended only when the field is present, so an offer-less payload
-        // hashes exactly as it did before the column shipped. Idempotency records live 24 hours: if
-        // the canonical string had changed for every request, every key in flight across the
-        // deployment would have answered 409 to its own retry.
-        val replay = orchestrator.checkout(request, "key-rollout", "user-1", "alice@example.com")
+        val replay = orchestrator.checkout(request, "key-retry", "user-1", "alice@example.com")
 
+        // The offer segment of the canonical string is unconditional now that the field is required,
+        // so every fingerprint has fixed arity. That removed the collision the conditional form
+        // carried — a token of `tok|of-001` with no offer hashed identically to the token `tok` with
+        // offer `of-001` — and it could only be done in the same change as the required field.
         assertEquals(firstOrderId, replay.orderId)
         assertEquals(1, service.savedOrderStatuses.size)
     }
 
     // --- offer resolution and the price of the sale (#93) -----------------------------------------
 
-    /** The amount every request in this file asks for, and the price [OFFER] is seeded at. */
+    /**
+     * One seat at [OFFER]'s price by default. [seats] is a parameter and not a constant because the
+     * defect this section exists for was invisible at a quantity of one: every case here used a
+     * single seat, where the unit price and the line total are the same number.
+     */
     private fun offerRequest(
         routeId: String = "R1",
         totalAmount: BigDecimal = BigDecimal("100.00"),
-        offerId: String? = "of-001",
+        offerId: String = "of-001",
+        seats: List<String> = listOf("1A"),
     ) = CheckoutRequest(
         routeId = routeId,
-        seats = listOf("1A"),
+        seats = seats,
         travelDate = TRAVEL_DATE,
         totalAmount = totalAmount,
         paymentMethodToken = "test-token",
@@ -846,22 +849,42 @@ class CheckoutOrchestratorTest {
     }
 
     @Test
-    fun `a checkout without an offer resolves nothing and is priced as the client asked`() = runTest {
+    fun `a multi-seat checkout is priced at the offer's price times the seats`() = runTest {
+        // The case step 3 could not see. Every offer-resolution test used one seat, where the unit
+        // price and the line total are the same number, so comparing the wrong one passed.
         val service = FakeOrderService()
-        val catalog = StubCatalogClient()
 
-        orchestratorFor(service, catalog = catalog).checkout(
-            offerRequest(offerId = null), "key-offerless", "user-1", "alice@example.com",
+        orchestratorFor(service).checkout(
+            offerRequest(seats = listOf("1A", "1B"), totalAmount = BigDecimal("200.00")),
+            "key-two-seats",
+            "user-1",
+            "alice@example.com",
         )
 
-        // Catalog is not consulted at all, so an offer-less checkout keeps working while Catalog is
-        // down — and its amount stays unvalidated, which is the part of #93 only the SPA can close.
-        assertTrue(catalog.lookedUp.isEmpty())
-        val order = service.ordersById.values.single()
-        assertEquals(BigDecimal("100.00"), order.totalAmount)
-        assertEquals("EUR", order.currency)
-        assertNull(order.refundable)
-        assertNull(order.departureAt)
+        // And what is persisted — and therefore authorized — is the resolved line total.
+        assertEquals(0, BigDecimal("200.00").compareTo(service.ordersById.values.single().totalAmount))
+    }
+
+    @Test
+    fun `two seats priced as one are refused`() = runTest {
+        // The shape the broken comparison used to accept in reverse: the client sending the unit
+        // price for several seats would have been charged for one.
+        val service = FakeOrderService()
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service).checkout(
+                offerRequest(seats = listOf("1A", "1B", "1C"), totalAmount = BigDecimal("100.00")),
+                "key-underpriced-seats",
+                "user-1",
+                "alice@example.com",
+            )
+        }
+
+        assertEquals("OFFER_PRICE_MISMATCH", ex.code)
+        // The message and details must quote the expected *total*, not the per-seat price: a
+        // customer buying three seats told "the price is 100.00" cannot act on that.
+        assertEquals(BigDecimal("300.00"), ex.details?.get("expectedTotal"))
+        assertTrue(service.ordersById.isEmpty())
     }
 
     @Test

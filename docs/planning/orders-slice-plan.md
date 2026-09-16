@@ -409,12 +409,16 @@ call: no second lookup on `/routes/{routeId}` to learn when the train leaves.
 - **Migration `V14`**, and the fields on `Order` and — where the SPA needs them to decide whether to
   show a refund button — on `OrderView`.
 
-### Tightening `offerId` to required
+### Tightening `offerId` to required — now a step of its own, see below
 
 Price validation only bites for a checkout that carries an offer, so #93 is not fully closed while
 the field is optional. That flip is gated on #84, not on Catalog. Land 3a validating when the field
 is present, and flip to required as a one-line follow-up once the SPA sends it — recording in the
 meantime that a checkout without `offerId` is still unvalidated, which is the honest state.
+
+**It stopped being a one-line follow-up on 2026-09-16.** #84 landed, and with it a defect in step 3
+that only becomes visible once a client actually sends the field. The whole thing is written up as
+*Step 3 follow-up* at the end of this file.
 
 **Do one more thing in that same follow-up: make the offer segment of the checkout fingerprint
 unconditional.** Step 2 appends it only when the field is present, so that an offer-less payload
@@ -691,3 +695,88 @@ boundary-check above has been done and its result recorded.
   with everything unavailable.
 - **Step 5**, the Orders canary, whose two broken gates are already written up under "Findings that
   change the picture" with the attributable per-pod metrics to replace them.
+
+---
+
+## Step 3 follow-up — the price is per seat, and `offerId` becomes required
+
+Step 3 validated the checkout amount against the offer and got the arithmetic wrong. The comparison
+is between the offer's **unit** price and the request's **line total**, so **every checkout for two
+or more seats is rejected** with `OFFER_PRICE_MISMATCH`. Live on `dev` since #84 landed on
+2026-09-14; not deployed, because `main` has not been promoted.
+
+The tests did not catch it because every offer-resolution case in `CheckoutOrchestratorTest` uses
+exactly one seat, with `totalAmount` equal to the offer price. The bug is invisible at a quantity of
+one.
+
+### Verified before writing — facts, not assumptions
+
+Read in the code on 2026-09-16. Three of these were not known when this step was first sketched.
+
+- **The client sends the line total.** `SeatSelectionPage.tsx:107` sends
+  `offer.price * selectedSeats.length`. Orders compares `offer.price` alone. The SPA's reading is the
+  correct one: an offer is a fare, priced per seat.
+- **The SPA always sends `offerId`, so making it required is safe.** `CheckoutState.offerId` is a
+  non-optional `String`; `CheckoutPage` redirects to `/` without that navigation state; its only
+  producer is `SeatSelectionPage.continueToCheckout()`, which spreads the whole offer. The API type
+  says `offerId?: string`, but no path populates it as absent.
+- **`offer_id` cannot become `NOT NULL`, and `V13:16` is wrong to say it will.** Orders placed before
+  the SPA change legitimately hold `NULL`, so the migration would fail on the first one. The *API
+  field* becomes required; the *column* stays nullable. Two different things.
+- **Nothing validates that `seats` is non-empty.** Harmless today. It stops being harmless the moment
+  the expected total is `price × seats.size`: an empty list makes the expected total `0`, and a
+  request carrying `totalAmount: 0` would pass validation.
+- **The fingerprint's offer segment is conditional** (`CheckoutOrchestrator:359`). It becomes
+  unconditional in the same commit as the required field and never earlier — changing the canonical
+  string while the field is optional answers `409` to every idempotency key stored in the previous
+  24 hours.
+- **`ASSUMED_CURRENCY` exists only for offer-less checkouts** and becomes unreachable.
+
+### Settled, open, and stop-and-ask
+
+**Settled.** The price is per seat. One branch. The arithmetic fix lands before the required flip.
+The comment on #93 goes out after the merge, not before. Empty seats are refused with a new
+`SEATS_REQUIRED` code — a client error deserves to be distinguishable from a wrong price, and the
+addition to the frozen error model is accepted deliberately.
+
+**Open — decide while implementing and record it.** Whether `ASSUMED_CURRENCY` is deleted or kept as
+a defensive branch.
+
+**Stop and ask.** Any change to the SPA or to Catalog. Making the column `NOT NULL`.
+
+### Content, in order
+
+1. **The comparison becomes `offer.price × seats.size`.** The refusal message must state the expected
+   **total**, not the unit price — otherwise a customer buying two seats is told the price is 24.90.
+2. **A guard on an empty seat list**, before resolution: `400 SEATS_REQUIRED`. Not orderable
+   whatever the offer says.
+3. **`offerId` required** on `CheckoutRequest`.
+4. **The fingerprint's offer segment unconditional**, in the same commit as 3.
+5. **`ASSUMED_CURRENCY` removed**, and `V13`'s comment corrected on the `NOT NULL` claim.
+6. **`api-design.md`**: an offer price is per seat, `totalAmount` is `price × seats`, `offerId` is
+   required.
+7. **Tests**: two seats accepted; three seats priced as one rejected; an empty list rejected; a
+   checkout without `offerId` rejected; and an idempotency replay that survives the canonical
+   string's change of arity.
+
+### Done when
+
+A two-seat checkout with `totalAmount = 2 × price` succeeds end to end; the same checkout priced at
+the unit price is refused; one without `offerId` is refused; the build is green. Plus one manual
+two-seat purchase through the SPA — the case the automated tests were blind to.
+
+### Standing check
+
+Before closing: list every value this change causes to cross a boundary and verify what the receiver
+does with it — **the caller included**. That is the verification step 3's plan did not have, and it
+is why this defect shipped.
+
+### Noted, not filed: is a price always per seat?
+
+All six seeded offers are per seat and the SPA assumes it, so `price × seats` is correct today and is
+written down as a constraint rather than left implicit. It would stop being correct for an offer sold
+per unit rather than per passenger — `of-005` is a Roma–Wien sleeper, and a berth is sometimes sold
+by compartment. If Catalog ever introduces a fixed-price or per-compartment offer, this multiplication
+becomes wrong silently: the amount would simply be a multiple of what it should be. Deliberately not
+filed as an issue — there is nothing to do until Catalog wants it — but it is the question to ask
+giacomodipalma before any such offer is seeded.
