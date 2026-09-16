@@ -20,8 +20,12 @@ compose-config:
 compose-build:
     docker compose build
 
+# Registering the Debezium connectors is part of bringing the stack up, not a step to
+# remember: without them the outbox row is written and never relayed, so a checkout stops
+# in ACCEPTED and the UI polls forever. The script is idempotent, so re-running this is safe.
 compose-up:
     docker compose up -d
+    ./scripts/init-local-debezium.sh
 
 compose-down:
     docker compose down
