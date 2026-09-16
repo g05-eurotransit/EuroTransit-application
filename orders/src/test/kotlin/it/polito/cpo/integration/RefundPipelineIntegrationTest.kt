@@ -19,7 +19,9 @@ import it.polito.cpo.observability.ApiException
 import it.polito.cpo.repository.OrderRepository
 import it.polito.cpo.repository.OutboxEventRepository
 import it.polito.cpo.repository.ReconciliationRecordRepository
+import it.polito.cpo.service.FailureClassifier
 import it.polito.cpo.service.ReconciliationOperationsService
+import it.polito.cpo.service.ReconciliationService
 import it.polito.cpo.service.RefundOrchestrator
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
@@ -108,6 +110,7 @@ class RefundPipelineIntegrationTest {
     @Autowired private lateinit var reconciliationRepository: ReconciliationRecordRepository
     @Autowired private lateinit var meterRegistry: MeterRegistry
     @Autowired private lateinit var operations: ReconciliationOperationsService
+    @Autowired private lateinit var reconciliationService: ReconciliationService
     @Autowired private lateinit var objectMapper: ObjectMapper
 
     @Test
@@ -218,10 +221,36 @@ class RefundPipelineIntegrationTest {
         relayRefundRequested(orderId)
         awaitStatus(orderId, OrderStatus.REFUNDED)
 
+        // An incident left open on an order that has already converged is what makes the second half
+        // of this test's name mean anything. Without it, closeStaleFor matches no row and returns 0,
+        // and every assertion below would pass unchanged if the call were deleted from redrive.
+        //
+        // Production reaches this state by a race rather than by the happy path: a dead-letter
+        // delivery reads the order while it is still REFUNDING, and inserts its record just after the
+        // REFUNDING -> REFUNDED commit has already run closeAutoResolvable. Seeded here through the
+        // same service the pipeline uses, so the row is the real shape, not a hand-built one.
+        val stale = reconciliationService.recordSeatReturnFailure(
+            orderId = orderId,
+            orderState = OrderStatus.REFUNDING.name,
+            correlationId = "it-stale-${UUID.randomUUID()}",
+            failureClass = FailureClassifier.forInventoryRefusal(InventoryRefusalCode.RESERVATION_SEAT_CONFLICT),
+            detail = "opened after the refund had already committed",
+        )
+        assertEquals(ReconciliationStatus.OPEN.name, stale.status)
+
         val ex = assertFailsWith<ApiException> {
             operations.redrive(orderId, "it-redrive-terminal-${UUID.randomUUID()}", "ops-1")
         }
         assertEquals("ORDER_ALREADY_TERMINAL", ex.code)
+
+        // The close must have committed even though the call ended by throwing: redrive runs it in its
+        // own transaction and raises the refusal afterwards, precisely so the refusal cannot roll the
+        // close back and leave the record open forever.
+        val afterRedrive = reconciliationRepository.findById(stale.id)!!
+        assertEquals(ReconciliationStatus.RESOLVED.name, afterRedrive.status)
+        assertTrue(
+            reconciliationRepository.findAllByOrderIdAndStatus(orderId, ReconciliationStatus.OPEN.name).toList().isEmpty(),
+        )
     }
 
     @Test

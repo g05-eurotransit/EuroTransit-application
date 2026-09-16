@@ -146,8 +146,28 @@ class PipelineStateGaugeJobIntegrationTest {
 
         job.publish()
 
+        // The lower bound is the half that matters. `age >= 0` would also be satisfied by 0, which is
+        // exactly what the query returns when the age expression degrades to NULL -- see the next test
+        // -- so an assertion that admits zero cannot fail the way this query actually breaks.
         val age = oldestAge(OrderStatus.REFUNDING)
-        assertTrue(age >= 0 && age < 60, "expected a few seconds, got $age")
+        assertTrue(age > 1 && age < 60, "expected a few seconds, got $age")
+    }
+
+    @Test
+    fun `a REFUNDING order with no refund_requested_at is counted but reports age zero`() = runBlocking {
+        // Recording a known masking rather than asserting a desired behaviour. `CURRENT_TIMESTAMP -
+        // NULL` is NULL, EXTRACT of NULL is NULL, MAX skips NULLs, and COALESCE(..., 0) turns the empty
+        // result into 0 -- so such a row is counted as in-flight while its age stays zero forever and
+        // no age threshold can ever fire on it. Unreachable today: `markRefunding` sets the column in
+        // the same UPDATE that writes REFUNDING, so only a future write path that forgets it, or a
+        // backfill, could produce this row. The test exists so that path fails here rather than in a
+        // cluster, with a stuck refund that no alert can see.
+        seed(OrderStatus.REFUNDING, refundRequestedAt = null)
+
+        job.publish()
+
+        assertEquals(1.0, inflight(OrderStatus.REFUNDING))
+        assertEquals(0.0, oldestAge(OrderStatus.REFUNDING), "a null refund_requested_at masks the age")
     }
 
     @Test
