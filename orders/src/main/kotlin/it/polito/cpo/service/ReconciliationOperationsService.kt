@@ -23,6 +23,7 @@ import org.springframework.transaction.reactive.TransactionalOperator
 import org.springframework.transaction.reactive.executeAndAwait
 import tools.jackson.databind.ObjectMapper
 import java.security.MessageDigest
+import java.time.Instant
 import java.util.UUID
 
 /**
@@ -96,6 +97,37 @@ class ReconciliationOperationsService(
                 "Order in state ${order.status} is terminal and cannot be redriven",
             )
         } else {
+            // Refuse a redrive that would authorize a payment against a hold Inventory has already
+            // expired. Scoped to PAYMENT_PENDING because that is the only phase whose resume action is
+            // `stageAuthorize` (CheckoutOrchestrator.runStage), and therefore the only one where a
+            // redrive spends money. The other phases must stay redrivable: ACCEPTED/RESERVING re-take
+            // the hold, CONFIRMING_INVENTORY drives the order to the resolution it needs (Inventory
+            // refuses with RESERVATION_EXPIRED and the pipeline compensates), and COMPENSATING finishes
+            // a reversal that has nothing to do with the hold. Refusing those would strand the order
+            // rather than protect it.
+            //
+            // The same comparison is deliberately NOT made inside `stageAuthorize`. There the deadline
+            // is seconds away, the instant comes from Inventory's database clock, and Inventory is the
+            // only authority on whether a hold is still live (invariant 4) — comparing it against
+            // Orders' clock at that boundary would throw away sales Inventory would still honour. By
+            // redrive time the deadline is long past, the ambiguity is gone, and the operator gets an
+            // honest refusal instead of triggering a charge and its reversal with one click.
+            val expiresAt = order.reservationExpiresAt
+            if (order.status == OrderStatus.PAYMENT_PENDING &&
+                expiresAt != null &&
+                expiresAt.toInstant().isBefore(Instant.now())
+            ) {
+                // The incident stays open: the order still needs an operator, and closing the record
+                // here would hide it exactly as the REFUNDING bug above did.
+                meterRegistry.counter("orders.reconciliation.redrive", "result", "rejected_hold_expired").increment()
+                logger.info("Redrive refused for order {}: seat hold expired at {}", orderId, expiresAt)
+                throw ApiException(
+                    HttpStatus.CONFLICT,
+                    "RESERVATION_HOLD_EXPIRED",
+                    "The seat hold for this order expired at $expiresAt; redriving it would authorize a " +
+                        "payment Inventory can no longer confirm",
+                )
+            }
             "order-placed" to OrderPlacedEvent(correlationId = correlationId, orderId = orderId, principalId = order.userId)
         }
 
