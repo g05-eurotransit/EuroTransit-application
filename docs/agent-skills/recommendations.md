@@ -6,7 +6,6 @@ These draft skills are reviewable team assets. They are intentionally stored in 
 
 - `eurotransit-cross-repo-docs`: use for documentation work that may affect both `EuroTransit-application` and `EuroTransit-configuration`.
 - `kotlin-coroutines-webflux-pipeline`: use for Kotlin/Spring WebFlux async service flows, especially the order, inventory, payment, and Kafka money path.
-- `eurotransit-plan-implement-review`: the three-phase delivery method — a versioned plan, implementation delegated to a Sonnet agent, an adversarial review by a clean Opus agent, and a final check by the orchestrator. Includes the judgement call about when the workflow is *not* worth it.
 
 ## Recommended Next
 
