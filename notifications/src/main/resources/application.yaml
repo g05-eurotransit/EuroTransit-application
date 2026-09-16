@@ -25,6 +25,15 @@ spring:
       # Joins the consumer span to the originating checkout trace (money-path tracing).
       observation-enabled: true
 
+eurotransit:
+  services:
+    catalog:
+      # Trip context for notification messages. Read-only, public, and optional: if it cannot be
+      # reached the notification is still delivered, without the route block.
+      # Default is catalog's own port for a bare-metal run; compose overrides it with the
+      # in-network address (EUROTRANSIT_SERVICES_CATALOG_URL).
+      url: ${EUROTRANSIT_SERVICES_CATALOG_URL:http://localhost:8081}
+
 server:
   port: 8083
 

@@ -343,6 +343,28 @@ Consumers must be idempotent because Kafka delivery is treated as at-least-once.
 | `order-confirmed`        | Orders    | Notifications, observability consumers        | Indicates the order is complete and customer notification can be sent.                                           |
 | `notification-requested` | Orders    | Notifications                                 | Optional explicit notification command if separated from `order-confirmed`.                                      |
 
+### `notification-requested` payload
+
+Beyond `recipientEmail` and `message`, the payload carries `type`
+(`ORDER_CONFIRMED`/`ORDER_FAILED`), `failureCode` (the `CustomerFailureCode` name, null on a
+confirmation), and the trip as `routeId` + `travelDate`.
+
+- **Every field past `message` is optional.** Orders and Notifications are deployed separately, so
+  an event produced by the previous version must keep parsing; a consumer that sees no `type`
+  renders the plain `message`, exactly as before.
+- **The trip travels as identifiers, not as resolved names.** Orders has no Catalog client and does
+  not acquire one for this: a confirmation must not depend on Catalog being reachable. Notifications
+  resolves the route against `GET /api/catalog/routes/{routeId}` and caches it, and delivers the
+  notification without trip context when that fails.
+- **Clients branch on `failureCode`, never on an HTTP status.** Inventory answers `409` for five
+  distinct conditions and none of them means the seats were taken, while the refusal that does mean
+  it is not a `409` at all.
+- **`message` is the only field that speaks about money**, and it is rendered verbatim. Those claims
+  belong to the closed `CustomerFailureCode` set, which is deliberately careful about what it can
+  truthfully assert — `CHECKOUT_FAILED` stays neutral because it covers both a failure before any
+  authorization and a checkout reversed after one. A client that recomposes the sentence would
+  reintroduce as a presentation bug the very claim Orders avoided making.
+
 ## Error Model
 
 All services use a shared HTTP status mapping:

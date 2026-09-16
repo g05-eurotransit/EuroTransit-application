@@ -170,6 +170,9 @@ services:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8081/realms/eurotransit
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/eurotransit/protocol/openid-connect/certs
+      # Trip context for notification messages. Not in depends_on on purpose: a notification is
+      # delivered without the route block when Catalog is unreachable, so it must not gate startup.
+      EUROTRANSIT_SERVICES_CATALOG_URL: http://catalog:8080
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
     expose:
       - "8080"

@@ -2,7 +2,12 @@ import { Link, NavLink } from "react-router-dom";
 import { useAuth } from "react-oidc-context";
 import { Navbar, Nav, Container, Button, Dropdown, Badge } from "react-bootstrap";
 import { useSilentSignInChecked } from "../../auth/SilentSignIn";
-import { useNotifications, formatTimestamp, shortOrderRef } from "../../notifications/NotificationsProvider";
+import {
+  useNotifications,
+  formatTimestamp,
+  formatTrip,
+  shortOrderRef,
+} from "../../notifications/NotificationsProvider";
 
 /** First letters of a display name/email, for the avatar circle (no profile photo exists). */
 function initials(nameOrEmail: string): string {
@@ -86,6 +91,12 @@ export function NavBar() {
                         to={`/orders/${n.orderId}`}
                         className={`py-2 text-wrap ${i < items.slice(0, 15).length - 1 ? "border-bottom" : ""}`}
                       >
+                        {/* The trip when we have it, the message always. The message is a
+                            complete sentence on its own, so a notification whose route could
+                            not be resolved still reads correctly — it just says less. */}
+                        {n.route && (
+                          <div className="small fw-semibold text-dark">{formatTrip(n.route)}</div>
+                        )}
                         <div className="small text-dark">{n.message}</div>
                         <div className="d-flex justify-content-between align-items-center mt-1">
                           <span className="text-accent fw-semibold" style={{ fontSize: "0.75rem" }}>
