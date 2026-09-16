@@ -124,16 +124,24 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
   - `travelDate` is the ISO day being travelled (`"2026-09-01"`). A route plus a seat does not identify
     a bookable thing on its own: Inventory keys seats by `(route_id, travel_date, seat_id)`, so the same
     physical seat is sold separately for each day.
-  - `offerId` records which offer is being bought, and **when present it decides the price**. Orders
-    resolves it against `GET /api/catalog/offers/{offerId}` inside the synchronous entry and rejects
-    the checkout unless the offer exists, is sold on `routeId`, and costs exactly `totalAmount`:
+  - `offerId` is **required** and decides the price. Orders resolves it against
+    `GET /api/catalog/offers/{offerId}` inside the synchronous entry and rejects the checkout unless
+    the offer exists, is sold on `routeId`, and its price matches:
+  - **An offer price is per seat.** `totalAmount` must equal `price × seats.length`. This is a
+    constraint, not an accident of the current seed: every offer is a fare per passenger. An offer
+    ever sold per unit — a sleeper compartment rather than a berth — would make this multiplication
+    silently wrong, so it must be raised with Catalog before such an offer exists.
+  - `400 SEATS_REQUIRED` when `seats` is empty. A checkout with no seats is not orderable whatever
+    the offer says, and with the expected total computed as `price × seats.length` an empty list
+    would otherwise make a `totalAmount` of `0` pass the price check.
     - `400 OFFER_NOT_FOUND` — no such offer.
     - `400 OFFER_ROUTE_MISMATCH` — the offer is sold on another route. `details.routeId` carries the
       route it does belong to.
-    - `400 OFFER_PRICE_MISMATCH` — the amount disagrees with the offer. `details.price` and
-      `details.currency` carry the real price so a client can re-render rather than guess. The
-      request is refused rather than silently corrected: charging an amount other than the one the
-      customer was shown is its own bug. Amounts are compared by value, so `24.9` and `24.90` agree.
+    - `400 OFFER_PRICE_MISMATCH` — the amount disagrees with the offer. `details.price` carries the
+      per-seat price and `details.expectedTotal` the line total, so a client can re-render rather
+      than guess. The request is refused rather than silently corrected: charging an amount other
+      than the one the customer was shown is its own bug. Amounts are compared by value, so `24.9`
+      and `24.90` agree.
     - `503 OFFER_UNRESOLVABLE` — Catalog could not be reached, so the price could not be verified.
       **The checkout fails closed**: this is a deliberate availability trade, because accepting the
       client's amount when the check cannot be made reopens issue #93 at the moment nobody is
@@ -147,10 +155,15 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     `termsVersion`, and the departure instant composed from `travelDate` and the station's zone — so
     a later catalogue edit cannot rewrite what the customer accepted and the refund needs no Catalog
     call. See ADR-015.
-  - `offerId` stays **optional**: the SPA does not send it yet (issue #84), and requiring it would
-    reject every checkout until that lands. A checkout without it is still accepted with its amount
-    unvalidated, which is the part of issue #93 that only the SPA can close. It becomes required, and
-    the validation above unconditional, once the SPA sends it.
+  - **`offerId` became required once the SPA started sending it (#84), which closes #93.** Two
+    consequences worth stating. The idempotency fingerprint now always carries the offer segment, so
+    every canonical string has fixed arity — that removed a collision the optional form carried, and
+    could only be done in the same change. And Catalog is now on the critical path of **every**
+    checkout, not only those carrying an offer: while it is unreachable, no checkout is accepted.
+    That is the cost of closing #93 and it is deliberate.
+  - The `offer_id` **column** stays nullable. Orders placed before the SPA change legitimately hold
+    `NULL` and there is nothing to backfill them with; the refund endpoint refuses them, which is the
+    right answer.
   - Requires an authenticated customer identity.
   - Returns `202 Accepted` with an `orderId` and initial status after the request has been accepted for processing.
   - Rejects a `travelDate` in the past with `400 TRAVEL_DATE_IN_THE_PAST`. Orders deliberately checks no

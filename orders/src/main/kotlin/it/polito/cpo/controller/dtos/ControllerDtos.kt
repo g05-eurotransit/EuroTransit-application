@@ -12,23 +12,20 @@ data class CheckoutRequest(
     val seats: List<String>,
     /** The day being travelled. A route plus a seat is not a bookable thing on its own (issue #64). */
     val travelDate: LocalDate,
-    /** What the client displayed. Checked against the offer's price when [offerId] is present. */
+    /** What the client displayed: the offer's per-seat price times [seats]. Checked, never trusted. */
     val totalAmount: BigDecimal,
     val paymentMethodToken: String,
     /**
-     * Which offer is being bought. Needed by the post-sale refund (ADR-015), whose policy and cutoff
-     * are properties of the offer that was sold.
+     * Which offer is being bought. Required: it decides the price, and the post-sale refund
+     * (ADR-015) reads its policy and cutoff from the terms frozen at checkout.
      *
-     * **When present, it is resolved against Catalog and it decides the price.** The offer must
-     * exist, must be sold on [routeId], and its price must equal [totalAmount] — otherwise the
-     * checkout is rejected. [totalAmount] is therefore a consistency check on what the client
-     * displayed, not the amount that gets authorized; the offer's own price and currency are.
-     *
-     * Optional for now: the SPA does not send it yet (issue #84), and requiring it here would reject
-     * every checkout until that lands. While it is absent, [totalAmount] is still authorized
-     * unvalidated, which is the part of issue #93 that only the SPA can close.
+     * It is resolved against Catalog on every checkout. The offer must exist, must be sold on
+     * [routeId], and its **per-seat price times the number of seats** must equal [totalAmount] —
+     * otherwise the request is rejected. [totalAmount] is therefore a consistency check on what the
+     * client displayed, never the amount that gets authorized; the offer's own price and currency
+     * are.
      */
-    val offerId: String? = null,
+    val offerId: String,
 )
 
 data class CheckoutResponse(

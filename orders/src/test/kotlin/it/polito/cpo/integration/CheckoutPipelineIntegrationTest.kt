@@ -164,7 +164,9 @@ class CheckoutPipelineIntegrationTest {
         // to be on the committed row where the refund can read them without calling Catalog.
         val response = orchestrator.checkout(
             // Same value, looser scale — a client is not required to send trailing zeros.
-            request(totalAmount = BigDecimal("100.0"), offerId = OFFER.offerId),
+            // Loose scale on purpose — a client is not required to send trailing zeros — and two
+            // seats, so the amount is the line total rather than the per-seat price.
+            request(totalAmount = BigDecimal("200.0"), offerId = OFFER.offerId),
             "it-offer-${UUID.randomUUID()}",
             "user-1",
             "user-1@example.com",
@@ -174,7 +176,7 @@ class CheckoutPipelineIntegrationTest {
         assertEquals(OrderStatus.CONFIRMED, order.status)
 
         val authorized = payment.authorizeRequests.single { it.orderId == response.orderId }
-        assertEquals(0, BigDecimal("100.00").compareTo(authorized.amount))
+        assertEquals(0, BigDecimal("200.00").compareTo(authorized.amount))
         assertEquals("EUR", authorized.currency)
 
         // And the sale's terms survived the round-trip through V14.
@@ -212,12 +214,17 @@ class CheckoutPipelineIntegrationTest {
     }
 
     @Test
-    fun `an unreachable Catalog stops new offer checkouts and leaves offer-less ones working`() = runBlocking {
+    fun `an unreachable Catalog now stops every checkout, not only the ones carrying an offer`() = runBlocking {
+        // The availability trade got wider when `offerId` became required. It used to be "checkouts
+        // carrying an offer stop, offer-less ones keep working", and that escape hatch is gone:
+        // every checkout resolves, so Catalog is now on the critical path of all of them. Worth
+        // asserting rather than assuming, because it is the cost of closing #93 and it should not be
+        // discovered during an outage.
         catalog.failWith = IOException("catalog is down")
         try {
             val ex = assertFailsWith<ApiException> {
                 orchestrator.checkout(
-                    request(offerId = OFFER.offerId),
+                    request(),
                     "it-catalog-down-${UUID.randomUUID()}",
                     "user-1",
                     "user-1@example.com",
@@ -226,13 +233,6 @@ class CheckoutPipelineIntegrationTest {
             // Fail closed, and say which kind of failure it is: 503 means "ask again", where a 400
             // would have blamed a request that was perfectly correct.
             assertEquals("OFFER_UNRESOLVABLE", ex.code)
-
-            // The stated cost of that trade, and its stated limit: a checkout with no offer never
-            // touches Catalog, so it is unaffected.
-            val accepted = orchestrator.checkout(
-                request(), "it-catalog-down-offerless-${UUID.randomUUID()}", "user-1", "user-1@example.com",
-            )
-            assertEquals(OrderStatus.ACCEPTED, accepted.status)
         } finally {
             catalog.failWith = null
         }
@@ -408,11 +408,11 @@ class CheckoutPipelineIntegrationTest {
         val seat = "7C"
 
         val first = orchestrator.checkout(
-            request(travelDate = firstDay, seats = listOf(seat)),
+            request(travelDate = firstDay, seats = listOf(seat), totalAmount = BigDecimal("100.00")),
             "it-date-a-${UUID.randomUUID()}", "user-1", "user-1@example.com",
         )
         val second = orchestrator.checkout(
-            request(travelDate = secondDay, seats = listOf(seat)),
+            request(travelDate = secondDay, seats = listOf(seat), totalAmount = BigDecimal("100.00")),
             "it-date-b-${UUID.randomUUID()}", "user-1", "user-1@example.com",
         )
 
@@ -665,8 +665,9 @@ class CheckoutPipelineIntegrationTest {
         token: String = "tok-123",
         travelDate: LocalDate = TRAVEL_DATE,
         seats: List<String> = listOf("1A", "1B"),
-        totalAmount: BigDecimal = BigDecimal("100.00"),
-        offerId: String? = null,
+        // Two seats by default, so the line total is twice OFFER's per-seat price.
+        totalAmount: BigDecimal = BigDecimal("200.00"),
+        offerId: String = OFFER.offerId,
     ) = CheckoutRequest(
         routeId = "R1",
         seats = seats,
