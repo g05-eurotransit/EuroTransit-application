@@ -18,6 +18,7 @@ data class PaymentRefund(
     val status: String,
     val providerReference: String?,
     val idempotencyKey: String,
+    val reason: String, // "COMPENSATION" | "COMMERCIAL" | "UNKNOWN"
     val createdAt: LocalDateTime = LocalDateTime.now(),
     val updatedAt: LocalDateTime = LocalDateTime.now()
 ) : Persistable<UUID> {

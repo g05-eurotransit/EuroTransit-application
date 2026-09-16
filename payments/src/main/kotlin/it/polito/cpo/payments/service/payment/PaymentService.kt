@@ -163,6 +163,7 @@ class PaymentService(
         }
 
         val refundStatus = if (result.success) IPaymentService.RefundStatus.REFUNDED else IPaymentService.RefundStatus.FAILED
+        val reason = RefundReason.fromIdempotencyKey(idempotencyKey)
 
         val paymentRefund = it.polito.cpo.payments.model.PaymentRefund(
             authorizationId = authorization.getId(), // We must use getId() since id is private
@@ -170,7 +171,8 @@ class PaymentService(
             currency = authorization.currency,
             status = refundStatus.name,
             providerReference = result.refundReference,
-            idempotencyKey = idempotencyKey
+            idempotencyKey = idempotencyKey,
+            reason = reason.name
         ).apply { setAsNew(true) }
 
         val response = it.polito.cpo.payments.dto.PaymentRefundResponse(refundStatus, result.refundReference, result.errorCode)
@@ -239,7 +241,8 @@ class PaymentService(
                 status = refund.status,
                 refundReference = refund.providerReference,
                 amount = refund.amount,
-                currency = refund.currency
+                currency = refund.currency,
+                reason = refund.reason
             )
         )
         kafkaTemplate.send(eventType, orderId, objectMapper.writeValueAsString(event))
