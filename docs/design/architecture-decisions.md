@@ -491,9 +491,25 @@ also closes `SEAT_RETURN_FAILURE` — before refusing the redrive. An operator r
 would have destroyed the incident that said one was stuck: gauge to zero, alert clears, seat left
 `SOLD` forever. `OrderPlacedDeadLetterListener` had the identical shape of bug on a narrower path.
 Both now resolve `REFUNDING` to its own case before the generic terminal branch, and `redrive`
-re-emits `refund-requested` for it rather than closing anything — making redrive the operator's
-actual retry path for a stuck refund, which ADR-015 assumed would exist but this implementation had
-not yet provided.
+re-emits `refund-requested` for it rather than closing anything.
+
+**That makes redrive a retry path for a stuck refund, but not for every way one gets stuck, and the
+difference is worth stating rather than discovering during an incident.** A seat return that failed
+and a delivery that exhausted its retries are both genuinely retried: the pipeline re-runs from the
+durable `REFUNDING` row and can converge. A payment reversal Payments refused *definitively* is not.
+`PaymentService` stores an idempotency record for that failure — the `FAILED` branch writes
+`responseCode = 422` and saves it — so the redrive re-sends the same deterministic
+`pay-refund-{orderId}` key, Payments replays the stored `FAILED`, and `runRefundPipeline` opens the
+same incident again. Nothing else can close it either: `closeAutoResolvable` runs only inside the
+`markRefunded` commit, which that order never reaches; every caller of `closeStaleFor` excludes
+`REFUNDING`; and `resolve` is filtered to `INVARIANT_VIOLATION`. Such an order has no exit from
+Orders at all.
+
+The dead end is not introduced here — checkout compensation has the same shape against
+`refund-{orderId}` — but the claim that redrive is *the* operator's retry path was, and it is
+withdrawn. The real fix is in Payments: a provider-declined refund should not be cached as a settled
+result under a key the caller is expected to retry. That is another slice's decision and is left as
+one.
 
 Separately, `refund-requested-dlt` initially had no consumer. The shared error handler exhausts in
 about three seconds, so a dependency blip ordinary enough to be routine (an Inventory pod roll) could

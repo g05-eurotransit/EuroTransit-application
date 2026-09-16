@@ -16,6 +16,105 @@ Do not re-litigate these; they were settled deliberately.
 | Optimise for | A complete, demonstrable money path — refund included |
 | Post-sale refund | Start on the Orders side now; do not wait on the dependencies |
 | #72 explicit checkout hold | Left open for now; the analysis is posted as a comment, decision deferred |
+| Splitting the three stages across separate agents | Dropped: the token cost was out of proportion to what it returned. The discipline below is kept, the delegation is not |
+
+## How I work this slice
+
+**This is how the Orders slice owner works, not a rule for the team.** Other owners may reasonably
+work differently; nothing here is binding on anyone else.
+
+Three stages — plan, implement, review — deliberately not applied to every change, and all three done
+in the same session rather than handed to anyone.
+
+### Stage 0 — decide how much process the change warrants
+
+**Read enough code to judge the real scope first.** Do not size the work from how the request is
+worded.
+
+Use all three stages when the change spans several files or modules; crosses more than one boundary
+(service, process, database, client, API); can alter a shared contract, invariant or behaviour;
+introduces or changes concurrency, idempotency, persistence, caching, security or error handling; or
+carries a real risk of being correct line by line while wrong overall.
+
+Go straight to the code for a change localised to one or a few files; an obvious bugfix whose correct
+behaviour is already settled; mechanical bounded refactoring; an addition that plainly follows an
+existing pattern; or text, configuration and code with no architectural consequence.
+
+Judgement, not arithmetic — the point is to apply the process where it raises quality, not to apply
+it always. If the stages are skipped, verify with rigour proportionate to the change anyway. If they
+are not skipped, skip none of them and do not reorder them.
+
+### Stage 1 — the plan
+
+**Read the code before planning. Never plan on assumptions.** The plan is a versioned file in the
+repo and contains, in this order:
+
+1. What is being built and why, citing decisions already taken (ADR, issue, discussion) rather than
+   restating them.
+2. **"Verified before writing"** — facts read in the code, with file references, so they are not
+   re-derived later and so a wrong fact is met as a contradiction rather than absorbed as a surprise.
+   **Always include the caller-side contract: what the client actually sends, not what it ought to
+   send.**
+3. **"Settled / open / stop-and-ask"** — settled means implement and do not reopen; open means decide
+   during the work and write down what was decided; stop-and-ask means do not decide alone (another
+   owner's slice, a public contract, the meaning of something shared).
+4. The content itself, in subsections.
+5. **"Done when"** — verifiable criteria, not intentions.
+6. **A standing check that does not depend on the plan being right.** For example: before closing,
+   list every value the change causes to cross a boundary and verify what the receiver does with it.
+
+**Ask the open questions before writing code**, explained with concrete examples, so they can be
+answered without knowing the code.
+
+### Stage 2 — implementation
+
+Read the plan's "verified before writing" and "settled" sections before touching code, not after.
+Match the surrounding code and tests by reading neighbouring files rather than inventing a style.
+
+The operating rules: work on a branch, commit locally, **no push, no PRs, no issue comments** without
+being asked, keep the build green, and know the starting test count so the finishing one can be
+explained.
+
+**Stop when a fact in the plan turns out to be wrong.** Say so and re-decide; do not work around it
+silently — a plan quietly routed around is worse than no plan, because the next reader still believes
+it. Write down every decision made among the "open" ones, and above all **everything that had to be
+decided which the plan did not mention**: that list is where the next plan's gaps are.
+
+### Stage 3 — review
+
+**A separate pass over the whole diff, after the build is green** — not more writing, and not a
+re-reading of each change as it was made. The build being green is the starting point, so spend no
+time on compilation or on tests that pass; spend it on what a green build does not prove.
+
+The **settled** decisions are not reopened here, but the code is allowed to have implemented one
+badly, and saying so is in scope.
+
+Hunt where a plan cannot foresee: values crossing a boundary, shared predicates with several readers,
+invariants living in the database, idempotency and redelivery, concurrency, tests that pass while
+proving nothing. Verify claims instead of trusting them, code comments included. Rank by real
+reachability and cost, not by quantity. Say what was checked and found **correct**, otherwise coverage
+is unknown.
+
+**The honest limit of this stage:** the reader is the same person who wrote the plan and is invested
+in it. Separating the pass in time, and starting from the diff rather than from the intention, is what
+makes it work at all. Treat anything the plan predicted as *less* trustworthy for that reason, not
+more.
+
+### If corrections are needed
+
+Corrections deserve the same review as the code they correct, aimed at two questions: whether each
+correction is complete, and whether the same species of mistake survives somewhere else.
+
+### Why this shape, from what actually happened here
+
+- A review pass found two high-severity defects that the plan and the implementation had both missed
+  — and both areas had been *seen* during implementation and reasoned past. Reading the finished diff
+  cold is what catches that; reading it as you write it does not.
+- One of three corrections was incomplete, and the missed call site was named in the plan itself.
+  Hence reviewing corrections too.
+- The standing check caught a real bug during implementation that no plan had anticipated. It is the
+  part of this that does not depend on the plan being right, which is why it is worth keeping even
+  when everything else is skipped.
 
 ## Findings that change the picture
 

@@ -285,13 +285,27 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     `409 NO_OPEN_RECONCILIATION_RECORD`.
   - Atomically stores the redrive result and writes a new outbox row, then returns `202 Accepted`. The
     row's type depends on which durable process the order is currently in: `order-placed` for the
-    checkout pipeline, `refund-requested` for a `refunding` order (ADR-015) — this is also the
-    operator's retry path for a stuck refund (a seat return that keeps failing, say).
+    checkout pipeline, `refund-requested` for a `refunding` order (ADR-015).
+  - **What a redrive does and does not retry on a stuck refund.** It resumes the refund pipeline from
+    the durable `refunding` row, so it does retry a seat return that failed and a delivery that
+    exhausted its retries. It does **not** retry a payment reversal Payments refused definitively: the
+    reversal is re-sent under the same deterministic `pay-refund-{orderId}` key, Payments replays the
+    `FAILED` result it stored under it, and the incident re-opens unchanged. Such an order cannot be
+    unstuck from Orders at all — `closeAutoResolvable` runs only on the way to `refunded`,
+    `closeStaleFor`'s callers all exclude `refunding`, and `resolve` is filtered to invariant
+    violations. The fix is in Payments, which must not cache a provider-declined refund; not decided
+    here.
   - A **genuinely** terminal order (`confirmed`, `failed`, `cancelled`, `refunded`) returns
     `409 ORDER_ALREADY_TERMINAL` and closes any stale record as it refuses. `refunding` answers `true`
     from the same internal terminal check the checkout consumer uses, but is deliberately **not**
     treated as terminal here: the money or the seat may still be unresolved, and closing its incident
     on redrive would be exactly the failure this endpoint exists to fix.
+  - A `payment_pending` order whose seat hold has already expired returns
+    `409 RESERVATION_HOLD_EXPIRED` and leaves the incident open. That phase resumes by authorizing and
+    the hold is gone, so the redrive would buy nothing but a charge and its reversal. Only that phase
+    is refused: the others either re-take the hold or drive the order to a resolution it needs. The
+    same comparison is deliberately not made at authorization time, where the deadline is an Inventory
+    instant seconds away and Inventory is the only authority on whether it has passed (invariant 4).
   - Never modifies Inventory, Payments, or terminal Orders state directly. The stored order status is
     what selects the resume action, so the endpoint holds no knowledge of which stage resumes.
 - `POST /api/orders/{orderId}/reconciliation/{recordId}/resolve`
