@@ -135,8 +135,8 @@ class ReconciliationOperationsService(
     }
 
     /**
-     * Closes an investigated invariant violation. Requires a terminal order, so the money question is
-     * already settled, and a non-empty evidence reference, so the closure is auditable.
+     * Closes an investigated invariant violation. Requires an order whose money question is already
+     * settled, and a non-empty evidence reference, so the closure is auditable.
      */
     suspend fun resolve(
         orderId: UUID,
@@ -160,7 +160,15 @@ class ReconciliationOperationsService(
         val fingerprint = fingerprint(orderId.toString(), recordId.toString(), evidence)
         replayed<ResolveReconciliationResponse>(idempotencyKey, fingerprint)?.let { return it }
 
-        if (!order.status.isTerminal) {
+        // `isTerminal` answers a narrower question than this gate needs: "may the CHECKOUT consumer
+        // acknowledge a redelivery without a remote call?" — not "is the money question settled?".
+        // REFUNDING answers `true` to the first and `false` to the second, so it must be excluded
+        // explicitly, exactly as `redrive` excludes it above and for the same reason: resolving away
+        // the incident on an order whose reversal or seat return is still outstanding would close the
+        // only record saying so. Not reachable today — this method is filtered to INVARIANT_VIOLATION,
+        // written only by `enterCompensating`, and no order carrying one can reach CONFIRMED and hence
+        // REFUNDING — but the predicate must not depend on that remaining true.
+        if (!order.status.isTerminal || order.status == OrderStatus.REFUNDING) {
             throw ApiException(
                 HttpStatus.CONFLICT,
                 "ORDER_NOT_TERMINAL",
