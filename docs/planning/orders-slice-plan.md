@@ -780,3 +780,122 @@ by compartment. If Catalog ever introduces a fixed-price or per-compartment offe
 becomes wrong silently: the amount would simply be a multiple of what it should be. Deliberately not
 filed as an issue — there is nothing to do until Catalog wants it — but it is the question to ask
 giacomodipalma before any such offer is seeded.
+
+---
+
+# Handover — 2026-09-16
+
+Written at the end of a long session, for whoever picks this up next (including me, in a fresh
+session with none of that conversation). Everything below existed only in a chat transcript when it
+was written, which is why it is here.
+
+## Where things stand
+
+Merged to `dev` today: the Catalog offer resolution follow-up (`7a1f7a6`, #107 — per-seat pricing and
+a required `offerId`, closing #93) and the local Debezium outbox fix (`89d9afc`, #105). `dev` is green
+at **347 tests**. Nothing is deployed: both `ci.yml` and `docker-gitops.yml` trigger on a push to
+`main`, and `main` has not been promoted.
+
+Issues closed today: #93, #83, #84, #81, #70. Still open: **#104** (mine, small — see below), **#98**
+(the same-day departed-run filter), **#86** (the umbrella; it closes when the refund lands), **#72**
+(deferred by decision, keep it open).
+
+## The refund — step 4 is one step from done, on an unpushed branch
+
+`feature/orders-refund`, **12 local commits, never pushed**, build green at **368 tests**. As of
+today it is **22 commits behind `dev` with zero conflicts**, so rebasing is painless. Two rounds of
+implementation and two adversarial reviews are already in it.
+
+**Four corrections were decided and never applied.** They are the whole of what stands between that
+branch and a pull request.
+
+**F1 — a stuck refund's redrive is a guaranteed no-op, and the docs claim otherwise.** When a refund's
+payment reversal is definitively declined, Payments stores an idempotency record for the failure
+(`PaymentService`, the `FAILED` branch writes `responseCode = 422` and saves). A redrive re-sends the
+same deterministic `pay-refund-{orderId}` key, Payments replays the stored `FAILED`, and the incident
+re-opens unchanged. Nothing can close that record either: `closeAutoResolvable` only runs from
+`markRefunded` (unreachable), `closeStaleFor`'s callers all exclude `REFUNDING`, and `resolve` is
+filtered to `INVARIANT_VIOLATION`. The dead end pre-exists on the checkout side, so it is not a
+regression — what the branch introduced is the *claim*, in `api-design.md` and in ADR-015, that
+redrive is the operator's retry path for a stuck refund. For one of the three stuck states it is not.
+**Minimum: remove the promise.** The real fix probably lives in `payments/` (do not cache a
+provider-declined refund), which is a stop-and-ask.
+
+**F2 — the third `isTerminal` reader was left alone.** `ReconciliationOperationsService.resolve`
+guards on `!order.status.isTerminal` with a KDoc saying "so the money question is already settled".
+`REFUNDING` now answers `true` to a gate written to mean the opposite. **Not reachable today** —
+`resolve` only touches `INVARIANT_VIOLATION`, whose sole writer is `enterCompensating` inside the
+`CONFIRMING_INVENTORY -> COMPENSATING` transaction, and `COMPENSATING`'s only SQL exit is `FAILED`,
+so no order carrying one can reach `CONFIRMED`. Worth fixing anyway: it is one line, and it is the
+last instance of the exact class of mistake the correction round existed to eliminate.
+
+**F3 — the new gauge test cannot fail the way the query actually breaks.** For a `REFUNDING` row with
+a null `refund_requested_at`, `CURRENT_TIMESTAMP - NULL` is `NULL`, `MAX` skips it, and `COALESCE`
+yields **0** — so a stuck refund is counted but reports age zero forever and no age alert fires. The
+test seeds `now() - 5s` and asserts `age >= 0 && age < 60`; zero satisfies that. Assert a lower bound
+(`age > 1`) and add a case for a null column so the masking is a recorded decision.
+
+**F4 — an integration test is named for the half it does not exercise.**
+`redriving an already REFUNDED order is refused as terminal, and closes stale records` drives a clean
+refund, so no reconciliation record is ever opened and `closeStaleFor` returns 0. It would pass
+unchanged if that call were deleted. Force a `SEAT_RETURN_FAILURE` first, then assert the record is
+`RESOLVED` after the refused redrive.
+
+**Fold in with F1: refuse a redrive whose seat hold has expired.** Observed live today — Inventory's
+sweeper expires the reservation and releases the seats, and Orders never learns: the order sits in
+`PAYMENT_PENDING`/`REFUNDING` pointing at an `EXPIRED` reservation. The money is safe (Inventory
+refuses the confirmation with `RESERVATION_EXPIRED`, Orders compensates), so the cost is a pointless
+authorize-and-reverse cycle, not a hole. **Do not check `reservation_expires_at` before authorizing**
+— that instant comes from Inventory's database clock, and comparing it against Orders' clock at the
+boundary would throw away sales Inventory would still honour; Invariant 4 makes Inventory the only
+authority. At redrive time hours have passed, the ambiguity is gone, and the operator gets an honest
+refusal instead of triggering a charge and a refund with one click. F1 already touches `redrive`.
+
+## Two things in the step 4 plan above that are now stale
+
+**The `#70` collision note is obsolete.** It says to read `feature/issue-70-readable-notifications`
+before writing a third notification. That branch is merged (`6ad3de2`, #106) and deleted. A refund
+notification must be written against the payload as it is on `dev` now, not against that branch.
+
+**`V13`'s promise to tighten `offer_id` to `NOT NULL` is wrong** and the correction is on the entity,
+not in the migration. Editing an applied migration changes its Flyway checksum and breaks startup
+everywhere it has already run — found the hard way today, by a local startup failing with
+`Migration checksum mismatch for migration version 13` after a comment-only edit, on a green build.
+The test suites cannot catch this: they always start from an empty database.
+
+## Two defects found today that belong to someone else and are written down nowhere else
+
+Both are for the frontend/payments owner (`eravreto`). Neither is blocking. Neither has an issue yet.
+
+**Payments publishes to Kafka after the charge, with no outbox.** Observed: Stripe accepted the
+charge, the event publish then failed, the endpoint answered `500`, and Orders classified it as an
+unknown outcome — correctly, because it cannot know whether money moved. So a real charge can exist
+with no order that knows about it. The specific publish bug that produced it is already fixed in the
+source, but the structural question is untouched: Orders solved exactly this with an outbox row
+written in the same transaction; Payments publishes directly.
+
+**The order page never gives up.** `OrderStatusPage.poll()` polls every 1500 ms until the status is
+terminal or `COMPENSATING`; `reservationExpiresAt` appears in no exit condition. When the hold
+expires the seats are released and the order can no longer complete, but the page keeps polling an
+outcome that will never arrive. Also, the countdown copy says the *payment* expires; it is the seat
+hold, and #88 set that as an explicit copy constraint.
+
+## Operational traps this session hit twice each, worth not repeating
+
+**Stale local images.** `docker compose up -d` reuses an existing image. Two investigations were sent
+down the wrong path by months-old images: once an endpoint that did not exist yet, once a bug already
+fixed in source. Run `docker compose build <service>` before trusting any local reproduction.
+
+**Green build, broken change.** Both defects that mattered today — the per-seat price and the Flyway
+checksum — passed CI. The first because every test used one seat; the second because suites start
+from an empty database. Neither would have been found without running the real thing by hand.
+
+## Suggested order from here
+
+1. Write the two reports above as issues, before they are lost.
+2. Step 4: apply F1-F4 plus the redrive item, rebase on `dev`, open the PR. This closes #86.
+3. #104 — map the unknown outcome from the seat-map façade to `503`. Small, self-contained; the issue
+   body carries the full analysis and the measurements.
+4. #98 — the same-day departed-run filter. The Catalog client makes it reachable;
+   `GET /api/catalog/routes/{routeId}` already returns `departureTime` and `departureZone`.
+5. Steps 5 and 6 of this plan, still unwritten.
