@@ -278,9 +278,16 @@ services:
       CONFIG_STORAGE_REPLICATION_FACTOR: 1
       OFFSET_STORAGE_REPLICATION_FACTOR: 1
       STATUS_STORAGE_REPLICATION_FACTOR: 1
-      # Per comodità di test evitiamo l'uso di schemi espliciti su Kafka
-      KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
-      VALUE_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      # Same converters as the cluster (EuroTransit-configuration,
+      # platform/connectors/base/orders-outbox-connect.yaml): the local stack is only a useful
+      # rehearsal for production if the outbox takes the same path through Connect.
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      # The CONNECT_ prefix is load-bearing, and its absence is invisible. The Debezium entrypoint
+      # maps a fixed set of bare names (BOOTSTRAP_SERVERS, GROUP_ID, KEY_CONVERTER, ...) and passes
+      # everything else through only when prefixed. Unprefixed, these two are silently dropped and
+      # JsonConverter keeps its default of wrapping every value in {"schema":..., "payload":...} —
+      # which the consumers cannot parse, so the order stops in ACCEPTED with no visible error.
       CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
       CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
     ports:
