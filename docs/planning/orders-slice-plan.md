@@ -310,6 +310,99 @@ separate and tested, and #84 item 3 is unblocked with the response shape communi
 > repository involved from the start — not as an Orders task.
 
 
+## #72 — detailed analysis, 2026-09-17
+
+The draft comment above asked for a decision on budget and sequencing and left the technical case
+alone, because it looked settled. Reading the Payments and frontend code to cost it properly found
+that it is not: **the headline benefit needs a change nobody had counted.** This section supersedes
+the cost estimate in the draft; the rest of the draft still holds.
+
+### What the proposal is actually worth
+
+The argument for #72 is that today there is no Strong Customer Authentication anywhere in the money
+path: `paymentMethodToken` arrives in the checkout body and the whole pipeline runs server-side with
+no user interaction, so there is no point at which a customer can be challenged. For a European rail
+marketplace that is not a realistic flow. That argument is correct and is not in dispute here.
+
+### The cost nobody had counted: the Stripe integration is pre-SCA on both ends
+
+- **Payments calls the legacy Charges API.** `StripeSandboxProvider.authorize` posts to `/charges`
+  with a `source` token.
+- **The frontend produces legacy tokens.** `CheckoutPage` calls `stripe.createToken(cardNumberElement)`
+  and sends `token.id`.
+
+3-D Secure and SCA are not features you switch on over that pairing. They are properties of the
+**PaymentIntents** flow, where the server creates an intent, the client confirms it, and the provider
+may answer `requires_action` for the challenge. Accepting #72 therefore means replacing the payment
+integration end to end — `createToken` → PaymentElement/`confirmPayment` on the client,
+`/charges` → `/payment_intents` plus `next_action` handling and webhooks on the server — **before**
+any of the four-slice state machine work in the proposal begins.
+
+The draft costed #72 as "four durable states in Orders, three endpoints, plus Inventory, Payments and
+config work". That is the second half. The first half is a rewrite of how the system takes money, and
+it is the half that carries the risk, because it replaces the one part of the money path that is
+already proven against a real provider sandbox (#87).
+
+### What the Definition of Done asks for
+
+`capstone-dod.md` requires that Payments integrates with a provider sandbox or test API, and that no
+real card data or live charges are handled. Both are satisfied. **No DoD item requires SCA, 3-D
+Secure, a customer-driven payment call, or a payment window.** Nothing about the grading of this work
+improves by accepting #72.
+
+### What accepting it would invalidate
+
+- **The hold deadline's meaning**, shipped in #88 and constrained ever since: the countdown covers
+  crash, retry and Kafka lag, and no client may present it as "you have ten minutes to pay". Under
+  #72 that inverts and the copy has to be rewritten.
+- **The availability façade's advisory design**, which exists precisely because the read creates no
+  hold. Under #72 it becomes the point where a hold is created, which changes its resilience posture,
+  its idempotency story, and the departed-run filter just merged into it.
+- **The checkout idempotency fingerprint**, which the SPA would have to persist across reloads —
+  called out in the draft and still true.
+
+### Recommendation: no, and keep it open
+
+Out of scope for this delivery. Not rejected on merit — the proposal is sound and the realism
+argument is real — but on three grounds:
+
+1. **The DoD does not ask for it,** and the project's binding constraint right now is proving what
+   already exists. Nothing is deployed, 55 DoD items are unticked, and the canary needs two
+   promotions that have not started.
+2. **It is materially more expensive than the draft said,** because the SCA benefit requires
+   replacing the Stripe integration on both ends first.
+3. **It would put the one already-proven part of the money path back into flux** to gain something
+   nothing is measuring.
+
+Revisit only if the money path is complete, demonstrated in the cluster, and time remains. If it is
+ever accepted it must be planned as its own cross-slice block with Inventory, Payments and the
+configuration repository involved from the start — and with the PaymentIntents migration as its
+first step, not as an implementation detail of the third.
+
+### The cheap subset worth doing instead
+
+Costing #72 surfaced a smaller mismatch that stands on its own and does **not** need any of it.
+
+**Orders' state machine is built on authorize-then-capture semantics, and Payments implements
+charge-then-refund.** Orders has `payment_authorizations`, a status of `AUTHORIZED`, a
+`CONFIRMING_INVENTORY` phase that exists so money is committed only after Inventory confirms, and a
+`COMPENSATING` phase that "reverses" it. But `StripeSandboxProvider.authorize` posts to `/charges`
+with capture defaulting to true — it takes the money immediately — and compensation issues a refund.
+
+The consequences are real but small, which is why this is a subset and not an emergency:
+
+- A checkout that compensates produces **two movements on the customer's statement**, a charge and a
+  refund, where an authorization that is voided produces none.
+- The reversal costs a real refund rather than a free void, and inherits the dead end in #111.
+- The word "authorization" in ADR-015, `api-design.md` and the Orders code describes something the
+  system does not do.
+
+Making the provider call an actual authorization (`capture: false`) and capturing after Inventory
+confirms would align the implementation with the model Orders already documents. It is **local to
+Payments**, needs no new states anywhere, and it is the part of #72's value that can be had without
+#72. Belongs to the Payments owner; not filed as an issue yet.
+
+
 ---
 
 ## Step 1 — outcome
