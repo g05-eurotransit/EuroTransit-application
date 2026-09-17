@@ -216,12 +216,26 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     different cases — an unknown route, and a known route with no seats provisioned for that travel
     date — so the façade has nothing better to say than to re-raise it; tracked in #96. A sold-out
     run is not one of those cases: its seat rows exist, so it is a `200` with every seat unavailable.
+  - `409 RUN_ALREADY_DEPARTED` when the requested date is **today** and the run has already left.
+    ADR-014 requires this filter at read time rather than at the write, because a refund puts the
+    seats of a departed run back to `AVAILABLE` by design (#82) — so Inventory's rows are untouched
+    and a train that left at 07:40 still reads as bookable at 14:00. A distinct code rather than
+    "every seat unavailable": only a code lets the picker say what happened, since a grid of
+    greyed-out seats is indistinguishable from a sold-out train and the two need opposite advice.
+    `409` rather than `400` because the date is valid and it is the run's state that is wrong.
+    Catalog is consulted **only** for a travel date of today — a future date cannot have departed —
+    so the common browsing request keeps exactly one dependency. A route Catalog does not know is not
+    an error here: Inventory still owns whether the route and date have seats, and answers as it did
+    before this filter existed.
   - `503 SEAT_MAP_UNAVAILABLE` when Inventory does not answer at all — a timeout, an open
     `inventory-read` breaker, a 5xx, a refused connection. Deliberately distinct from the `404` above,
     which is Inventory answering: collapsing the two would let "Inventory is down" be read as "no
     seats are free". `503` rather than `504` because the status set is frozen and `503` is its member
     for a dependency being unavailable or a circuit being open. The likeliest trigger is an Inventory
-    rollout, during which the breaker opens for about ten seconds (issue #104).
+    rollout, during which the breaker opens for about ten seconds (issue #104). The same code
+    answers when **Catalog** does not answer the departure lookup above: not knowing whether a train
+    has left is not a reason to say it has not, so the endpoint fails closed rather than dropping the
+    filter and selling a seat on a departed run.
 
 - `GET /api/orders/{orderId}`
   - Returns the current order status: accepted, reserving, payment-pending, confirming-inventory, compensating, confirmed, failed, cancelled, refunding, or refunded. The last two are a separate durable process (ADR-015), reachable only from confirmed.

@@ -7,6 +7,7 @@ import it.polito.cpo.client.HoldOutcome
 import it.polito.cpo.client.InventoryClient
 import it.polito.cpo.client.InventoryRefusalCode
 import it.polito.cpo.client.OfferOutcome
+import it.polito.cpo.client.RouteOutcome
 import it.polito.cpo.client.PaymentClient
 import it.polito.cpo.client.RefundReservationOutcome
 import it.polito.cpo.client.ResolvedOffer
@@ -355,6 +356,10 @@ class CheckoutOrchestratorTest {
             failWith?.let { throw it }
             return outcome
         }
+
+        // The orchestrator never calls this -- only the seat-map façade does. Answering NotFound
+        // rather than throwing keeps that true without making the stub assert it.
+        override suspend fun getRoute(routeId: String): RouteOutcome = RouteOutcome.NotFound
     }
 
     // --- harness ----------------------------------------------------------------------------------

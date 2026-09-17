@@ -1,6 +1,8 @@
 package it.polito.cpo.controller
 
+import it.polito.cpo.client.CatalogClient
 import it.polito.cpo.client.InventoryReadClient
+import it.polito.cpo.client.RouteOutcome
 import it.polito.cpo.client.SeatAvailabilityOutcome
 import it.polito.cpo.controller.dtos.CheckoutRequest
 import it.polito.cpo.controller.dtos.CheckoutResponse
@@ -21,6 +23,7 @@ import org.springframework.security.oauth2.jwt.Jwt
 import org.springframework.web.bind.annotation.*
 import org.springframework.web.server.ResponseStatusException
 import java.time.LocalDate
+import java.time.OffsetDateTime
 import java.util.UUID
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -31,6 +34,7 @@ class OrderController(
     private val checkoutOrchestrator: CheckoutOrchestrator,
     private val refundOrchestrator: RefundOrchestrator,
     private val inventoryReadClient: InventoryReadClient,
+    private val catalogClient: CatalogClient,
 ) {
 
     private companion object {
@@ -137,6 +141,19 @@ class OrderController(
             )
         }
 
+        // Issue #98, second half. ADR-014 requires the departed-run filter at read time rather than
+        // at the write: a refund puts the seats of a departed run back to AVAILABLE by design (#82),
+        // so Inventory's rows are untouched and a train that left at 07:40 still reads as bookable at
+        // 14:00. Inventory cannot decide this — it has neither departureTime nor departureZone, and
+        // giving it a Catalog client would put a read-heavy public service on the money path.
+        //
+        // Only for today. A future date cannot have departed, so browsing traffic never reaches
+        // Catalog through here at all and the common seat-map request keeps exactly one dependency.
+        // Yesterday and earlier were already refused above, so "today" is the whole remaining case.
+        if (travelDate == LocalDate.now()) {
+            requireNotDeparted(routeId, travelDate)
+        }
+
         // No ownership check and no principal use: there is no owned resource here. Authentication
         // is still required — the security chain covers this path with the customer/operations rule
         // — because this is a step of the checkout, not public browsing.
@@ -189,6 +206,62 @@ class OrderController(
             travelDate = travelDate,
             seats = seats.map { SeatView(seatId = it.seatId, available = it.available) },
         )
+    }
+
+    /**
+     * Refuses a seat map for a run that has already left, with `409 RUN_ALREADY_DEPARTED`.
+     *
+     * `409` and not `400`: the request is well formed and the date is not in the past — the resource
+     * is valid and its state is wrong, which is what this codebase uses `409` for everywhere else
+     * (`ORDER_NOT_CONFIRMED`, `ORDER_ALREADY_TERMINAL`, ...). The sibling guard above answers `400`
+     * because *there* the input itself is wrong.
+     *
+     * A distinct code rather than "every seat unavailable" because only a code lets the picker say
+     * what happened. A grid of greyed-out seats is indistinguishable from a sold-out train, and the
+     * two need opposite advice: pick another date versus pick another train.
+     *
+     * **The JVM clock, not the database clock**, and the difference from the refund cutoff is
+     * deliberate. ADR-015 compares the cutoff against `CURRENT_TIMESTAMP` because it is a money
+     * decision committed inside an atomic UPDATE, where replica clock disagreement would decide
+     * whether a customer is refunded. This is an advisory read with no lock and no money — the
+     * authoritative answer is still `SEATS_UNAVAILABLE` at checkout — and the guard beside it
+     * already uses `LocalDate.now()`. Adding a round trip to the database to compare an instant on a
+     * browsing path would buy a few milliseconds of agreement that nothing depends on.
+     *
+     * The comparison itself is zone-safe regardless: `departureAt` anchors the route's local time in
+     * the route's own zone, so what is compared is two instants and never two wall clocks.
+     */
+    private suspend fun requireNotDeparted(routeId: String, travelDate: LocalDate) {
+        val outcome = try {
+            catalogClient.getRoute(routeId)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            // Fail closed, the same stance CatalogClient documents for the checkout price check and
+            // the same one the Inventory call below takes. Not knowing whether the train has left is
+            // not a reason to say it has not: a seat sold on a departed run is a real ticket for a
+            // train that is gone, and it costs a refund and a seat nobody could buy.
+            throw ApiException(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "SEAT_MAP_UNAVAILABLE",
+                "The seat map could not be loaded right now. Please try again.",
+                cause = failure,
+            )
+        }
+
+        // NotFound is Catalog answering, and it stops here rather than becoming a 404. Inventory owns
+        // whether a route and date have seats, and it already answers that; a route Catalog has never
+        // heard of therefore behaves exactly as it did before this filter existed instead of gaining
+        // a second service's opinion about its existence.
+        val route = (outcome as? RouteOutcome.Found)?.route ?: return
+
+        if (route.departureAt(travelDate).isBefore(OffsetDateTime.now())) {
+            throw ApiException(
+                HttpStatus.CONFLICT,
+                "RUN_ALREADY_DEPARTED",
+                "This service has already departed.",
+            )
+        }
     }
 
     @GetMapping("/{orderId}")
