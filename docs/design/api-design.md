@@ -216,6 +216,12 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     different cases — an unknown route, and a known route with no seats provisioned for that travel
     date — so the façade has nothing better to say than to re-raise it; tracked in #96. A sold-out
     run is not one of those cases: its seat rows exist, so it is a `200` with every seat unavailable.
+  - `503 SEAT_MAP_UNAVAILABLE` when Inventory does not answer at all — a timeout, an open
+    `inventory-read` breaker, a 5xx, a refused connection. Deliberately distinct from the `404` above,
+    which is Inventory answering: collapsing the two would let "Inventory is down" be read as "no
+    seats are free". `503` rather than `504` because the status set is frozen and `503` is its member
+    for a dependency being unavailable or a circuit being open. The likeliest trigger is an Inventory
+    rollout, during which the breaker opens for about ten seconds (issue #104).
 
 - `GET /api/orders/{orderId}`
   - Returns the current order status: accepted, reserving, payment-pending, confirming-inventory, compensating, confirmed, failed, cancelled, refunding, or refunded. The last two are a separate durable process (ADR-015), reachable only from confirmed.
