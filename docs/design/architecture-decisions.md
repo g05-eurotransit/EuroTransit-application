@@ -123,6 +123,31 @@ This gives the project a realistic external dependency, secret-management requir
 - **Pure internal payment mock:** Easy to implement, but too weak for an enterprise-grade target because it avoids provider credentials, external latency, provider idempotency behavior, and realistic failure handling.
 - **Live payment integration:** More realistic, but inappropriate for the project because it introduces real financial risk, compliance concerns, and unnecessary secret exposure.
 
+### What "authorize" means here, and why it is not a hold
+
+`StripeSandboxProvider.authorize` posts to the Charges API with `capture` defaulting to true: **the
+money moves at authorization time**, and a checkout compensation issues a refund. It is deliberately
+not an uncaptured authorization completed by a later capture — even though the vocabulary across this
+repository (`payment_authorizations`, a status of `AUTHORIZED`, "reversal", and a
+`CONFIRMING_INVENTORY` phase that exists so money commits only after Inventory confirms) reads as
+though it were.
+
+Deferring the capture was considered and rejected. Payments has no way to know when Inventory has
+confirmed, so Orders would have to call a capture between `stageConfirmInventory` succeeding and the
+order reaching `CONFIRMED`: a new remote call on the money path, with its own durable phase and its
+own unknown-outcome handling under invariant 8. Worse, it introduces a failure the current ordering
+makes impossible — a capture that fails **after** Inventory has committed the sale leaves the seat
+`SOLD` with no money taken. Taking the money first means a sale is never confirmed that cannot be
+charged for.
+
+What the current ordering costs is visible only on a compensated checkout: the customer sees two
+movements on their statement, a charge and a refund, where a voided authorization would leave none.
+That is the rare path, and it is the accepted trade.
+
+Written down because the gap between the vocabulary and the behaviour is easy to notice and looks
+like a bug worth fixing. It is not. "Fixing" it moves the money after the seat, which is the weaker
+ordering, and it is the reason the naming was left alone rather than the behaviour changed.
+
 ## ADR-007: Async Cost and Scaling Model
 
 **Decision:** Use Kotlin coroutines/flows for I/O-bound and event-driven checkout work, while keeping correctness boundaries explicit and synchronous where an immediate business decision is required.
