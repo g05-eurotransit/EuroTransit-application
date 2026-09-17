@@ -25,6 +25,16 @@ class MockCatalogClient : CatalogClient {
     override suspend fun getOffer(offerId: String): OfferOutcome =
         OFFERS[offerId]?.let { OfferOutcome.Found(it) } ?: OfferOutcome.NotFound
 
+    /**
+     * Derived from the same seeded offers rather than kept as a second table, so a `dev` route can
+     * never disagree with itself about when it departs — which is exactly the bug the departed-run
+     * filter would then report.
+     */
+    override suspend fun getRoute(routeId: String): RouteOutcome =
+        OFFERS.values.firstOrNull { it.routeId == routeId }
+            ?.let { RouteOutcome.Found(RouteSchedule(it.routeId, it.departureTime, it.departureZone)) }
+            ?: RouteOutcome.NotFound
+
     private companion object {
         private val ROME: ZoneId = ZoneId.of("Europe/Rome")
         private val NON_REFUNDABLE = RefundPolicy(refundable = false, cutoffMinutesBeforeDeparture = null)

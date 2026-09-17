@@ -33,7 +33,71 @@ interface CatalogClient {
      * so resolving a checkout takes exactly one call and no second lookup on `/routes/{routeId}`.
      */
     suspend fun getOffer(offerId: String): OfferOutcome
+
+    /**
+     * One route's departure schedule, for the same-day departed-run filter on the seat map (#98).
+     *
+     * Separate from [getOffer] because the seat map has no offer: the customer is still choosing
+     * seats and has not picked a fare. `GET /api/catalog/routes/{routeId}` is the only place the
+     * departure fields exist for a route on its own.
+     *
+     * Called **only** for a `travelDate` of today. A future date cannot have departed, so browsing
+     * traffic — which is nearly all of it — never reaches Catalog through this path at all. That is
+     * what keeps a public read-heavy dependency off the common seat-map request.
+     */
+    suspend fun getRoute(routeId: String): RouteOutcome
 }
+
+/** Result of the Catalog route lookup. */
+sealed interface RouteOutcome {
+
+    data class Found(val route: RouteSchedule) : RouteOutcome
+
+    /**
+     * Catalog does not know this route id.
+     *
+     * A definitive answer, not a failure. The seat-map façade treats it as "no departure time to
+     * compare against" and carries on to Inventory, which owns whether the route and date have seats
+     * at all — so a route Catalog has never heard of keeps answering exactly as it did before this
+     * filter existed, rather than gaining a new `404` from a second service.
+     */
+    data object NotFound : RouteOutcome
+}
+
+/**
+ * One route's schedule as Orders needs it: when it leaves, and where that time is anchored.
+ *
+ * Mapped off the wire rather than sharing Catalog's `Route`, which lives in `catalog/` and is not a
+ * published contract — only `OfferDetail` is. Three fields instead of the whole row, for the same
+ * reason [ResolvedOffer] drops two: what cannot be reached cannot be misused. `origin`,
+ * `destination` and `arrivalTime` are presentation, and the seat map does not render them.
+ */
+data class RouteSchedule(
+    val routeId: String,
+    val departureTime: LocalTime,
+    /** IANA zone of the departure station; [departureTime] is zone-less without it. */
+    val departureZone: ZoneId,
+) {
+    /** @see departureInstant */
+    fun departureAt(travelDate: LocalDate): OffsetDateTime =
+        departureInstant(travelDate, departureTime, departureZone)
+}
+
+/**
+ * The instant a run departs, for a customer travelling on [travelDate].
+ *
+ * The one place this arithmetic happens, shared by [ResolvedOffer.departureAt] (the refund cutoff)
+ * and [RouteSchedule.departureAt] (the departed-run filter). A date plus a zone-less local time is
+ * not a moment, and both a cutoff and a "has it left yet" comparison need one.
+ *
+ * On the spring-forward DST gap the local time does not exist; `atZone` moves it forward by the
+ * offset shift rather than failing, which is the right answer for a departure board.
+ */
+internal fun departureInstant(
+    travelDate: LocalDate,
+    departureTime: LocalTime,
+    departureZone: ZoneId,
+): OffsetDateTime = travelDate.atTime(departureTime).atZone(departureZone).toOffsetDateTime()
 
 /** Result of the Catalog offer lookup. */
 sealed interface OfferOutcome {
@@ -76,14 +140,13 @@ data class ResolvedOffer(
     /**
      * The instant this run departs, for a customer travelling on [travelDate].
      *
-     * The one place this arithmetic happens. The refund cutoff is a duration before departure, so it
-     * can only be evaluated against a moment — and a date plus a zone-less local time is not one.
+     * Delegates to [departureInstant], which is the one place this arithmetic happens. The refund
+     * cutoff is a duration before departure, so it can only be evaluated against a moment — and a
+     * date plus a zone-less local time is not one.
      * Computed once at checkout and persisted, so the refund path compares a stored instant against
      * the database clock with no zone arithmetic and no dependency on Catalog being reachable.
      *
-     * On the spring-forward DST gap the local time does not exist; `atZone` moves it forward by the
-     * offset shift rather than failing, which is the right answer for a departure board.
      */
     fun departureAt(travelDate: LocalDate): OffsetDateTime =
-        travelDate.atTime(departureTime).atZone(departureZone).toOffsetDateTime()
+        departureInstant(travelDate, departureTime, departureZone)
 }

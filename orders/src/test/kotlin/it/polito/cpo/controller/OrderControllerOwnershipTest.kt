@@ -1,6 +1,10 @@
 package it.polito.cpo.controller
 
+import it.polito.cpo.client.CatalogClient
 import it.polito.cpo.client.InventoryReadClient
+import it.polito.cpo.client.OfferOutcome
+import it.polito.cpo.client.RouteOutcome
+import it.polito.cpo.client.RouteSchedule
 import it.polito.cpo.client.SeatAvailability
 import it.polito.cpo.client.SeatAvailabilityOutcome
 import it.polito.cpo.controller.dtos.OrderHistoryCursor
@@ -15,6 +19,7 @@ import it.polito.cpo.service.OrderService
 import it.polito.cpo.service.RefundOrchestrator
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.TestConfiguration
@@ -30,6 +35,8 @@ import reactor.core.publisher.Mono
 import java.math.BigDecimal
 import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneId
 import java.time.LocalDateTime
 import java.time.OffsetDateTime
 import java.util.UUID
@@ -45,9 +52,28 @@ class OrderControllerOwnershipTest @Autowired constructor(
     private val webTestClient: WebTestClient,
     private val orderService: FakeOrderService,
     private val inventoryReadClient: FakeInventoryReadClient,
+    private val catalogClient: FakeCatalogClient,
 ) {
     private val orderId = UUID.randomUUID()
     private val travelDate: LocalDate = LocalDate.now().plusDays(3)
+
+    /**
+     * `@WebFluxTest` caches one context for the whole class, so these spies carry whatever the
+     * previous test left on them. Resetting here is what lets each test's assertions be about its own
+     * request rather than about JUnit's method ordering.
+     */
+    @BeforeEach
+    fun resetDoubles() {
+        inventoryReadClient.lastRouteId = null
+        inventoryReadClient.lastTravelDate = null
+        inventoryReadClient.failNextWith = null
+        inventoryReadClient.next = SeatAvailabilityOutcome.Found(emptyList())
+        catalogClient.lastRouteId = null
+        catalogClient.failNextWith = null
+        catalogClient.next = RouteOutcome.Found(
+            RouteSchedule("R1", LocalTime.of(23, 59), ZoneId.of("Europe/Rome")),
+        )
+    }
 
     private fun seedOwnedBy(owner: String) {
         orderService.next = Order(
@@ -517,6 +543,84 @@ class OrderControllerOwnershipTest @Autowired constructor(
     }
 
     @Test
+    fun `a same-day run that has already departed is refused`() {
+        // Issue #98 / ADR-014. A refund puts the seats of a departed run back to AVAILABLE by design,
+        // so Inventory's rows are untouched and the train that left this morning still reads as
+        // bookable. 409 rather than 400: the date is today and the request is well formed -- the
+        // resource is valid and its state is wrong.
+        catalogClient.next = RouteOutcome.Found(
+            RouteSchedule("R1", LocalTime.of(0, 1), ZoneId.of("Europe/Rome")),
+        )
+
+        webTestClient.get().uri("/api/orders/seat-availability?routeId=R1&travelDate=${LocalDate.now()}")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isEqualTo(409)
+            .expectBody()
+            .jsonPath("$.code").isEqualTo("RUN_ALREADY_DEPARTED")
+
+        // Refused before Inventory was asked: there is nothing to show, so there is nothing to fetch.
+        assertNull(inventoryReadClient.lastTravelDate)
+    }
+
+    @Test
+    fun `a same-day run that has not departed yet still returns its seat map`() {
+        catalogClient.next = RouteOutcome.Found(
+            RouteSchedule("R1", LocalTime.of(23, 59), ZoneId.of("Europe/Rome")),
+        )
+        inventoryReadClient.next = SeatAvailabilityOutcome.Found(listOf(SeatAvailability("1A", true)))
+
+        webTestClient.get().uri("/api/orders/seat-availability?routeId=R1&travelDate=${LocalDate.now()}")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isOk
+            .expectBody()
+            .jsonPath("$.seats[0].seatId").isEqualTo("1A")
+    }
+
+    @Test
+    fun `a future date never asks Catalog at all`() {
+        // The filter must not put a read-heavy public dependency on the common browsing request. A
+        // date in the future cannot have departed, so there is nothing to ask.
+        inventoryReadClient.next = SeatAvailabilityOutcome.Found(listOf(SeatAvailability("1A", true)))
+
+        webTestClient.get().uri("/api/orders/seat-availability?routeId=R1&travelDate=$travelDate")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isOk
+
+        assertNull(catalogClient.lastRouteId)
+    }
+
+    @Test
+    fun `a route Catalog does not know keeps answering as it did before the filter`() {
+        // NotFound is Catalog answering, not failing. Inventory owns whether a route and date have
+        // seats, and it already answers that -- so an unknown route must not gain a second service's
+        // opinion about its existence.
+        catalogClient.next = RouteOutcome.NotFound
+        inventoryReadClient.next = SeatAvailabilityOutcome.NotFound
+
+        webTestClient.get().uri("/api/orders/seat-availability?routeId=R9&travelDate=${LocalDate.now()}")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isNotFound
+    }
+
+    @Test
+    fun `an unreachable Catalog fails the seat map closed rather than hiding the filter`() {
+        // Not knowing whether the train has left is not a reason to say it has not. A seat sold on a
+        // departed run is a real ticket for a train that is gone.
+        catalogClient.failNextWith = java.util.concurrent.TimeoutException("catalog-read timed out")
+
+        webTestClient.get().uri("/api/orders/seat-availability?routeId=R1&travelDate=${LocalDate.now()}")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isEqualTo(503)
+            .expectBody()
+            .jsonPath("$.code").isEqualTo("SEAT_MAP_UNAVAILABLE")
+    }
+
+    @Test
     fun `the seat map requires authentication`() {
         // It is a step of the checkout, not public browsing: the picker sits behind ProtectedRoute.
         webTestClient.get().uri("/api/orders/seat-availability?routeId=R1&travelDate=$travelDate")
@@ -530,11 +634,6 @@ class OrderControllerOwnershipTest @Autowired constructor(
         // so a customer could be shown a seat map for a train that left last week and be told only
         // at checkout, which rejects the same date with this code.
         inventoryReadClient.next = SeatAvailabilityOutcome.Found(listOf(SeatAvailability("1A", true)))
-        // Cleared first: `@WebFluxTest` caches one context for the whole class, so this spy carries
-        // whatever an earlier test left on it. Without the reset the assertion below reads as "nobody
-        // ever called Inventory", which is a claim about test ordering rather than about this request.
-        inventoryReadClient.lastRouteId = null
-        inventoryReadClient.lastTravelDate = null
         val past = LocalDate.now().minusDays(1)
 
         webTestClient.get().uri("/api/orders/seat-availability?routeId=R1&travelDate=$past")
@@ -616,6 +715,30 @@ class OrderControllerOwnershipTest @Autowired constructor(
         }
     }
 
+    /**
+     * Only [getRoute] is reachable from this controller; [getOffer] belongs to the checkout
+     * orchestrator, which is a mock here.
+     */
+    open class FakeCatalogClient : CatalogClient {
+        /** Default: a route that leaves late enough that "today" has not departed during a test run. */
+        var next: RouteOutcome = RouteOutcome.Found(
+            RouteSchedule("R1", LocalTime.of(23, 59), ZoneId.of("Europe/Rome")),
+        )
+        var lastRouteId: String? = null
+
+        /** See the note on FakeInventoryReadClient.failNextWith: consumed so it cannot leak. */
+        var failNextWith: Throwable? = null
+
+        override suspend fun getOffer(offerId: String): OfferOutcome =
+            throw UnsupportedOperationException("the seat map never resolves an offer")
+
+        override suspend fun getRoute(routeId: String): RouteOutcome {
+            lastRouteId = routeId
+            failNextWith?.let { failNextWith = null; throw it }
+            return next
+        }
+    }
+
     @TestConfiguration
     class Cfg {
         @Bean
@@ -633,6 +756,9 @@ class OrderControllerOwnershipTest @Autowired constructor(
 
         @Bean
         fun inventoryReadClient(): FakeInventoryReadClient = FakeInventoryReadClient()
+
+        @Bean
+        fun catalogClient(): FakeCatalogClient = FakeCatalogClient()
     }
 }
 

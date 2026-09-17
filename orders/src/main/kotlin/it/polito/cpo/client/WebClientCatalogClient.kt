@@ -12,6 +12,8 @@ import org.springframework.stereotype.Component
 import org.springframework.web.reactive.function.client.ClientResponse
 import org.springframework.web.reactive.function.client.WebClient
 import java.time.Duration
+import java.time.LocalTime
+import java.time.ZoneId
 
 /**
  * The Catalog offer lookup, on its own `catalog-read` breaker and bulkhead and with no retry.
@@ -86,7 +88,47 @@ class WebClientCatalogClient(
             if (refusal.code == OFFER_NOT_FOUND) OfferOutcome.NotFound else throw refusal
         }
 
+    override suspend fun getRoute(routeId: String): RouteOutcome =
+        try {
+            val wire = webClient.get()
+                .uri("/api/catalog/routes/{routeId}", routeId)
+                .retrieve()
+                .onStatus({ it.is4xxClientError }, ClientResponse::asDefinitiveRefusal)
+                .bodyToMono(RouteWire::class.java)
+                .timeout(timeout)
+                .transformDeferred(BulkheadOperator.of(bulkhead))
+                .transformDeferred(CircuitBreakerOperator.of(circuitBreaker))
+                .awaitSingle()
+
+            RouteOutcome.Found(
+                RouteSchedule(
+                    routeId = wire.routeId,
+                    departureTime = wire.departureTime,
+                    departureZone = wire.departureZone,
+                ),
+            )
+        } catch (refusal: DefinitiveRefusal) {
+            // Same rule as getOffer: the one refusal this endpoint has is decoded, everything else
+            // 4xx stays an unknown outcome rather than becoming an answer about the route.
+            if (refusal.code == ROUTE_NOT_FOUND) RouteOutcome.NotFound else throw refusal
+        }
+
+    /**
+     * The three fields Orders reads off `GET /api/catalog/routes/{routeId}`.
+     *
+     * A local wire type because Catalog's `Route` is not a published contract — it lives in
+     * `catalog/`, and only `OfferDetail` was promoted to `money-path-contracts`. Promoting `Route`
+     * too would be a cross-slice contract change for three fields, so this maps what it needs and
+     * lets Jackson ignore the rest.
+     */
+    private data class RouteWire(
+        val routeId: String,
+        val departureTime: LocalTime,
+        val departureZone: ZoneId,
+    )
+
     private companion object {
         const val OFFER_NOT_FOUND = "OFFER_NOT_FOUND"
+        const val ROUTE_NOT_FOUND = "ROUTE_NOT_FOUND"
     }
 }

@@ -12,6 +12,8 @@ import it.polito.cpo.client.PaymentClient
 import it.polito.cpo.client.RefundReservationOutcome
 import it.polito.cpo.client.ResolvedOffer
 import it.polito.cpo.client.ReversalOutcome
+import it.polito.cpo.client.RouteOutcome
+import it.polito.cpo.client.RouteSchedule
 import it.polito.cpo.contracts.catalog.RefundPolicy
 import it.polito.cpo.contracts.events.OrderPlacedEvent
 import it.polito.cpo.contracts.payments.PaymentRequest
@@ -957,6 +959,13 @@ class CheckoutPipelineIntegrationTest {
             failWith?.let { throw it }
             return knownOffers[offerId]?.let { OfferOutcome.Found(it) } ?: OfferOutcome.NotFound
         }
+
+        // Derived from the seeded offers, so a route cannot disagree with its own offer about when it
+        // departs. Only the seat-map façade calls this; the checkout pipeline never does.
+        override suspend fun getRoute(routeId: String): RouteOutcome =
+            knownOffers.values.firstOrNull { it.routeId == routeId }
+                ?.let { RouteOutcome.Found(RouteSchedule(it.routeId, it.departureTime, it.departureZone)) }
+                ?: RouteOutcome.NotFound
     }
 
     class ControllablePaymentClient : PaymentClient {
