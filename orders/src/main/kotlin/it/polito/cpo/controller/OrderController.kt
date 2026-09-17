@@ -22,6 +22,7 @@ import org.springframework.web.bind.annotation.*
 import org.springframework.web.server.ResponseStatusException
 import java.time.LocalDate
 import java.util.UUID
+import kotlin.coroutines.cancellation.CancellationException
 
 @RestController
 @RequestMapping("/api/orders")
@@ -139,8 +140,37 @@ class OrderController(
         // No ownership check and no principal use: there is no owned resource here. Authentication
         // is still required — the security chain covers this path with the customer/operations rule
         // — because this is a step of the checkout, not public browsing.
-        val outcome = inventoryReadClient.getSeatAvailability(routeId, travelDate)
+        val outcome = try {
+            inventoryReadClient.getSeatAvailability(routeId, travelDate)
+        } catch (cancellation: CancellationException) {
+            // A disconnected client is not an Inventory failure; swallowing it into a 503 would
+            // report a dependency problem that never happened.
+            throw cancellation
+        } catch (failure: Exception) {
+            // The client classifies only definitive refusals and throws everything else -- a timeout,
+            // an open `inventory-read` breaker, a 5xx, a refused connection -- so that nobody can
+            // mistake "Inventory did not answer" for "no seats are free". That is correct and stays.
+            // What was missing is this mapping: with none, all of it reached GlobalErrorHandler's
+            // `Throwable` handler and came back as `500 INTERNAL_ERROR`. The likeliest trigger is not
+            // a cold start but a rollout: while the `inventory-read` breaker is open, every seat map
+            // request answered `500` for the ten seconds it stayed that way (#104).
+            //
+            // `503` and not `504`: ApiException's status set is frozen, and `503` is the member
+            // defined as "dependency unavailable or circuit open". No new counter is added, because
+            // `http_server_requests` already carries the status per URI and GlobalErrorHandler logs a
+            // 5xx ApiException together with its cause.
+            throw ApiException(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "SEAT_MAP_UNAVAILABLE",
+                "The seat map could not be loaded right now. Please try again.",
+                cause = failure,
+            )
+        }
 
+        // The `when` stays outside the try above on purpose. The `404` below is a definitive answer
+        // from Inventory, not a failure to reach it, and widening the try to cover it would collapse
+        // the two -- which is the realistic way to get this change wrong. Structure prevents it here,
+        // rather than care having to.
         val seats = when (outcome) {
             is SeatAvailabilityOutcome.Found -> outcome.seats
             // Inventory answers one 404 for two different cases (#96): an unknown route, and a

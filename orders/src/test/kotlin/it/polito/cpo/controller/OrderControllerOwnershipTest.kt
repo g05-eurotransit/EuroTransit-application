@@ -470,12 +470,50 @@ class OrderControllerOwnershipTest @Autowired constructor(
 
     @Test
     fun `an unknown route is a 404`() {
+        // Also the guard against collapsing the two mappings (#104): NotFound is a definitive answer
+        // from Inventory, not a failure to reach it, so it must not be swept into the 503 that the
+        // unknown outcomes below now produce.
         inventoryReadClient.next = SeatAvailabilityOutcome.NotFound
 
         webTestClient.get().uri("/api/orders/seat-availability?routeId=nope&travelDate=$travelDate")
             .headers { it.setBearerAuth("owner") }
             .exchange()
             .expectStatus().isNotFound
+    }
+
+    @Test
+    fun `an unknown outcome from Inventory is a 503, not a 500`() {
+        // #104. The client classifies only definitive refusals and throws everything else, so that
+        // "Inventory did not answer" can never be mistaken for "no seats are free". With no mapping
+        // in the controller all of it reached GlobalErrorHandler's Throwable handler and came back
+        // as 500 INTERNAL_ERROR -- an Orders bug, for what is a dependency being unavailable.
+        inventoryReadClient.failNextWith = java.util.concurrent.TimeoutException("inventory-read timed out")
+
+        webTestClient.get().uri("/api/orders/seat-availability?routeId=R1&travelDate=$travelDate")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isEqualTo(503)
+            .expectBody()
+            .jsonPath("$.code").isEqualTo("SEAT_MAP_UNAVAILABLE")
+    }
+
+    @Test
+    fun `an open inventory-read breaker is a 503, which is the rollout case`() {
+        // The likeliest trigger in the cluster is not a cold start: during an Inventory rollout the
+        // inventory-read breaker opens, and for the ten seconds it stays open every seat map request
+        // took the unmapped path. A separate case from the timeout above because it is a different
+        // exception type reaching the same catch, and the catch is what must cover both.
+        val breaker = io.github.resilience4j.circuitbreaker.CircuitBreaker.ofDefaults("inventory-read-test")
+        breaker.transitionToOpenState()
+        inventoryReadClient.failNextWith =
+            io.github.resilience4j.circuitbreaker.CallNotPermittedException.createCallNotPermittedException(breaker)
+
+        webTestClient.get().uri("/api/orders/seat-availability?routeId=R1&travelDate=$travelDate")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isEqualTo(503)
+            .expectBody()
+            .jsonPath("$.code").isEqualTo("SEAT_MAP_UNAVAILABLE")
     }
 
     @Test
@@ -563,9 +601,17 @@ class OrderControllerOwnershipTest @Autowired constructor(
         var lastRouteId: String? = null
         var lastTravelDate: LocalDate? = null
 
+        /**
+         * Makes the *next* call throw, standing in for the unknown outcomes the real client does not
+         * classify. Consumed when it fires, on purpose: `@WebFluxTest` caches one context for the
+         * whole class, so a sticky failure would leak into whichever test happens to run next.
+         */
+        var failNextWith: Throwable? = null
+
         override suspend fun getSeatAvailability(routeId: String, travelDate: LocalDate): SeatAvailabilityOutcome {
             lastRouteId = routeId
             lastTravelDate = travelDate
+            failNextWith?.let { failNextWith = null; throw it }
             return next
         }
     }
