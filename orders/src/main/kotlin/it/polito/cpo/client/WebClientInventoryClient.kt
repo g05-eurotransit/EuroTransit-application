@@ -7,6 +7,7 @@ import io.github.resilience4j.reactor.circuitbreaker.operator.CircuitBreakerOper
 import io.github.resilience4j.reactor.retry.RetryOperator
 import io.github.resilience4j.retry.RetryRegistry
 import it.polito.cpo.contracts.inventory.ReservationConfirmationRequest
+import it.polito.cpo.contracts.inventory.ReservationRefundRequest
 import it.polito.cpo.contracts.inventory.ReservationRequest
 import it.polito.cpo.contracts.inventory.ReservationResponse
 import it.polito.cpo.contracts.inventory.ReservationStatus
@@ -112,6 +113,40 @@ class WebClientInventoryClient(
             .transformDeferred(CircuitBreakerOperator.of(circuitBreaker))
             .transformDeferred(RetryOperator.of(retry))
             .awaitSingleOrNull()
+    }
+
+    override suspend fun refundReservation(reservationId: String, orderId: UUID): RefundReservationOutcome =
+        try {
+            val response = webClient.post()
+                // No Idempotency-Key: same reasoning as confirmation — this endpoint is idempotent by
+                // reservation state (an already-REFUNDED reservation replays without erroring), not by
+                // key.
+                .uri("/api/inventory/reservations/{reservationId}/refund", reservationId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(ReservationRefundRequest(orderId = orderId))
+                .retrieve()
+                .onStatus({ it.is4xxClientError }, ClientResponse::asDefinitiveRefusal)
+                .bodyToMono(ReservationResponse::class.java)
+                .timeout(timeout)
+                .transformDeferred(BulkheadOperator.of(bulkhead))
+                .transformDeferred(CircuitBreakerOperator.of(circuitBreaker))
+                .transformDeferred(RetryOperator.of(retry))
+                .awaitSingle()
+            refunded(reservationId, response)
+        } catch (refusal: DefinitiveRefusal) {
+            RefundReservationOutcome.Refused(refusal.asKnownCodeOrRethrow(), refusal.detail)
+        }
+
+    /**
+     * A 200 that does not say REFUNDED would mean Orders and Inventory disagree about what the
+     * refund command does. Not a business refusal, so it must not be recorded as a seat-return
+     * failure: treat it as an unknown outcome and let redelivery and the DLT surface it.
+     */
+    private fun refunded(reservationId: String, response: ReservationResponse): RefundReservationOutcome {
+        check(response.status == ReservationStatus.REFUNDED) {
+            "Inventory answered 200 for reservation $reservationId with status ${response.status}, expected REFUNDED"
+        }
+        return RefundReservationOutcome.Refunded(response.reservationId)
     }
 
     /**

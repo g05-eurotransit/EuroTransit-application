@@ -12,6 +12,7 @@ import it.polito.cpo.repository.OrderRepository
 import it.polito.cpo.security.SecurityConfig
 import it.polito.cpo.service.CheckoutOrchestrator
 import it.polito.cpo.service.OrderService
+import it.polito.cpo.service.RefundOrchestrator
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import org.junit.jupiter.api.Test
@@ -575,6 +576,9 @@ class OrderControllerOwnershipTest @Autowired constructor(
 
         @Bean
         fun checkoutOrchestrator(): CheckoutOrchestrator = mock(CheckoutOrchestrator::class.java)
+
+        @Bean
+        fun refundOrchestrator(): RefundOrchestrator = mock(RefundOrchestrator::class.java)
 
         @Bean
         fun inventoryReadClient(): FakeInventoryReadClient = FakeInventoryReadClient()

@@ -32,4 +32,14 @@ interface InventoryClient {
      * terminal reservation is an idempotent no-op and has no business refusal to report.
      */
     suspend fun releaseSeats(reservationId: String, idempotencyKey: String)
+
+    /**
+     * Returns a sold seat to the pool after a post-sale refund's payment reversal has already
+     * succeeded (ADR-015). On the same money-path resilience chain as the three calls above, unlike
+     * the read-only clients in [InventoryReadClient] — this is the money path, not a browsing read.
+     *
+     * No `Idempotency-Key`: the endpoint is idempotent by reservation state, not by key (see
+     * [RefundReservationOutcome.Refunded]).
+     */
+    suspend fun refundReservation(reservationId: String, orderId: UUID): RefundReservationOutcome
 }

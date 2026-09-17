@@ -53,6 +53,12 @@ class OrderService(
 
     suspend fun cancelIfUnpaid(id: UUID): Long = orderRepository.cancelIfUnpaid(id)
 
+    // Post-sale refund (ADR-015). See OrderRepository for the compare-and-set predicates.
+    suspend fun markRefunding(id: UUID): Long = orderRepository.markRefunding(id)
+
+    suspend fun markRefunded(id: UUID, providerReference: String?): Long =
+        orderRepository.markRefunded(id, providerReference)
+
     /**
      * One page of a customer's own order history, newest first.
      *

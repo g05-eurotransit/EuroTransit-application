@@ -16,6 +16,105 @@ Do not re-litigate these; they were settled deliberately.
 | Optimise for | A complete, demonstrable money path — refund included |
 | Post-sale refund | Start on the Orders side now; do not wait on the dependencies |
 | #72 explicit checkout hold | Left open for now; the analysis is posted as a comment, decision deferred |
+| Splitting the three stages across separate agents | Dropped: the token cost was out of proportion to what it returned. The discipline below is kept, the delegation is not |
+
+## How I work this slice
+
+**This is how the Orders slice owner works, not a rule for the team.** Other owners may reasonably
+work differently; nothing here is binding on anyone else.
+
+Three stages — plan, implement, review — deliberately not applied to every change, and all three done
+in the same session rather than handed to anyone.
+
+### Stage 0 — decide how much process the change warrants
+
+**Read enough code to judge the real scope first.** Do not size the work from how the request is
+worded.
+
+Use all three stages when the change spans several files or modules; crosses more than one boundary
+(service, process, database, client, API); can alter a shared contract, invariant or behaviour;
+introduces or changes concurrency, idempotency, persistence, caching, security or error handling; or
+carries a real risk of being correct line by line while wrong overall.
+
+Go straight to the code for a change localised to one or a few files; an obvious bugfix whose correct
+behaviour is already settled; mechanical bounded refactoring; an addition that plainly follows an
+existing pattern; or text, configuration and code with no architectural consequence.
+
+Judgement, not arithmetic — the point is to apply the process where it raises quality, not to apply
+it always. If the stages are skipped, verify with rigour proportionate to the change anyway. If they
+are not skipped, skip none of them and do not reorder them.
+
+### Stage 1 — the plan
+
+**Read the code before planning. Never plan on assumptions.** The plan is a versioned file in the
+repo and contains, in this order:
+
+1. What is being built and why, citing decisions already taken (ADR, issue, discussion) rather than
+   restating them.
+2. **"Verified before writing"** — facts read in the code, with file references, so they are not
+   re-derived later and so a wrong fact is met as a contradiction rather than absorbed as a surprise.
+   **Always include the caller-side contract: what the client actually sends, not what it ought to
+   send.**
+3. **"Settled / open / stop-and-ask"** — settled means implement and do not reopen; open means decide
+   during the work and write down what was decided; stop-and-ask means do not decide alone (another
+   owner's slice, a public contract, the meaning of something shared).
+4. The content itself, in subsections.
+5. **"Done when"** — verifiable criteria, not intentions.
+6. **A standing check that does not depend on the plan being right.** For example: before closing,
+   list every value the change causes to cross a boundary and verify what the receiver does with it.
+
+**Ask the open questions before writing code**, explained with concrete examples, so they can be
+answered without knowing the code.
+
+### Stage 2 — implementation
+
+Read the plan's "verified before writing" and "settled" sections before touching code, not after.
+Match the surrounding code and tests by reading neighbouring files rather than inventing a style.
+
+The operating rules: work on a branch, commit locally, **no push, no PRs, no issue comments** without
+being asked, keep the build green, and know the starting test count so the finishing one can be
+explained.
+
+**Stop when a fact in the plan turns out to be wrong.** Say so and re-decide; do not work around it
+silently — a plan quietly routed around is worse than no plan, because the next reader still believes
+it. Write down every decision made among the "open" ones, and above all **everything that had to be
+decided which the plan did not mention**: that list is where the next plan's gaps are.
+
+### Stage 3 — review
+
+**A separate pass over the whole diff, after the build is green** — not more writing, and not a
+re-reading of each change as it was made. The build being green is the starting point, so spend no
+time on compilation or on tests that pass; spend it on what a green build does not prove.
+
+The **settled** decisions are not reopened here, but the code is allowed to have implemented one
+badly, and saying so is in scope.
+
+Hunt where a plan cannot foresee: values crossing a boundary, shared predicates with several readers,
+invariants living in the database, idempotency and redelivery, concurrency, tests that pass while
+proving nothing. Verify claims instead of trusting them, code comments included. Rank by real
+reachability and cost, not by quantity. Say what was checked and found **correct**, otherwise coverage
+is unknown.
+
+**The honest limit of this stage:** the reader is the same person who wrote the plan and is invested
+in it. Separating the pass in time, and starting from the diff rather than from the intention, is what
+makes it work at all. Treat anything the plan predicted as *less* trustworthy for that reason, not
+more.
+
+### If corrections are needed
+
+Corrections deserve the same review as the code they correct, aimed at two questions: whether each
+correction is complete, and whether the same species of mistake survives somewhere else.
+
+### Why this shape, from what actually happened here
+
+- A review pass found two high-severity defects that the plan and the implementation had both missed
+  — and both areas had been *seen* during implementation and reasoned past. Reading the finished diff
+  cold is what catches that; reading it as you write it does not.
+- One of three corrections was incomplete, and the missed call site was named in the plan itself.
+  Hence reviewing corrections too.
+- The standing check caught a real bug during implementation that no plan had anticipated. It is the
+  part of this that does not depend on the plan being right, which is why it is worth keeping even
+  when everything else is skipped.
 
 ## Findings that change the picture
 
@@ -780,6 +879,168 @@ by compartment. If Catalog ever introduces a fixed-price or per-compartment offe
 becomes wrong silently: the amount would simply be a multiple of what it should be. Deliberately not
 filed as an issue — there is nothing to do until Catalog wants it — but it is the question to ask
 giacomodipalma before any such offer is seeded.
+
+## Step 4 — outcome
+
+Branch `feature/orders-refund`. Full build green at **368 tests, 0 failures** (+34 over step 3's 334;
+see "Corrected after an adversarial review" below for the last 5 and three fixes to the first 363).
+
+**The refund runs end to end, exactly in ADR-015's order.** `POST /api/orders/{orderId}/refund`
+validates a `CONFIRMED`, offered, refundable, in-cutoff order and — in one transaction — commits
+`REFUNDING` plus a `refund-requested` outbox row, then returns `202 Accepted` with the order still
+`REFUNDING` (not `200`, unlike `cancel`: the reversal is asynchronous, so the response cannot claim
+more than acceptance). `RefundRequestedEventListener` / `RefundOrchestrator.processRefundRequested`
+— modelled line-for-line on `OrderPlacedEventListener` / `CheckoutOrchestrator.processOrderPlaced` —
+reverses the payment first (`pay-refund-{orderId}`, never `refund-{orderId}`), then returns the seat
+(`InventoryClient.refundReservation`, on the money-path resilience chain), then commits `REFUNDED`.
+Neither remote call needs "which step already ran" bookkeeping: `pay-refund-{orderId}` is a
+deterministic idempotency key at Payments and Inventory's refund is idempotent by reservation state,
+so a redelivery at any point simply repeats both safely.
+
+**`V15`** added the refund's own bookkeeping (`refund_requested_at`, `refunded_at`,
+`refund_provider_reference`, all nullable). **`V16`**, not anticipated when this step was written,
+widened `reconciliation_records`'s `ck_reconciliation_kind` `CHECK` constraint to admit
+`SEAT_RETURN_FAILURE` — see the standing-check finding below.
+
+**Refusals, each its own `409`:** `ORDER_NOT_CONFIRMED`, `ORDER_HAS_NO_OFFER`,
+`OFFER_NOT_REFUNDABLE`, `REFUND_CUTOFF_PASSED`. Not-found/not-owned is `404 ORDER_NOT_FOUND`, same
+rule as `cancel`. The cutoff is enforced in the same atomic `UPDATE` that commits `REFUNDING`
+(`CURRENT_TIMESTAMP`, never the JVM clock), and idempotency is checked *before* that update — which
+is what makes the replay rule fall out of the ordering rather than needing a special case: a key
+accepted before the cutoff replays its stored `202` even after the cutoff passes, while a genuinely
+new request in the same state after the cutoff is refused.
+
+### Every decision the plan left open, and what was chosen
+
+- **Response shape:** `OrderView`, as guessed, but `202 Accepted` rather than `200` — the order is
+  `REFUNDING`, not settled, when the response is written.
+- **`GET /api/orders/{orderId}` during `REFUNDING`:** no new fields. The existing `status` field
+  already shows `REFUNDING`/`REFUNDED`; `refund_requested_at`/`refunded_at` stay internal
+  (reconciliation-facing, not customer-facing) to keep the response shape from growing without a
+  concrete SPA need.
+- **Notification on completion:** **not emitted**, deliberately. `feature/issue-70-readable-notifications`
+  (no PR, diverged from before step 3) rewrites `NotificationRequestedPayload` and both of
+  `CheckoutOrchestrator`'s emission points; adding a third variant now, on top of a payload shape
+  that branch is actively changing, is exactly the collision the verified-facts note warned about.
+  A refunded order is fully visible on `GET /api/orders/{orderId}`; only the customer email is
+  deferred, and it is a small, easy follow-up once that branch's shape lands.
+- **Refusal code names:** `ORDER_NOT_CONFIRMED`, `ORDER_HAS_NO_OFFER`, `OFFER_NOT_REFUNDABLE`,
+  `REFUND_CUTOFF_PASSED` — all `409`, matching the existing convention (`ORDER_NOT_CANCELLABLE`,
+  `ORDER_ALREADY_TERMINAL`, `RECONCILIATION_ALREADY_RESOLVED`, ...): this codebase uses `409` for
+  every "valid resource, wrong current state" refusal and never `422`, so `409` for all four keeps
+  that convention rather than introducing the first `422`.
+
+### Decisions the plan did not mention at all
+
+- **`OrderStatus.isTerminal` now answers `true` for `REFUNDING` and `REFUNDED` too** (both new
+  states), so the checkout consumer and the checkout dead-letter listener keep treating a
+  refunding-or-refunded order as settled from the checkout pipeline's point of view. The refund's own
+  consumer never reads this predicate; it compares `order.status` against `REFUNDING` directly. **A
+  first version of this also let `ReconciliationOperationsService.redrive` reuse `isTerminal`
+  directly for `REFUNDING`, which was wrong and is corrected below** — redrive now resolves
+  `REFUNDING` to its own case before the generic terminal branch, re-emitting `refund-requested`
+  rather than treating the order as settled.
+- **A failed *payment* reversal during the refund reuses `PAYMENT_REVERSAL_FAILURE`**, the same
+  reconciliation kind checkout compensation opens, rather than a new kind. Nothing about that kind
+  is specific to `COMPENSATING` — the record carries its own `orderState` — so `SEAT_RETURN_FAILURE`
+  is the only genuinely new kind this step needed.
+- **`closeAutoResolvable` now also closes `SEAT_RETURN_FAILURE`**, on the same reasoning that already
+  covers `PAYMENT_REVERSAL_FAILURE`: `REFUNDED` is only ever committed after the seat return
+  succeeds, so reaching it means any earlier seat-return incident has since resolved.
+- **`ReversalOutcome.Reversed` was widened to carry `providerReference`** (was a bare `data object`).
+  Payments already returns `refundReference` on the wire; this step is the first caller that needs
+  to persist it (`V15`), so the client-side type was widened to stop discarding it. Checkout
+  compensation ignores the new field — nothing on `Order` records a compensation's reference, only a
+  commercial refund's.
+- **A new `InventoryRefusalCode.RESERVATION_NOT_CONFIRMED`** was added — purely an Orders-side
+  addition to a client-owned enum, mapping a refusal `ReservationService.refundReservation` (ADR-014)
+  already returns and that Orders simply had no client-side representation for yet.
+- **The idempotency fingerprint for `refund` is just `orderId`** (plus the operation name), since the
+  endpoint takes no body — mirroring `ReconciliationOperationsService`'s redrive/resolve fingerprints
+  rather than checkout's payload-shaped one.
+- **A dedicated `refund-requested-dlt` consumer was added after an adversarial review** (see below);
+  it was not part of the original step-4 pass, whose text asked only for "a new listener modelled on
+  `OrderPlacedEventListener`" (singular) and read that as covering the happy-path consumer only.
+
+### The standing boundary check
+
+Every value this change sends across a service boundary, and what the receiving side does with it:
+
+- **Orders → Payments:** `orderId` + `pay-refund-{orderId}` to the existing `/api/payments/refund`.
+  Same shapes checkout compensation already sends; verified safe by the plan's own findings (no
+  uniqueness constraint on the authorization, idempotency keyed by the key itself).
+- **Payments → Orders:** `refundReference` (a Stripe sandbox id, well under 255 characters) is now
+  persisted into `refund_provider_reference VARCHAR(255)`. Checked the generator
+  (`StripeSandboxProvider`) — an opaque provider id, not user input, comfortably inside the column.
+- **Orders → Inventory:** `reservationId` (path) + `orderId` (body) to
+  `/api/inventory/reservations/{reservationId}/refund`. Both already-stored, immutable values; the
+  four refusal codes the real `ReservationService.refundReservation` can return were all read from
+  its source and mapped (`RESERVATION_NOT_FOUND`, `RESERVATION_ORDER_CONFLICT`,
+  `RESERVATION_NOT_CONFIRMED`, `RESERVATION_SEAT_CONFLICT`); an unrecognised code would rethrow as
+  unknown rather than being silently swallowed.
+- **A value crossing into a database CHECK constraint, not a service boundary in the network sense,
+  but the same class of mistake the standing check exists to catch: `ReconciliationKind.SEAT_RETURN_FAILURE.name`
+  written into `reconciliation_records.kind`.** `V8`'s constraint enumerates the three kinds known
+  when it was written; inserting a fourth failed it. Caught by the new integration test
+  (`RefundPipelineIntegrationTest`, the seat-return-failure case), not by inspection — the same way
+  step 3's poison-message path was found only once something tried to exercise it. Fixed by `V16`.
+  **This is the one genuine finding of this step's standing check**, in the same spirit as step 3's:
+  discovered by running the code against real Postgres, not by reading it.
+- **Orders → itself, via Kafka:** `RefundRequestedEvent` on `refund-requested`. Cross-repository, and
+  handled the same way step 3 handled the Catalog URL — except, per the step's own warning, this one
+  *has* an ordering constraint: the topic must exist before this ships, or the outbox row is written
+  and never delivered. `refund-requested` and `refund-requested-dlt` were added to
+  `EuroTransit-configuration`'s `platform/strimzi/kafka-topics.yaml` (local commit
+  `9eb72e8` on branch `feature/orders-refund-kafka-topics`, not pushed) sized like `order-placed` /
+  `order-placed-dlt`. No Debezium connector change needed: `orders-outbox-connect.yaml` already
+  routes by the `type` column for any value, which is exactly the property that made adding
+  `notification-requested` free before it.
+
+### Corrected after an adversarial review
+
+The first pass above (363 tests) shipped two bugs that a subsequent review caught, both from the same
+root cause: reasoning about `REFUNDING` from inside the refund path instead of asking what an operator
+or a monitoring system would actually see. Both are the kind of thing that looks fine in every test
+that does not specifically go looking for them, which is exactly why they survived the standing check
+above — that check asked "what does the receiver do with this value," not "who else, besides the
+refund path itself, reads `OrderStatus.isTerminal` and what does *false-looks-like-true* mean to them."
+
+- **`redrive` was silently destroying the incident it was meant to retry.** `isTerminal` answers
+  `true` for `REFUNDING`, so `redrive`'s terminal branch ran for a stuck refund, calling
+  `closeStaleFor` — which now also closes `SEAT_RETURN_FAILURE` — before refusing with
+  `409 ORDER_ALREADY_TERMINAL`. An operator redriving a stuck refund would have cleared the only
+  record that said one was needed: gauge to zero, alert clears, seat stays `SOLD` forever, order
+  stays `REFUNDING` forever. `OrderPlacedDeadLetterListener` had the identical shape of bug on a
+  narrower path (an `order-placed` delivery exhausted while the order happens to be `REFUNDING`).
+  Fixed: `REFUNDING` is resolved to its own case in both places, before the generic terminal branch,
+  and nothing is closed for it. `redrive` now re-emits `refund-requested` for a `REFUNDING` order,
+  making it the operator's actual retry path for a stuck refund — closing the "not done" item the
+  first pass listed here.
+- **A stuck refund could vanish with no reconciliation record at all.** Every unknown outcome in the
+  reversal throws so redelivery can converge, but the shared error handler gives up after ~3 seconds,
+  and nothing consumed `refund-requested-dlt`. A routine Inventory pod roll (20-30s to become ready)
+  was enough to strand an order in `REFUNDING` with no incident, no alert, and no redrive path
+  (redrive requires one to exist). Fixed: `RefundRequestedDeadLetterListener`, modelled on
+  `OrderPlacedDeadLetterListener`, opens `DELIVERY_EXHAUSTED` — closing the other "not done" item.
+- **`REFUNDING` was missing from the pipeline gauges**, and was added — but not simply by appending it
+  to the existing query. `created_at` is purchase time, not refund-request time; using it for
+  `REFUNDING`'s age would report a months-old ticket refunded seconds ago as months stuck, firing
+  every threshold on a healthy refund and teaching whoever's on call to mute the alert. Its age comes
+  from `refund_requested_at` (`V15`) against `CURRENT_TIMESTAMP` instead.
+- Two lower-severity findings from the same review, fixed alongside: the cutoff-replay test was
+  rewritten because it never actually exercised the cutoff (see the test commit for why), and a
+  `CheckoutPipelineIntegrationTest` double carried two fields nothing asserted on, trimmed and
+  replaced with a real assertion that checkout compensation never uses the commercial refund's key.
+
+Full build after these fixes: **368 tests, 0 failures**.
+
+### Not done here, deliberately
+
+- **No refund notification email**, and why, above (unchanged by the review).
+- **Step 5 itself was not written.** Writing it properly is its own investigation, the same size of
+  effort step 4's own writing took; it is left as "to be written" for the next session, as the plan's
+  own convention asks.
+
 
 ---
 

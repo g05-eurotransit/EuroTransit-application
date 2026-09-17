@@ -22,8 +22,16 @@ sealed interface AuthorizationOutcome {
  */
 sealed interface ReversalOutcome {
 
-    /** Definitively reversed. Only now may the order become FAILED (doc:150-152). */
-    data object Reversed : ReversalOutcome
+    /**
+     * Definitively reversed. Only now may checkout compensation become FAILED (doc:150-152) or a
+     * post-sale refund (ADR-015) return the seat.
+     *
+     * [providerReference] is `PaymentRefundResponse.refundReference`, carried through so the
+     * post-sale refund can persist it (V15's `refund_provider_reference`) for audit. Checkout
+     * compensation ignores it — nothing on `Order` records a compensation's provider reference,
+     * only a commercial refund's.
+     */
+    data class Reversed(val providerReference: String?) : ReversalOutcome
 
     /**
      * Definitive reversal failure. Deliberately a value and not an exception: rethrowing would burn

@@ -23,6 +23,7 @@ import reactor.core.publisher.Mono
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.OffsetDateTime
 import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -133,6 +134,52 @@ class PipelineStateGaugeJobIntegrationTest {
     }
 
     @Test
+    fun `REFUNDING's age comes from when the refund was requested, not from the purchase`() = runBlocking {
+        // A ticket bought months ago and refunded moments ago must read as a refund seconds old, not
+        // months old -- created_at is purchase time, and using it here would fire every age threshold
+        // on a perfectly healthy, brand-new refund the instant it is accepted.
+        seed(
+            OrderStatus.REFUNDING,
+            createdAt = LocalDateTime.now().minusDays(90),
+            refundRequestedAt = OffsetDateTime.now().minusSeconds(5),
+        )
+
+        job.publish()
+
+        // The lower bound is the half that matters. `age >= 0` would also be satisfied by 0, which is
+        // exactly what the query returns when the age expression degrades to NULL -- see the next test
+        // -- so an assertion that admits zero cannot fail the way this query actually breaks.
+        val age = oldestAge(OrderStatus.REFUNDING)
+        assertTrue(age > 1 && age < 60, "expected a few seconds, got $age")
+    }
+
+    @Test
+    fun `a REFUNDING order with no refund_requested_at is counted but reports age zero`() = runBlocking {
+        // Recording a known masking rather than asserting a desired behaviour. `CURRENT_TIMESTAMP -
+        // NULL` is NULL, EXTRACT of NULL is NULL, MAX skips NULLs, and COALESCE(..., 0) turns the empty
+        // result into 0 -- so such a row is counted as in-flight while its age stays zero forever and
+        // no age threshold can ever fire on it. Unreachable today: `markRefunding` sets the column in
+        // the same UPDATE that writes REFUNDING, so only a future write path that forgets it, or a
+        // backfill, could produce this row. The test exists so that path fails here rather than in a
+        // cluster, with a stuck refund that no alert can see.
+        seed(OrderStatus.REFUNDING, refundRequestedAt = null)
+
+        job.publish()
+
+        assertEquals(1.0, inflight(OrderStatus.REFUNDING))
+        assertEquals(0.0, oldestAge(OrderStatus.REFUNDING), "a null refund_requested_at masks the age")
+    }
+
+    @Test
+    fun `REFUNDING is counted among the non-terminal phases`() = runBlocking {
+        seed(OrderStatus.REFUNDING, refundRequestedAt = OffsetDateTime.now())
+
+        job.publish()
+
+        assertEquals(1.0, inflight(OrderStatus.REFUNDING))
+    }
+
+    @Test
     fun `a phase that empties falls back to zero instead of keeping its last value`() = runBlocking {
         val id = seed(OrderStatus.CONFIRMING_INVENTORY)
         job.publish()
@@ -162,6 +209,7 @@ class PipelineStateGaugeJobIntegrationTest {
     private suspend fun seed(
         status: OrderStatus,
         createdAt: LocalDateTime = LocalDateTime.now(),
+        refundRequestedAt: OffsetDateTime? = null,
     ): UUID {
         val id = UUID.randomUUID()
         orders.save(
@@ -176,6 +224,7 @@ class PipelineStateGaugeJobIntegrationTest {
                 currency = "EUR",
                 createdAt = createdAt,
                 recipientEmail = "user-gauge@example.com",
+                refundRequestedAt = refundRequestedAt,
             ).apply { setAsNew(true) },
         )
         return id
@@ -185,5 +234,6 @@ class PipelineStateGaugeJobIntegrationTest {
         OrderStatus.PAYMENT_PENDING,
         OrderStatus.CONFIRMING_INVENTORY,
         OrderStatus.COMPENSATING,
+        OrderStatus.REFUNDING,
     )
 }

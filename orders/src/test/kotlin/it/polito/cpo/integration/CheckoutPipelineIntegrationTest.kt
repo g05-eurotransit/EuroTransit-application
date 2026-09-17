@@ -9,6 +9,7 @@ import it.polito.cpo.client.InventoryClient
 import it.polito.cpo.client.InventoryRefusalCode
 import it.polito.cpo.client.OfferOutcome
 import it.polito.cpo.client.PaymentClient
+import it.polito.cpo.client.RefundReservationOutcome
 import it.polito.cpo.client.ResolvedOffer
 import it.polito.cpo.client.ReversalOutcome
 import it.polito.cpo.contracts.catalog.RefundPolicy
@@ -358,6 +359,11 @@ class CheckoutPipelineIntegrationTest {
         val order = awaitTerminal(response.orderId)
         assertEquals(OrderStatus.FAILED, order.status)
         assertTrue(payment.refundedOrderIds.contains(response.orderId))
+        // Checkout compensation must use its own idempotency namespace, never the post-sale refund's
+        // pay-refund-{orderId} (ADR-015): the two must not alias, or Payments could replay one
+        // reversal's stored result for the other.
+        assertTrue(payment.refundIdempotencyKeys.contains("refund-${response.orderId}"))
+        assertFalse(payment.refundIdempotencyKeys.contains("pay-refund-${response.orderId}"))
         assertTrue(inventory.releasedReservationIds.contains("res-${response.orderId}"))
         // An ordinary race against the deadline opens no incident.
         assertTrue(openRecords(response.orderId).isEmpty())
@@ -585,6 +591,60 @@ class CheckoutPipelineIntegrationTest {
     }
 
     @Test
+    fun `a redrive is refused when the hold behind a PAYMENT_PENDING order has already expired`() = runBlocking {
+        // Inventory's sweeper expires the reservation and releases the seats; Orders is never told, so
+        // the order sits in PAYMENT_PENDING pointing at a hold that no longer exists. PAYMENT_PENDING
+        // resumes by authorizing, so redriving it would buy a charge and its reversal and nothing else.
+        val response = orchestrator.checkout(request(), "it-redrive-exp-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        val orderId = response.orderId
+        seedState(orderId, OrderStatus.PAYMENT_PENDING, "res-$orderId")
+        seedHoldExpiry(orderId, OffsetDateTime.now().minusHours(2))
+        openIncident(orderId, ReconciliationKind.DELIVERY_EXHAUSTED)
+
+        val ex = assertFailsWith<ApiException> { operations.redrive(orderId, "redrive-exp-$orderId", "ops-1") }
+
+        assertEquals("RESERVATION_HOLD_EXPIRED", ex.code)
+        // Nothing was triggered, and -- unlike the terminal refusal -- the incident is NOT closed: the
+        // order still needs an operator, and closing it here would hide the only record saying so.
+        assertEquals(1, outboxRows(orderId, "order-placed").size)
+        assertEquals(1, openRecords(orderId).size)
+        assertEquals(0, payment.authorizedOrderIds.count { it == orderId })
+    }
+
+    @Test
+    fun `a redrive of a PAYMENT_PENDING order whose hold is still live is accepted`() = runBlocking {
+        // The negative half: the refusal is about an expired hold, not about PAYMENT_PENDING itself.
+        val response = orchestrator.checkout(request(), "it-redrive-live-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        val orderId = response.orderId
+        seedState(orderId, OrderStatus.PAYMENT_PENDING, "res-$orderId")
+        seedHoldExpiry(orderId, OffsetDateTime.now().plusMinutes(5))
+        openIncident(orderId, ReconciliationKind.DELIVERY_EXHAUSTED)
+
+        val accepted = operations.redrive(orderId, "redrive-live-$orderId", "ops-1")
+
+        assertEquals(OrderStatus.PAYMENT_PENDING, accepted.orderStatus)
+        assertEquals(2, outboxRows(orderId, "order-placed").size)
+    }
+
+    @Test
+    fun `an expired hold does not block a redrive from the phases that do not authorize`() = runBlocking {
+        // The realistic way to get this wrong is to refuse every non-terminal phase. CONFIRMING_INVENTORY
+        // has already taken the money, and redriving it is how the order reaches a resolution at all --
+        // Inventory refuses the confirmation with RESERVATION_EXPIRED and the pipeline compensates.
+        // Refusing here would strand the order instead of protecting it.
+        val response = orchestrator.checkout(request(), "it-redrive-exp2-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        val orderId = response.orderId
+        seedState(orderId, OrderStatus.CONFIRMING_INVENTORY, "res-$orderId")
+        seedHoldExpiry(orderId, OffsetDateTime.now().minusHours(2))
+        openIncident(orderId, ReconciliationKind.DELIVERY_EXHAUSTED)
+
+        val accepted = operations.redrive(orderId, "redrive-exp2-$orderId", "ops-1")
+
+        assertEquals(OrderStatus.CONFIRMING_INVENTORY, accepted.orderStatus)
+        assertEquals(2, outboxRows(orderId, "order-placed").size)
+    }
+
+    @Test
     fun `a redrive without an open incident is refused`() = runBlocking {
         val response = orchestrator.checkout(request(), "it-redrive4-${UUID.randomUUID()}", "user-1", "user-1@example.com")
         seedState(response.orderId, OrderStatus.CONFIRMING_INVENTORY, "res-${response.orderId}")
@@ -768,6 +828,14 @@ class CheckoutPipelineIntegrationTest {
             .awaitSingleOrNull()
     }
 
+    private suspend fun seedHoldExpiry(orderId: UUID, expiresAt: OffsetDateTime) {
+        databaseClient.sql("UPDATE orders SET reservation_expires_at = :e WHERE id = :id")
+            .bind("e", expiresAt)
+            .bind("id", orderId)
+            .then()
+            .awaitSingleOrNull()
+    }
+
     private suspend fun outboxRows(orderId: UUID, type: String) =
         outboxRepository.findAll().toList().filter { it.aggregateId == orderId.toString() && it.type == type }
 
@@ -863,6 +931,13 @@ class CheckoutPipelineIntegrationTest {
         override suspend fun releaseSeats(reservationId: String, idempotencyKey: String) {
             releasedReservationIds.add(reservationId)
         }
+
+        // The checkout pipeline never calls this: compensation only ever releases a HELD hold
+        // (releaseSeats above). The post-sale refund's own use of it is exercised by
+        // RefundPipelineIntegrationTest's own doubles, not this file's. Implemented only to satisfy
+        // InventoryClient, and kept trivial on purpose so an unused knob does not accumulate here.
+        override suspend fun refundReservation(reservationId: String, orderId: UUID): RefundReservationOutcome =
+            RefundReservationOutcome.Refunded(reservationId)
     }
 
     /**
@@ -889,6 +964,9 @@ class CheckoutPipelineIntegrationTest {
         /** The full requests, so what actually reaches Payments — amount and currency — is assertable. */
         val authorizeRequests = CopyOnWriteArrayList<PaymentRequest>()
         val refundedOrderIds = CopyOnWriteArrayList<UUID>()
+        /** The idempotency keys `refund` was called with, so a test can tell compensation from a
+         * commercial refund apart (`refund-{orderId}` vs `pay-refund-{orderId}`). */
+        val refundIdempotencyKeys = CopyOnWriteArrayList<String>()
 
         /** orderId -> answer the reversal with a definitive failure instead of success. */
         val failReversalFor = ConcurrentHashMap.newKeySet<UUID>()
@@ -908,10 +986,11 @@ class CheckoutPipelineIntegrationTest {
 
         override suspend fun refund(orderId: UUID, idempotencyKey: String): ReversalOutcome {
             refundedOrderIds.add(orderId)
+            refundIdempotencyKeys.add(idempotencyKey)
             return if (orderId in failReversalFor) {
                 ReversalOutcome.Failed("FAILED", "forced by test")
             } else {
-                ReversalOutcome.Reversed
+                ReversalOutcome.Reversed(providerReference = "test-refund-ref")
             }
         }
     }

@@ -36,5 +36,8 @@ class MockInventoryClient : InventoryClient {
         // Mock release - no operational work needed
     }
 
+    override suspend fun refundReservation(reservationId: String, orderId: UUID): RefundReservationOutcome =
+        RefundReservationOutcome.Refunded(reservationId)
+
     private fun reservationIdFor(orderId: UUID) = "mock-res-$orderId"
 }

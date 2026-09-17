@@ -450,8 +450,13 @@ class CheckoutOrchestrator(
         OrderStatus.PAYMENT_PENDING -> stageAuthorize(ctx)
         OrderStatus.CONFIRMING_INVENTORY -> stageConfirmInventory(ctx)
         OrderStatus.COMPENSATING -> stageCompensate(ctx)
-        OrderStatus.CONFIRMED, OrderStatus.FAILED, OrderStatus.CANCELLED ->
-            error("unreachable: terminal states are filtered by the loop")
+        // REFUNDING/REFUNDED are ADR-015's own process, never entered by this pipeline's own
+        // transitions (only the refund endpoint moves CONFIRMED -> REFUNDING), and both answer
+        // `true` from OrderStatus.isTerminal, so the loop above never dispatches here with them
+        // either. Listed only because `when` over an enum must be exhaustive; this arm can never run.
+        OrderStatus.CONFIRMED, OrderStatus.FAILED, OrderStatus.CANCELLED,
+        OrderStatus.REFUNDING, OrderStatus.REFUNDED,
+        -> error("unreachable: terminal states are filtered by the loop")
     }
 
     // --- stages -----------------------------------------------------------------------------------
@@ -697,7 +702,7 @@ class CheckoutOrchestrator(
                 // dead-lettering it every time only adds noise to the same alert.
                 return Step.Park(OrderStatus.COMPENSATING, "definitive reversal failure ${reversal.code}")
             }
-            ReversalOutcome.Reversed ->
+            is ReversalOutcome.Reversed ->
                 meterRegistry.counter("orders.refund", "result", "refunded", "code", "none").increment()
         }
 

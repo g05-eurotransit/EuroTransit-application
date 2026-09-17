@@ -2,9 +2,11 @@ package it.polito.cpo.service
 
 import io.micrometer.core.instrument.MeterRegistry
 import it.polito.cpo.contracts.events.OrderPlacedEvent
+import it.polito.cpo.contracts.events.RefundRequestedEvent
 import it.polito.cpo.controller.dtos.RedriveResponse
 import it.polito.cpo.controller.dtos.ResolveReconciliationRequest
 import it.polito.cpo.controller.dtos.ResolveReconciliationResponse
+import it.polito.cpo.model.OrderStatus
 import it.polito.cpo.model.ReconciliationKind
 import it.polito.cpo.model.ReconciliationStatus
 import it.polito.cpo.observability.ApiException
@@ -21,15 +23,17 @@ import org.springframework.transaction.reactive.TransactionalOperator
 import org.springframework.transaction.reactive.executeAndAwait
 import tools.jackson.databind.ObjectMapper
 import java.security.MessageDigest
+import java.time.Instant
 import java.util.UUID
 
 /**
  * The two operator commands over reconciliation incidents.
  *
- * Neither touches business state. A redrive only re-triggers the durable pipeline by writing a fresh
- * `order-placed` outbox row; the stored `orders.status` is what selects the resume action, so this
- * service contains no knowledge of *which* stage to resume — that stays in the orchestrator's state
- * table. A resolution only closes an investigated incident.
+ * Neither touches business state. A redrive only re-triggers a durable pipeline by writing a fresh
+ * outbox row — `order-placed` for the checkout pipeline, `refund-requested` for ADR-015's refund,
+ * chosen by which durable process the order is currently in; the stored `orders.status` is what
+ * selects the resume action within that process, so this service contains no knowledge of *which*
+ * stage resumes. A resolution only closes an investigated incident.
  *
  * "Cannot waive a pending payment reversal or change business state" is structural: this service holds
  * no `PaymentClient` and no `InventoryClient`, and the resolution SQL is filtered to an open
@@ -48,11 +52,11 @@ class ReconciliationOperationsService(
     private val logger = LoggerFactory.getLogger(ReconciliationOperationsService::class.java)
 
     /**
-     * Re-triggers the checkout pipeline for an order with an open incident.
+     * Re-triggers the durable pipeline the order is currently in, for an order with an open incident.
      *
      * Returns `202`: the work happens asynchronously in the consumer, exactly as it does for a fresh
-     * checkout. Repeating the same idempotency key replays the stored response and writes no second
-     * outbox row.
+     * checkout or a fresh refund request. Repeating the same idempotency key replays the stored
+     * response and writes no second outbox row.
      */
     suspend fun redrive(orderId: UUID, idempotencyKey: String, operatorId: String): RedriveResponse {
         val correlationId = correlationId()
@@ -65,11 +69,25 @@ class ReconciliationOperationsService(
             return it
         }
 
-        if (order.status.isTerminal) {
+        // REFUNDING answers `true` from OrderStatus.isTerminal, but only from the CHECKOUT consumer's
+        // point of view (see the KDoc on that state) — ADR-015's own refund has not converged. Taking
+        // the generic terminal branch below for a REFUNDING order would call closeStaleFor, which now
+        // also closes SEAT_RETURN_FAILURE and PAYMENT_REVERSAL_FAILURE — silently destroying the very
+        // incident this endpoint exists to retry, with the gauge dropping to zero and the seat left
+        // SOLD forever. REFUNDING is therefore resolved to its own outbox event before the generic
+        // terminal check ever runs, and nothing is closed: the redrive re-emits `refund-requested` and
+        // lets RefundOrchestrator's own consumer resume from the durable REFUNDING row, exactly as the
+        // checkout branch below resumes from whatever phase marker the order is holding.
+        val (outboxType, event) = if (order.status == OrderStatus.REFUNDING) {
+            "refund-requested" to RefundRequestedEvent(
+                correlationId = correlationId, orderId = orderId, principalId = order.userId,
+            )
+        } else if (order.status.isTerminal) {
             // The incident is stale: the order converged after it was opened. Close it, then refuse.
             // The close runs in its own committed transaction and the refusal is raised afterwards —
             // throwing from inside the transaction would roll the close back and leave the record
-            // open forever.
+            // open forever. Correctly reachable now only for a genuinely terminal state (CONFIRMED,
+            // FAILED, CANCELLED, REFUNDED) since REFUNDING was resolved above.
             val closed = reconciliationService.closeStaleFor(orderId)
             meterRegistry.counter("orders.reconciliation.redrive", "result", "rejected_terminal").increment()
             logger.info("Redrive refused for terminal order {}; closed {} stale incident(s)", orderId, closed)
@@ -78,6 +96,39 @@ class ReconciliationOperationsService(
                 "ORDER_ALREADY_TERMINAL",
                 "Order in state ${order.status} is terminal and cannot be redriven",
             )
+        } else {
+            // Refuse a redrive that would authorize a payment against a hold Inventory has already
+            // expired. Scoped to PAYMENT_PENDING because that is the only phase whose resume action is
+            // `stageAuthorize` (CheckoutOrchestrator.runStage), and therefore the only one where a
+            // redrive spends money. The other phases must stay redrivable: ACCEPTED/RESERVING re-take
+            // the hold, CONFIRMING_INVENTORY drives the order to the resolution it needs (Inventory
+            // refuses with RESERVATION_EXPIRED and the pipeline compensates), and COMPENSATING finishes
+            // a reversal that has nothing to do with the hold. Refusing those would strand the order
+            // rather than protect it.
+            //
+            // The same comparison is deliberately NOT made inside `stageAuthorize`. There the deadline
+            // is seconds away, the instant comes from Inventory's database clock, and Inventory is the
+            // only authority on whether a hold is still live (invariant 4) — comparing it against
+            // Orders' clock at that boundary would throw away sales Inventory would still honour. By
+            // redrive time the deadline is long past, the ambiguity is gone, and the operator gets an
+            // honest refusal instead of triggering a charge and its reversal with one click.
+            val expiresAt = order.reservationExpiresAt
+            if (order.status == OrderStatus.PAYMENT_PENDING &&
+                expiresAt != null &&
+                expiresAt.toInstant().isBefore(Instant.now())
+            ) {
+                // The incident stays open: the order still needs an operator, and closing the record
+                // here would hide it exactly as the REFUNDING bug above did.
+                meterRegistry.counter("orders.reconciliation.redrive", "result", "rejected_hold_expired").increment()
+                logger.info("Redrive refused for order {}: seat hold expired at {}", orderId, expiresAt)
+                throw ApiException(
+                    HttpStatus.CONFLICT,
+                    "RESERVATION_HOLD_EXPIRED",
+                    "The seat hold for this order expired at $expiresAt; redriving it would authorize a " +
+                        "payment Inventory can no longer confirm",
+                )
+            }
+            "order-placed" to OrderPlacedEvent(correlationId = correlationId, orderId = orderId, principalId = order.userId)
         }
 
         val open = records.findAllByOrderIdAndStatus(orderId, ReconciliationStatus.OPEN.name).firstOrNull()
@@ -103,14 +154,7 @@ class ReconciliationOperationsService(
                 OPERATION_REDRIVE,
                 fingerprint,
             )
-            outboxEventRepository.save(
-                orderOutboxRow(
-                    objectMapper,
-                    "order-placed",
-                    orderId,
-                    OrderPlacedEvent(correlationId = correlationId, orderId = orderId, principalId = order.userId),
-                ),
-            )
+            outboxEventRepository.save(orderOutboxRow(objectMapper, outboxType, orderId, event))
             records.touchRedrive(orderId, correlationId)
         }
 
@@ -123,8 +167,8 @@ class ReconciliationOperationsService(
     }
 
     /**
-     * Closes an investigated invariant violation. Requires a terminal order, so the money question is
-     * already settled, and a non-empty evidence reference, so the closure is auditable.
+     * Closes an investigated invariant violation. Requires an order whose money question is already
+     * settled, and a non-empty evidence reference, so the closure is auditable.
      */
     suspend fun resolve(
         orderId: UUID,
@@ -148,7 +192,15 @@ class ReconciliationOperationsService(
         val fingerprint = fingerprint(orderId.toString(), recordId.toString(), evidence)
         replayed<ResolveReconciliationResponse>(idempotencyKey, fingerprint)?.let { return it }
 
-        if (!order.status.isTerminal) {
+        // `isTerminal` answers a narrower question than this gate needs: "may the CHECKOUT consumer
+        // acknowledge a redelivery without a remote call?" — not "is the money question settled?".
+        // REFUNDING answers `true` to the first and `false` to the second, so it must be excluded
+        // explicitly, exactly as `redrive` excludes it above and for the same reason: resolving away
+        // the incident on an order whose reversal or seat return is still outstanding would close the
+        // only record saying so. Not reachable today — this method is filtered to INVARIANT_VIOLATION,
+        // written only by `enterCompensating`, and no order carrying one can reach CONFIRMED and hence
+        // REFUNDING — but the predicate must not depend on that remaining true.
+        if (!order.status.isTerminal || order.status == OrderStatus.REFUNDING) {
             throw ApiException(
                 HttpStatus.CONFLICT,
                 "ORDER_NOT_TERMINAL",

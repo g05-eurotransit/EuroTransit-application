@@ -126,6 +126,59 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
     )
     suspend fun cancelIfUnpaid(id: UUID): Long
 
+    // --- Post-sale refund (ADR-015) -----------------------------------------------------------------
+    // A separate durable process from the checkout pipeline above, entered only from CONFIRMED. Money
+    // and seat are reversed by RefundOrchestrator's own consumer, never by this repository — these two
+    // statements only gate and record the state transition itself.
+
+    /**
+     * Atomically transitions CONFIRMED -> REFUNDING, gated on the one condition that can change
+     * between the moment `RefundOrchestrator.refund` reads the order and the moment this statement
+     * runs: the cutoff. `offer_id IS NOT NULL` and `refundable = TRUE` are included too, but only as a
+     * second line of defence — neither can change once V13/V14 write them at checkout, so the
+     * endpoint's own pre-check has already refused a request that fails them; this predicate exists so
+     * a bug in that pre-check cannot let one through regardless.
+     *
+     * The cutoff is compared against `CURRENT_TIMESTAMP`, never a value read into the JVM, for the
+     * same reason invariant 4 evaluates hold expiry against the database clock (ADR-015): replicas
+     * disagree by seconds, and at the boundary two identical requests to two pods must get the same
+     * answer. `COALESCE(refund_cutoff_minutes_before_departure, 0)` treats a null cutoff as "no
+     * cutoff", i.e. refundable right up to `departure_at` itself, matching `OrderView`'s contract.
+     *
+     * 0 rows means either the cutoff has now passed or a concurrent request already moved the order
+     * past CONFIRMED; the caller re-reads to tell the two apart, exactly as `commitConfirmed` does
+     * after `markConfirmed`.
+     */
+    @Modifying
+    @Query(
+        """
+        UPDATE orders
+           SET status = 'REFUNDING', refund_requested_at = CURRENT_TIMESTAMP
+         WHERE id = :id
+           AND status = 'CONFIRMED'
+           AND offer_id IS NOT NULL
+           AND refundable = TRUE
+           AND departure_at IS NOT NULL
+           AND CURRENT_TIMESTAMP <
+               (departure_at - (COALESCE(refund_cutoff_minutes_before_departure, 0) * INTERVAL '1 minute'))
+        """,
+    )
+    suspend fun markRefunding(id: UUID): Long
+
+    // Terminal commit for a completed refund. No self-transition, like markConfirmed: this is paired
+    // with closing the refund's own reconciliation kinds in the SAME transaction (closeAutoResolvable),
+    // so a concurrent double delivery of refund-requested must not run that twice.
+    @Modifying
+    @Query(
+        """
+        UPDATE orders
+           SET status = 'REFUNDED', refunded_at = CURRENT_TIMESTAMP,
+               refund_provider_reference = :providerReference
+         WHERE id = :id AND status = 'REFUNDING'
+        """,
+    )
+    suspend fun markRefunded(id: UUID, providerReference: String?): Long
+
     // --- Customer order history ------------------------------------------------------------------
     // Ownership is enforced HERE, in the predicate, and not in the controller. `getOrder` and
     // `cancel` let the `operations` role bypass their ownership check, which is right for a single
@@ -172,18 +225,30 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
     /**
      * Feeds the non-terminal pipeline gauges. An order stranded in one of these phases is the failure
      * mode the synchronous confirmation introduces — money is committed somewhere and the checkout has
-     * not converged — so it needs to be observable by age, not just by count.
+     * not converged — so it needs to be observable by age, not just by count. `REFUNDING` belongs here
+     * for the same reason: money already reversed (or a definitive seat-return refusal recorded) and
+     * the order has not reached `REFUNDED`.
      *
-     * `created_at` is `TIMESTAMP WITHOUT TIME ZONE`, so the age is computed against `LOCALTIMESTAMP`.
-     * Comparing it with `CURRENT_TIMESTAMP` would silently offset every age by the session time zone.
+     * `created_at` is `TIMESTAMP WITHOUT TIME ZONE`, so its age is computed against `LOCALTIMESTAMP`;
+     * comparing it with `CURRENT_TIMESTAMP` would silently offset every age by the session time zone.
+     * `REFUNDING`'s age is measured differently and deliberately **not** from `created_at`: that column
+     * is the *purchase* time, and a ticket bought months ago and refunded moments ago would otherwise
+     * report an age of months the instant it enters `REFUNDING` — firing every age threshold on a
+     * refund seconds old. `refund_requested_at` (`V15`) is when the refund itself was accepted, and it
+     * is `TIMESTAMPTZ`, so it is compared against `CURRENT_TIMESTAMP`, not `LOCALTIMESTAMP`.
      */
     @Query(
         """
-        SELECT status                                                              AS status,
-               COUNT(*)                                                            AS order_count,
-               COALESCE(MAX(EXTRACT(EPOCH FROM (LOCALTIMESTAMP - created_at))), 0) AS oldest_age_seconds
+        SELECT status AS status,
+               COUNT(*) AS order_count,
+               COALESCE(MAX(
+                   CASE WHEN status = 'REFUNDING'
+                        THEN EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - refund_requested_at))
+                        ELSE EXTRACT(EPOCH FROM (LOCALTIMESTAMP - created_at))
+                   END
+               ), 0) AS oldest_age_seconds
           FROM orders
-         WHERE status IN ('PAYMENT_PENDING', 'CONFIRMING_INVENTORY', 'COMPENSATING')
+         WHERE status IN ('PAYMENT_PENDING', 'CONFIRMING_INVENTORY', 'COMPENSATING', 'REFUNDING')
          GROUP BY status
         """,
     )
