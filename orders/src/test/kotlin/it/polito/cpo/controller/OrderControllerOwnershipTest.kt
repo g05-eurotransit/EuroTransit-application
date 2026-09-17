@@ -492,6 +492,11 @@ class OrderControllerOwnershipTest @Autowired constructor(
         // so a customer could be shown a seat map for a train that left last week and be told only
         // at checkout, which rejects the same date with this code.
         inventoryReadClient.next = SeatAvailabilityOutcome.Found(listOf(SeatAvailability("1A", true)))
+        // Cleared first: `@WebFluxTest` caches one context for the whole class, so this spy carries
+        // whatever an earlier test left on it. Without the reset the assertion below reads as "nobody
+        // ever called Inventory", which is a claim about test ordering rather than about this request.
+        inventoryReadClient.lastRouteId = null
+        inventoryReadClient.lastTravelDate = null
         val past = LocalDate.now().minusDays(1)
 
         webTestClient.get().uri("/api/orders/seat-availability?routeId=R1&travelDate=$past")
