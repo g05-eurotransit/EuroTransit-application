@@ -4,7 +4,7 @@ Working plan for the Orders slice owner. It is deliberately incomplete: only the
 the next one are written in detail. **When a step is finished, write the following step here before
 starting it.** This keeps each step doable in a fresh session without reconstructing context.
 
-Last updated: 2026-09-13.
+Last updated: 2026-09-18.
 
 ## Decisions already taken
 
@@ -168,7 +168,7 @@ counter-proposal to negotiate.
 | 2 | Refund part 1 — the ADR and `offerId` in the checkout contract | **done** — see the outcome below |
 | 3 | Refund part 2 — Catalog client and policy resolution | **done** — see the outcome below |
 | 4 | Refund part 3 — refund state machine and endpoint | **done** — merged as #108 |
-| 5 | Orders canary with metric-gated promote/abort | **next, detailed below** |
+| 5 | Orders canary with metric-gated promote/abort | **written below, not started** — needs two promotions to `main` |
 | 6 | Chaos experiments, postmortem, agent log | to be written |
 
 Steps 2 to 4 are one feature split by dependency, not three features. Step 3 needs part of #85 to
@@ -1185,119 +1185,166 @@ found by reading the query.
 
 ---
 
-# Handover — 2026-09-16
+# Handover — 2026-09-18
 
-Written at the end of a long session, for whoever picks this up next (including me, in a fresh
-session with none of that conversation). Everything below existed only in a chat transcript when it
-was written, which is why it is here.
+Replaces the handover written on 2026-09-16, which is now wrong in every particular that mattered:
+the four corrections F1–F4 were applied, the refund branch was merged, and the two defects that
+"belong to someone else and are written down nowhere else" are issues #109 and #110. Nothing of that
+section is worth keeping, so none of it is kept. What follows was read from the two repositories on
+2026-09-18, not remembered.
 
 ## Where things stand
 
-Merged to `dev` today: the Catalog offer resolution follow-up (`7a1f7a6`, #107 — per-seat pricing and
-a required `offerId`, closing #93) and the local Debezium outbox fix (`89d9afc`, #105). `dev` is green
-at **347 tests**. Nothing is deployed: both `ci.yml` and `docker-gitops.yml` trigger on a push to
-`main`, and `main` has not been promoted.
+**`dev` is at `b4d2be2` and green at 392 tests. Nothing is deployed, and nothing has ever been
+deployed.** `origin/main` is at `f08ed67` (2026-08-28). The image tags in
+`EuroTransit-configuration/charts/eurotransit/values.yaml` are `0078e3d` (2026-08-26) for orders,
+payments, catalog, notifications and frontend, and `7975ee0` (2026-08-28) for inventory. `dev` is
+**100 commits ahead of `origin/main`**. Checkout visibility, the Catalog client, per-seat pricing,
+the post-sale refund, the `503` on the seat-map façade and the departed-run filter exist in no image.
 
-Issues closed today: #93, #83, #84, #81, #70. Still open: **#104** (mine, small — see below), **#98**
-(the same-day departed-run filter), **#86** (the umbrella; it closes when the refund lands), **#72**
-(deferred by decision, keep it open).
+**The delivery loop itself works; it just never runs.** `docker-gitops.yml` and `connect-gitops.yml`
+trigger only on a push to `main`, and we merge into `dev`. The loop is not theoretical: the
+configuration repository holds ten `github-actions[bot]` commits of the form
+`ci: bump EuroTransit images to <sha>`, and CI carries only ACR credentials and a config-repo PAT —
+no cluster credentials. `ci.yml` and `smoke-tests.yml` also trigger on `pull_request`, so **CI on
+pull requests is real**; it is only image publication and GitOps that are frozen.
 
-## The refund — step 4 is one step from done, on an unpushed branch
+**Because we merge into `dev` and not `main`, no `Closes #N` ever fires.** Every issue this slice has
+closed was closed by hand, and the next one will be too.
 
-`feature/orders-refund`, **12 local commits, never pushed**, build green at **368 tests**. As of
-today it is **22 commits behind `dev` with zero conflicts**, so rebasing is painless. Two rounds of
-implementation and two adversarial reviews are already in it.
+## Steps
 
-**Four corrections were decided and never applied.** They are the whole of what stands between that
-branch and a pull request.
+| Step | State |
+| --- | --- |
+| 0–4 | Done. Step 4 merged as #108. |
+| 5 — Orders canary | **Written above, not started.** Everything up to and including the gate definitions needs no cluster. Everything after needs two promotions to `main`. |
+| 6 — chaos, postmortem, agent log | Not written. Parts of it are unblocked; see below. |
 
-**F1 — a stuck refund's redrive is a guaranteed no-op, and the docs claim otherwise.** When a refund's
-payment reversal is definitively declined, Payments stores an idempotency record for the failure
-(`PaymentService`, the `FAILED` branch writes `responseCode = 422` and saves). A redrive re-sends the
-same deterministic `pay-refund-{orderId}` key, Payments replays the stored `FAILED`, and the incident
-re-opens unchanged. Nothing can close that record either: `closeAutoResolvable` only runs from
-`markRefunded` (unreachable), `closeStaleFor`'s callers all exclude `REFUNDING`, and `resolve` is
-filtered to `INVARIANT_VIOLATION`. The dead end pre-exists on the checkout side, so it is not a
-regression — what the branch introduced is the *claim*, in `api-design.md` and in ADR-015, that
-redrive is the operator's retry path for a stuck refund. For one of the three stuck states it is not.
-**Minimum: remove the promise.** The real fix probably lives in `payments/` (do not cache a
-provider-declined refund), which is a stop-and-ask.
+## Issues
 
-**F2 — the third `isTerminal` reader was left alone.** `ReconciliationOperationsService.resolve`
-guards on `!order.status.isTerminal` with a KDoc saying "so the money question is already settled".
-`REFUNDING` now answers `true` to a gate written to mean the opposite. **Not reachable today** —
-`resolve` only touches `INVARIANT_VIOLATION`, whose sole writer is `enterCompensating` inside the
-`CONFIRMING_INVENTORY -> COMPENSATING` transaction, and `COMPENSATING`'s only SQL exit is `FAILED`,
-so no order carrying one can reach `CONFIRMED`. Worth fixing anyway: it is one line, and it is the
-last instance of the exact class of mistake the correction round existed to eliminate.
+Closed recently, all by hand: **#86** (post-sale refund, via PR #108), **#104** (unknown Inventory
+outcome → `503` on the seat-map façade, via #112), **#98** (seat map refused for a same-day run that
+has already departed, via #113).
 
-**F3 — the new gauge test cannot fail the way the query actually breaks.** For a `REFUNDING` row with
-a null `refund_requested_at`, `CURRENT_TIMESTAMP - NULL` is `NULL`, `MAX` skips it, and `COALESCE`
-yields **0** — so a stuck refund is counted but reports age zero forever and no age alert fires. The
-test seeds `now() - 5s` and asserts `age >= 0 && age < 60`; zero satisfies that. Assert a lower bound
-(`age > 1`) and add a case for a null column so the masking is a recorded decision.
+Open: **#72** — mine, deferred by decision. Do not reopen the subject. **#109**, **#110**, **#111** —
+all `eravreto`'s, none blocking Orders.
 
-**F4 — an integration test is named for the half it does not exercise.**
-`redriving an already REFUNDED order is refused as terminal, and closes stale records` drives a clean
-refund, so no reconciliation record is ever opened and `closeStaleFor` returns 0. It would pass
-unchanged if that call were deleted. Force a `SEAT_RETURN_FAILURE` first, then assert the record is
-`RESOLVED` after the refused redrive.
+**#111 is the one to know about.** It is the Payments half of what the old handover called F1: a
+definitively declined refund is cached under the same deterministic key, so the redrive that Orders
+offers the operator replays the stored failure and the incident cannot close. Orders no longer
+*promises* that redrive works for that case, which is the whole of what F1 fixed. The chaos plan
+(experiment 4, and experiment 6) already names this as an expected outcome to be stated in the report
+rather than a recovery failure to be discovered during it.
 
-**Fold in with F1: refuse a redrive whose seat hold has expired.** Observed live today — Inventory's
-sweeper expires the reservation and releases the seats, and Orders never learns: the order sits in
-`PAYMENT_PENDING`/`REFUNDING` pointing at an `EXPIRED` reservation. The money is safe (Inventory
-refuses the confirmation with `RESERVATION_EXPIRED`, Orders compensates), so the cost is a pointless
-authorize-and-reverse cycle, not a hole. **Do not check `reservation_expires_at` before authorizing**
-— that instant comes from Inventory's database clock, and comparing it against Orders' clock at the
-boundary would throw away sales Inventory would still honour; Invariant 4 makes Inventory the only
-authority. At redrive time hours have passed, the ambiguity is gone, and the operator gets an honest
-refusal instead of triggering a charge and a refund with one click. F1 already touches `redrive`.
+## Unmerged work: four branches, and a stale local `dev`
 
-## Two things in the step 4 plan above that are now stale
+| Branch | Where | On top of | Contents |
+| --- | --- | --- | --- |
+| `docs/orders-step-5-canary` | `origin`, **no PR** | `271a617` | Step 5, the chaos-plan rewrite, and this handover |
+| `docs/adr-006-authorize-semantics` | **local only**, 1 commit | `b4d2be2` | The ADR-006 amendment: `authorize` charges immediately, and why deferring the capture is worse |
+| `docs/issue-72-analysis` | **local only**, 1 commit | `271a617` | #72 costed properly, with a recommendation against it for now |
 
-**The `#70` collision note is obsolete.** It says to read `feature/issue-70-readable-notifications`
-before writing a third notification. That branch is merged (`6ad3de2`, #106) and deleted. A refund
-notification must be written against the payload as it is on `dev` now, not against that branch.
+Three of the four touch `docs/planning/orders-slice-plan.md`, in three non-overlapping regions
+(#72 near line 310, step 5 and this handover at the end), so they merge into each other cleanly.
+`docs/orders-step-5-canary` is two commits behind `origin/dev` — it predates the #113 merge — and
+being docs-only that is a rebase with nothing in it, not a conflict.
 
-**`V13`'s promise to tighten `offer_id` to `NOT NULL` is wrong** and the correction is on the entity,
-not in the migration. Editing an applied migration changes its Flyway checksum and breaks startup
-everywhere it has already run — found the hard way today, by a local startup failing with
-`Migration checksum mismatch for migration version 13` after a comment-only edit, on a green build.
-The test suites cannot catch this: they always start from an empty database.
+**Local `dev` is stale at `271a617`, one merge behind `origin/dev`.** Fetch before branching off it,
+or `git diff dev...` will show other people's merged work as if it were yours. That is not a
+hypothetical: it happened while writing this.
 
-## Two defects found today that belong to someone else and are written down nowhere else
+## The one thing that is actually blocked, and on whom
 
-Both are for the frontend/payments owner (`eravreto`). Neither is blocking. Neither has an issue yet.
+**Step 5 needs two promotions to `main`, not one.** A canary measures a transition. The first
+promotion is a cold install with nothing to compare against — it is the baseline, and it is also what
+first puts the money path into an image. The canary is demonstrated on the *second*. Until both have
+happened, `docs/capstone-dod.md:41` cannot be ticked no matter what is written or configured.
 
-**Payments publishes to Kafka after the charge, with no outbox.** Observed: Stripe accepted the
-charge, the event publish then failed, the endpoint answered `500`, and Orders classified it as an
-unknown outcome — correctly, because it cannot know whether money moved. So a real charge can exist
-with no order that knows about it. The specific publish bug that produced it is already fixed in the
-source, but the structural question is untouched: Orders solved exactly this with an outbox row
-written in the same transaction; Payments publishes directly.
+**The blocker is a conversation, not code.** Promotion to `main` is the Technical Coordinator's
+sequencing call, and **that conversation has not happened yet**. Steps 0 to 4 were all doable alone.
+Steps 5 and 6 are the first that are not: they need a cluster, shared surface (the ServiceMonitor
+relabeling, Traefik routing) and other people's services running. This slice is the only one with
+work stopped on a decision that is not its own to make.
 
-**The order page never gives up.** `OrderStatusPage.poll()` polls every 1500 ms until the status is
-terminal or `COMPENSATING`; `reservationExpiresAt` appears in no exit condition. When the hold
-expires the seats are released and the order can no longer complete, but the page keeps polling an
-outcome that will never arrive. Also, the countdown copy says the *payment* expires; it is the seat
-hold, and #88 set that as an explicit copy constraint.
+## What the DoD says versus what is true
 
-## Operational traps this session hit twice each, worth not repeating
+`docs/capstone-dod.md` has 55 items and **zero ticked**, while roughly half are done and evidenced in
+the repositories. Nobody maintains it, so today it carries no information about where the project is.
+Audited against the code and both repositories on 2026-09-18, the shape is:
 
-**Stale local images.** `docker compose up -d` reuses an existing image. Two investigations were sent
-down the wrong path by months-old images: once an endpoint that did not exist yet, once a bug already
-fixed in source. Run `docker compose build <service>` before trusting any local reproduction.
+- **Consistency and idempotency (§2)** is essentially complete across Orders, Inventory and Payments,
+  with tests naming the invariants.
+- **Resilience (§3)** is complete in code: breakers, per-dependency bulkheads (seat-map load sheds
+  without touching checkout), bounded retries, durable phases preserved across unknown outcomes,
+  reconciliation records and redrive. Probes and PDBs are configured in the chart. What is missing is
+  cluster *proof*, not mechanism.
+- **Design (§1)** is documented; the one gap is that graceful shutdown is configured and its
+  idempotency consequences are tested, but the drain itself has never been *demonstrated*.
+- **Delivery and observability (§4)** is where the damage is, and most of it is not mine — see below.
+- **Chaos (§6)**, the **postmortem** and the **demo** (§8) are not started, and the chaos reports and
+  postmortem in the configuration repository are still empty templates.
 
-**Green build, broken change.** Both defects that mattered today — the per-seat price and the Flyway
-checksum — passed CI. The first because every test used one seat; the second because suites start
-from an empty database. Neither would have been found without running the real thing by hand.
+## Things that are provably not done and are not mine
 
-## Suggested order from here
+Each read from the configuration repository, not from a document claiming it:
 
-1. Write the two reports above as issues, before they are lost.
-2. Step 4: apply F1-F4 plus the redrive item, rebase on `dev`, open the PR. This closes #86.
-3. #104 — map the unknown outcome from the seat-map façade to `503`. Small, self-contained; the issue
-   body carries the full analysis and the measurements.
-4. #98 — the same-day departed-run filter. The Catalog client makes it reachable;
-   `GET /api/catalog/routes/{routeId}` already returns `departureTime` and `departureZone`.
-5. Steps 5 and 6 of this plan, still unwritten.
+- **The gateway does not reject unauthenticated requests.** `ingress.forwardAuth.enabled` is `false`
+  in `values.yaml` and is overridden in no environment file, and no forward-auth workload exists
+  under `platform/`. The `IngressRoute` correctly omits the middleware when it is disabled, so this
+  is off, not broken. Orders enforces the principal and ownership locally regardless (DoD §5.2/§5.3
+  hold), but §5.1 does not. Person 1's.
+- **There is no tracing.** `global.observability.tracing.enabled` is `false` everywhere, and the OTLP
+  endpoint points at `otel-collector.monitoring.svc.cluster.local`, which exists in no manifest in
+  the repository. §4.9 — one order traced across the money path — cannot be produced today. Person 5's.
+- **No progressive-delivery machinery exists at all.** No `kind: Rollout`, no `AnalysisTemplate`, no
+  `rollouts_pod_template_hash`, and nothing blue/green for Catalog. §4.4 is mine and blocked; §4.5 is
+  Person 5's and blocked the same way.
+- **Dashboards and alerts exist as manifests and have never run.** Three dashboard ConfigMaps, a
+  chart `PrometheusRule` and a platform rules file — none of it live, because nothing is deployed.
+- **The configuration repository has no `.github` directory.** No CI, no policy-as-code. §7.3
+  ("agent-generated delivery artifacts require human review *or* policy-as-code") rests entirely on
+  human review. Defensible, but it should be a stated choice rather than an accident.
+- **`EuroTransit-configuration/docs/governance/agent-log.md` is still the empty three-slot template**,
+  while `EuroTransit-application/docs/agent-log.md` has fourteen real cases. Either point one at the
+  other or delete the stub; as it stands the configuration repository looks like the log was never
+  started.
+
+## Orders work that needs no cluster and no permission
+
+1. **The postmortem has already happened and nobody wrote it up.**
+   `EuroTransit-configuration/docs/delivery/kind-payment-authorized-order-failed-incident.md` is a
+   168-line report of a real money-path incident on kind — Stripe authorized, the
+   `payment-authorized` publish blocked on a missing topic, Orders timed out at three seconds,
+   classified the checkout as failed and compensated the reservation, leaving Orders `FAILED`,
+   Payments `AUTHORIZED` and the seat cancelled. Correlation ID, order ID and idempotency key are all
+   recorded. That is a blameless postmortem with the investigation already done; what is missing is
+   the write-up into `docs/templates/postmortem-template.md`, which satisfies §8.2 with no cluster.
+   It is also the incident #109 is the structural fix for, which makes the two worth writing together.
+2. **`principalId` is not in the money-path logs.** Logging is ECS-structured with the correlation ID
+   propagated into the MDC, and order IDs appear in the messages, but no log statement in
+   `orders/src/main` carries the principal. §5.9 asks for correlation ID, principal ID, order ID and
+   outcome. Three of four. Small, local, mine.
+3. **Step 6 can be written now**, the same way step 5 was: the plan costs nothing to write and is
+   what makes the cluster time productive when it arrives.
+4. **Tick the DoD.** Nothing about it requires the coordinator's agreement to *start*: the items that
+   are done are done, and an accurate checklist is what turns the promotion conversation from a
+   request into a status report.
+
+## Traps this slice has already paid for twice
+
+**Stale local images.** `docker compose up -d` reuses whatever image exists. Two investigations went
+down the wrong path on months-old images — once chasing an endpoint that did not exist yet, once a
+bug already fixed in source. Run `docker compose build <service>` before trusting any local
+reproduction.
+
+**A green build is not a working change.** The two defects that mattered most recently — the per-seat
+price and a Flyway checksum mismatch — both passed CI. The first because every test used a single
+seat; the second because every suite starts from an empty database. Neither would have been caught
+without running the real thing by hand.
+
+**Never edit an applied migration.** Changing a file Flyway has already run changes its checksum and
+breaks startup everywhere it has run, a comment-only edit included. `V13`'s note promising to tighten
+`offer_id` to `NOT NULL` is therefore wrong: that correction belongs on the entity or in a new
+migration.
+
+**A stale local branch reads as your own work.** See `dev` above.
