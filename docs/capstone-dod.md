@@ -2,11 +2,14 @@
 
 This DoD is the operational release gate for EuroTransit Marketplace. Each item must be backed by code, configuration, screenshots/logs, dashboard links, or written experiment results. The target readiness date is **2026-07-14**.
 
+**How the boxes are ticked.** An item is ticked by the owner of that item, and carries the evidence the paragraph above asks for. **An unticked box therefore means "not yet claimed by its owner", not "not done"** — the two are different, and reading the first as the second understates where the project is. The Orders-owned items were audited against the code on 2026-09-18 and are ticked below; every other item is left exactly as it was and says nothing either way.
+
 ## 1. Design and Async
 
 - [ ] Service boundaries and sync/async communication choices are documented in `design/api-design.md`.
 - [ ] Architecture decisions are documented in `design/architecture-decisions.md`, including rejected alternatives and trade-offs.
-- [ ] Orders implements an asynchronous pipeline with Kotlin coroutines/flows and Kafka-visible stages.
+- [x] Orders implements an asynchronous pipeline with Kotlin coroutines/flows and Kafka-visible stages.
+      *Orders, 2026-09-18:* `OrderPlacedEventListener` / `RefundRequestedEventListener` drive suspending stages in `CheckoutOrchestrator` and `RefundOrchestrator`; every stage transition is a durable `OrderStatus` plus an `outbox_events` row relayed by Debezium (ADR-011). Covered by `CheckoutPipelineIntegrationTest` and `RefundPipelineIntegrationTest`.
 - [ ] Shutdown behavior is demonstrated: readiness refuses new traffic, in-flight work drains or cancels cooperatively, and no duplicate processing occurs after restart.
 - [ ] The async design explains where suspending work reduces cost/scaling pressure and where it does not help CPU-bound work.
 
@@ -14,7 +17,8 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
 
 - [ ] Inventory uses the selected Strong CP / PC-EC consistency model.
 - [ ] The "never oversell" invariant is implemented with atomic 10-minute seat holds or an equivalent reservation state machine.
-- [ ] Payment is attempted only after Inventory creates a valid hold.
+- [x] Payment is attempted only after Inventory creates a valid hold.
+      *Orders, 2026-09-18:* the pipeline runs `stageHold` → `stageAuthorize` → `stageConfirmInventory` in that order (`CheckoutOrchestrator`). `stageAuthorize` is reached only once `markPaymentPending` has committed the reservation id and expiry Inventory returned, so a refused or failed hold ends the pipeline before any Payments call is made.
 - [ ] After payment authorization, Inventory atomically transitions the still-valid reservation `HELD -> CONFIRMED` and its seats `HELD -> SOLD` before Orders becomes `CONFIRMED`.
 - [ ] Holds expire after 10 minutes or are released when payment fails/cancels.
 - [ ] Concurrent confirmation, expiration, and release prove that exactly one transition wins and that confirmed/sold seats are never released by hold cleanup.
@@ -24,11 +28,15 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
 
 ## 3. Resilience Engineering
 
-- [ ] Cross-service synchronous calls use Resilience4j circuit breakers with documented open/half-open settings and safe fallback behavior.
-- [ ] Bulkheads isolate checkout resources from unrelated traffic.
+- [x] Cross-service synchronous calls use Resilience4j circuit breakers with documented open/half-open settings and safe fallback behavior.
+      *Orders, 2026-09-18:* `ResilienceConfiguration` declares four breakers (`inventory`, `payments`, `inventory-read`, `catalog-read`) with a 20s time-based window, `minimumNumberOfCalls=5`, 50% failure and slow-call thresholds, `waitDurationInOpenState=10s` and 3 half-open calls. Business refusals (`DefinitiveRefusal`, 400/404/409) are excluded so a decline storm cannot open a breaker. Fallback is an explicit unknown outcome that preserves the durable phase, never a speculative decision.
+- [x] Bulkheads isolate checkout resources from unrelated traffic.
+      *Orders, 2026-09-18:* separate 20-permit bulkheads per dependency in `ResilienceConfiguration`. Seat-map browsing (`inventory-read`) and offer lookup (`catalog-read`) have their own pools, so saturating either sheds that traffic and leaves the money-path permits untouched.
 - [ ] Every remote call has timeout and bounded retry policy with backoff and jitter.
-- [ ] Overload is handled with controlled refusal or load shedding rather than unbounded queues.
-- [ ] Unknown confirmation and payment outcomes preserve the durable Orders phase; exhausted Kafka retries create a reconciliation record and can be safely redriven.
+- [x] Overload is handled with controlled refusal or load shedding rather than unbounded queues.
+      *Orders, 2026-09-18:* `maxWaitDuration = ZERO` on every bulkhead — a saturated pool refuses immediately instead of queueing. Saturation and an open breaker both classify as `DEPENDENCY_ERROR` (`FailureClassifier`) and surface as `503`, which tells the caller to ask again rather than reporting a business failure.
+- [x] Unknown confirmation and payment outcomes preserve the durable Orders phase; exhausted Kafka retries create a reconciliation record and can be safely redriven.
+      *Orders, 2026-09-18:* unknown outcomes leave the phase at `CONFIRMING_INVENTORY` / `PAYMENT_PENDING` rather than deciding; `OrderPlacedDeadLetterListener` and `RefundRequestedDeadLetterListener` open a `reconciliation_records` row without touching the phase, and `POST /api/orders/{orderId}/reconciliation/redrive` re-runs it. **Known exception:** a payment reversal that Payments declined *definitively* is cached under the same key, so its redrive replays the failure — tracked as #111, in Payments.
 - [ ] Notifications can be killed while checkout still succeeds after reservation and payment.
 - [ ] Kubernetes startup/readiness/liveness probes and PodDisruptionBudgets are deliberately configured.
 - [ ] Liveness probes do not fail because of transient downstream dependency failures.
@@ -49,7 +57,8 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
 
 - [ ] Traefik rejects unauthenticated requests to protected external APIs before they reach service pods.
 - [ ] Services validate the authenticated principal and enforce resource ownership or privileged scopes locally.
-- [ ] Order reads are authorized by owner identity or by an explicit operational/admin role.
+- [x] Order reads are authorized by owner identity or by an explicit operational/admin role.
+      *Orders, 2026-09-18:* `OrderController` resolves the principal from the JWT `sub` and answers `404`, not `403`, to a non-owner, so the API never reveals that another customer's order exists. The explicit exception is the `operations` role, and it is deliberately **not** widened on the history endpoint — there the principal filter is applied in SQL (`OrderRepository.findHistoryFirstPage`) so a later controller edit cannot bypass it. Covered by `OrderControllerOwnershipTest`.
 - [ ] Inventory and Payments are internal service-to-service APIs, not public endpoints, and require service credentials plus propagated user context.
 - [ ] The cluster/proof target uses Keycloak as the OIDC provider; local development may use a mock OIDC issuer or fixed development JWTs without changing production API contracts.
 - [ ] Final cluster/demo proof does not depend on mocked services or fake in-memory substitutes for core infrastructure.
