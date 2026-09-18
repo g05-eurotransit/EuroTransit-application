@@ -4,9 +4,11 @@ import tools.jackson.databind.ObjectMapper
 import it.polito.cpo.contracts.payments.PaymentResponse
 import it.polito.cpo.contracts.payments.PaymentStatus
 import it.polito.cpo.payments.model.IdempotencyRecord
+import it.polito.cpo.payments.model.OutboxEvent
 import it.polito.cpo.payments.model.PaymentAuthorization
 import it.polito.cpo.payments.model.PaymentRefund
 import it.polito.cpo.payments.repository.IdempotencyRepository
+import it.polito.cpo.payments.repository.OutboxEventRepository
 import it.polito.cpo.payments.repository.PaymentAuthorizationRepository
 import it.polito.cpo.payments.repository.PaymentRefundRepository
 import it.polito.cpo.payments.service.payment.PaymentService
@@ -19,7 +21,6 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.springframework.http.HttpStatus
-import org.springframework.kafka.core.KafkaTemplate
 import org.springframework.transaction.ReactiveTransaction
 import org.springframework.transaction.ReactiveTransactionManager
 import org.springframework.transaction.TransactionDefinition
@@ -37,8 +38,8 @@ class PaymentServiceTest {
     private val idempotencyRepository = FakeIdempotencyRepository()
     private val paymentAuthorizationRepository = FakePaymentAuthorizationRepository()
     private val paymentRefundRepository = FakePaymentRefundRepository()
+    private val outboxEventRepository = FakeOutboxEventRepository()
 
-    private val kafkaTemplate = mockKafkaTemplate()
     private val objectMapper = org.mockito.Mockito.mock(ObjectMapper::class.java).apply {
         org.mockito.Mockito.`when`(this.writeValueAsString(org.mockito.Mockito.any())).thenReturn("{}")
         org.mockito.Mockito.`when`(this.readValue(org.mockito.Mockito.anyString(), org.mockito.Mockito.eq(PaymentResponse::class.java)))
@@ -50,14 +51,10 @@ class PaymentServiceTest {
         idempotencyRepository as IdempotencyRepository,
         paymentAuthorizationRepository as PaymentAuthorizationRepository,
         paymentRefundRepository as PaymentRefundRepository,
-        kafkaTemplate,
+        outboxEventRepository as OutboxEventRepository,
         objectMapper,
         NoopReactiveTransactionManager()
     )
-
-    private fun mockKafkaTemplate(): KafkaTemplate<String, String> {
-        return org.mockito.Mockito.mock(KafkaTemplate::class.java) as KafkaTemplate<String, String>
-    }
 
     @Test
     fun `authorize - successful payment hold`() = runTest {
@@ -66,6 +63,11 @@ class PaymentServiceTest {
         assertEquals("ch_123", response.providerReference)
         assertEquals(1, paymentAuthorizationRepository.saved.size)
         assertEquals(1, idempotencyRepository.saved.size)
+
+        assertEquals(1, outboxEventRepository.saved.size)
+        val row = outboxEventRepository.saved.single()
+        assertEquals("payment-authorized", row.type)
+        assertEquals("order-123", row.aggregateId)
     }
 
     @Test
@@ -85,6 +87,10 @@ class PaymentServiceTest {
         assertEquals(IPaymentService.RefundStatus.REFUNDED, response.status)
         assertEquals(1, paymentRefundRepository.saved.size)
         assertEquals(1, idempotencyRepository.saved.size)
+
+        val row = outboxEventRepository.saved.single()
+        assertEquals("payment-refunded", row.type)
+        assertEquals("order-123", row.aggregateId)
     }
 
     @Test
@@ -198,31 +204,26 @@ class PaymentServiceTest {
 
     @Test
     fun `publishEvent - serializes the typed event with java-time fields to a JSON string via the real ObjectMapper`() = runTest {
-        // Regression test for the original review concern: the Kafka value serializer is a plain
-        // StringSerializer, so the event must be pre-serialized to JSON; and the typed event envelope
-        // carries an occurredAt LocalDateTime, which must round-trip through the real (non-mocked) ObjectMapper.
+        // Real (non-mocked) ObjectMapper: must round-trip occurredAt (a LocalDateTime) without crashing.
         val realObjectMapper = JsonMapper.builder().addModule(kotlinModule()).build()
-        val localKafkaTemplate = mockKafkaTemplate()
+        val localOutboxEventRepository = FakeOutboxEventRepository()
         val service = PaymentService(
             FakePaymentProvider(),
             FakeIdempotencyRepository() as IdempotencyRepository,
             FakePaymentAuthorizationRepository() as PaymentAuthorizationRepository,
             FakePaymentRefundRepository() as PaymentRefundRepository,
-            localKafkaTemplate,
+            localOutboxEventRepository as OutboxEventRepository,
             realObjectMapper,
             NoopReactiveTransactionManager()
         )
 
         service.authorize("order-json", "user1", BigDecimal.TEN, "EUR", "tok_visa", "key-json")
 
-        val captor = org.mockito.ArgumentCaptor.forClass(String::class.java)
-        org.mockito.Mockito.verify(localKafkaTemplate).send(
-            org.mockito.Mockito.eq("payment-authorized"),
-            org.mockito.Mockito.eq("order-json"),
-            captor.capture()
-        )
+        val row = localOutboxEventRepository.saved.single()
+        assertEquals("payment-authorized", row.type)
+        assertEquals("order-json", row.aggregateId)
 
-        val parsed = realObjectMapper.readTree(captor.value)
+        val parsed = realObjectMapper.readTree(row.payload.asString())
         assertEquals("payment-authorized", parsed.get("eventType").asText())
         assertEquals("order-json", parsed.get("orderId").asText())
         // occurredAt is a LocalDateTime serialized by the real Jackson 3 mapper (ISO-8601, no crash).
@@ -256,6 +257,11 @@ class PaymentServiceTest {
     open class FakePaymentRefundRepository : PaymentRefundRepository by org.mockito.Mockito.mock(PaymentRefundRepository::class.java) {
         val saved = mutableListOf<PaymentRefund>()
         override suspend fun <S : PaymentRefund> save(entity: S): S { saved.add(entity); return entity }
+    }
+
+    open class FakeOutboxEventRepository : OutboxEventRepository by org.mockito.Mockito.mock(OutboxEventRepository::class.java) {
+        val saved = mutableListOf<OutboxEvent>()
+        override suspend fun <S : OutboxEvent> save(entity: S): S { saved.add(entity); return entity }
     }
 
     // Runs the transactional block without a real DB transaction, since these are in-memory fakes.
