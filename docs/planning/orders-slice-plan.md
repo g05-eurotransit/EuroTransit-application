@@ -4,7 +4,7 @@ Working plan for the Orders slice owner. It is deliberately incomplete: only the
 the next one are written in detail. **When a step is finished, write the following step here before
 starting it.** This keeps each step doable in a fresh session without reconstructing context.
 
-Last updated: 2026-09-18.
+Last updated: 2026-09-22.
 
 ## Decisions already taken
 
@@ -168,7 +168,7 @@ counter-proposal to negotiate.
 | 2 | Refund part 1 — the ADR and `offerId` in the checkout contract | **done** — see the outcome below |
 | 3 | Refund part 2 — Catalog client and policy resolution | **done** — see the outcome below |
 | 4 | Refund part 3 — refund state machine and endpoint | **done** — merged as #108 |
-| 5 | Orders canary with metric-gated promote/abort | **written below, not started** — needs two promotions to `main` |
+| 5 | Orders canary — prove the one that now exists | **rewritten 2026-09-22.** The machinery merged in configuration `eda1fb1`, disabled; three defects found in the gates; still needs two promotions to `main` |
 | 6 | Chaos experiments, postmortem, agent log | to be written |
 
 Steps 2 to 4 are one feature split by dependency, not three features. Step 3 needs part of #85 to
@@ -1044,38 +1044,119 @@ Full build after these fixes: **368 tests, 0 failures**.
 
 ---
 
-## Step 5 — Orders canary with metric-gated promote/abort
+## Step 5 — Orders canary: prove the one that now exists
 
 **Not a decision this step gets to make.** The canary is required by `docs/capstone-dod.md:41`
 ("Orders canary is demonstrated with metric-gated promote/abort"), chosen in
 `architecture-decisions.md:61-74` with its alternatives rejected in writing, and assigned to Person 2
 in `team-agentic-implementation-plan.md:24`. This step schedules it; it does not relitigate it.
 
+**Rewritten on 2026-09-22, because the version written on 2026-09-17 is now false.** It said the
+canary machinery did not exist and that the `ServiceMonitor` exposed no rollout label. Both were true
+when written and stopped being true on 2026-09-21, when `EuroTransit-configuration#27` merged as
+`eda1fb1`. The plan's own rule is that a fact turning out wrong is met as a contradiction and
+re-decided, not worked around — so the step below is a different step from the one it replaces. **It
+is no longer a plan to build a canary. It is a plan to prove one, and to fix what is wrong with it.**
+
 ### Verified before writing
 
-Read from the two repositories on 2026-09-17, so none of it is re-derived later.
+Read from both repositories on 2026-09-22.
 
-**Nothing of the current system is deployed.** `main` is at `f08ed67` (2026-08-28). The image tags in
-`EuroTransit-configuration/charts/eurotransit/values.yaml` are `0078e3d` (2026-08-26) for orders,
-payments, catalog, notifications and frontend, and `7975ee0` for inventory. `dev` is 96 commits ahead
-of that image. The entire money path — checkout visibility, the Catalog client, the refund — exists in
-no image.
+**The machinery exists and is merged.** `eda1fb1` in the configuration repository added, in
+`charts/eurotransit/templates/progressive-delivery.yaml`: a `Rollout` for Orders with a canary
+strategy at 10/25/50/100 and a manual pause at every step, a `Rollout` for Catalog with blue/green
+and `autoPromotionEnabled: false`, a `TraefikService` named `orders-weighted`, and two
+`AnalysisTemplate`s. Argo Rollouts itself is installed through ArgoCD
+(`platform/argocd/base/platform-applications.yaml`). Both `Rollout`s adopt the existing `Deployment`s
+through `workloadRef` rather than replacing them.
 
-**The canary machinery does not exist.** No `kind: Rollout`, no `AnalysisTemplate`, and no occurrence
-of `rollouts_pod_template_hash` anywhere in the configuration repository. The five gates discussed in
-`EuroTransit-configuration#27` are a proposal in an issue, not deployed configuration — which is why
-correcting the two broken ones is currently free.
+**It is switched off.** `progressiveDelivery.enabled` is `false` in `values.yaml` and is overridden
+nowhere, so the default render contains no `Rollout` at all. That is deliberate and stated in the
+pull request.
 
-**The ServiceMonitor does not expose a pod-level rollout label.**
-`charts/eurotransit/templates/servicemonitors.yaml` selects on `app: <service>` and declares only
-`port`, `path` and `interval`. It has no `relabelings`. Kubernetes pod *labels* are not attached to
-scraped samples automatically, so `rollouts_pod_template_hash` will not exist on any Orders metric
-until a relabeling copies it from `__meta_kubernetes_pod_label_rollouts_pod_template_hash`. **Every
-gate that filters by it silently matches nothing until that is added** — an empty result, not an
-error, which is the failure mode that reads as "the gate passed".
+**The `ServiceMonitor` now carries the hash.** `podTargetLabels: [rollouts-pod-template-hash]` is set
+for `orders` and `catalog` only. This was the blocking defect the previous version of this step
+identified, and it is fixed: Prometheus sanitises the label to `rollouts_pod_template_hash`, which is
+what every gate filters on.
 
-**Which metrics are attributable, and which are not.** These are per-pod counters, incremented in
-process, so they describe what *that replica* did:
+**Nothing is deployed, still.** `origin/main` of the application repository is at `f08ed67`
+(2026-08-28) and `origin/dev` is 100 commits ahead of it. The image tags in `values.yaml` are still
+`0078e3d` (2026-08-26) and `7975ee0` for inventory. The money path exists in no image, so none of the
+machinery above has ever run.
+
+**The traffic source is a suspended k6 CronJob.** `progressive-delivery-k6`: two VUs, each doing a
+token fetch, one `POST /api/orders` for a single seat on `of-001`, a poll to a terminal state at two
+second intervals, then `sleep(15)`. Seats and travel dates come from a non-wrapping 24-seat ×
+15-day block, so a run that exceeds capacity fails rather than reusing a booked seat.
+
+**The consumer group is static.** `spring.kafka.consumer.group-id` is `orders`, hardcoded in
+`application.yaml` and not overridden by the chart. Canary pods therefore join the *same* group as
+stable pods.
+
+### Where the merged design came from, so the next reader does not re-derive it
+
+The five gates that merged are substantially the Orders-side review posted on
+`EuroTransit-configuration#27` on **2026-09-10**. Three of its four points were adopted in full: the
+two database-wide gauges (`orders_pipeline_inflight`, `orders_reconciliation_open`) were dropped as
+rollout gates rather than filtered better, the replacements are per-pod counters, and the
+HTTP-weight-is-not-pipeline-share caveat is written next to the template and in
+`docs/delivery/progressive-delivery.md`. The gates are also written so an empty result fails rather
+than passes, which was the single most important property the previous version of this step asked
+for.
+
+**This is worth recording because it is the one thing this slice has done that reached anyone.**
+Everything else it produced in September sits on branches nobody has opened.
+
+### What is still wrong, and it is arithmetic rather than opinion
+
+All three findings below come from combining the merged thresholds with the k6 load that is meant to
+drive them. None is visible by reading either file alone, which is why they survived review.
+
+**Throughput first, because everything else depends on it.** Two VUs, `sleep(15)` plus roughly five
+seconds of work per iteration, gives about **6 checkouts per minute, so ~12 terminal checkouts per
+two-minute analysis window**. `order-placed` has **3 partitions**; during a canary there are 2 stable
+replicas plus 1 canary replica in one consumer group, so the canary owns **one partition of three**.
+Its share of terminal checkouts in a window is therefore about **four**.
+
+**F1 — the checkout failure-rate gate is a zero-failure gate in disguise.**
+`canary-checkout-failure-rate` computes `failed / (confirmed + failed)` over `[2m]` and requires
+`< 0.02`. With about four terminal checkouts attributable to the canary in that window, the smallest
+non-zero value the expression can take is **0.25**, twelve times the threshold. The gate therefore
+does not mean "fewer than 2% of checkouts failed"; it means **"no checkout failed at all"**. Orders
+has a non-zero background failure rate by design — seat conflicts, expired holds, sandbox declines —
+so the canary will abort on ordinary noise, and the symptom will read as a bad build. The 2026-09-10
+review asked for a comparison against the stable hash precisely so a pre-existing failure rate would
+not read as a regression; the merged version uses an absolute threshold instead.
+
+**F2 — the 5xx gate is an absolute count wearing a percentage.** `http-5xx-rate` divides
+`rate(...{status=~"5.."}[2m])` by `clamp_min(rate(...[2m]), 1)`. The clamp is there to avoid dividing
+by zero, but it clamps a **rate in requests per second**, not a count. At demo volume the canary sees
+a few requests per two minutes — on the order of 0.03 req/s — so the denominator clamps to **1** and
+the expression collapses to the numerator alone. One 5xx in the window gives `1/120 = 0.0083`, two
+give `0.0167`, three give `0.025`. So the gate actually fires at **three 5xx responses per two
+minutes**, regardless of how much traffic there was. It would behave as a true 2% ratio only at
+volumes above one request per second, which this demo will never reach. The threshold is not wrong,
+but what it measures changes with load, and the number written next to it describes neither regime
+honestly.
+
+**F3 — the canary's blast radius is about three times its stated weight.** `setWeight: 10` splits
+**HTTP**. The money path runs in the Kafka consumer, and partition assignment gives the canary one
+partition of three. So at the first step the canary carries 10% of the entry traffic and **roughly a
+third of the checkouts that actually reserve, pay and confirm**. The merged documentation states the
+measurement consequence — that the guardrails do not claim end-to-end attribution — but not the
+safety consequence, which is that a reader who promotes at "10%" has exposed a third of the money
+path. The ratio is set by replica counts and partition count, not by the weight, and it moves
+whenever either changes.
+
+**None of the three is a reason to delay enabling the canary.** F1 and F2 make it abort too eagerly
+and refuse too late respectively; neither lets a bad build through silently, which was the failure
+mode worth fearing. They are worth fixing before the demonstration run, because a canary that aborts
+on noise cannot be used to demonstrate anything.
+
+### Which metrics are attributable, and which are not
+
+Kept from the previous version because it is still true and is what the gates rest on. These are
+per-pod counters, incremented in process, so they describe what *that replica* did:
 
 | Metric | Tags | What it means |
 | --- | --- | --- |
@@ -1084,103 +1165,77 @@ process, so they describe what *that replica* did:
 | `orders_events_dlt_total` | `topic`, `result` | Deliveries this pod gave up on |
 | `orders_postsale_refund_completed_total` | `result` | Refunds this pod completed |
 
-These are **not** attributable, and are the two broken gates from the finding above:
-`orders_pipeline_inflight` and `orders_reconciliation_open` are published by `PipelineStateGaugeJob`
-and `ReconciliationMetricsJob`, both scheduled jobs that query the whole table. Every replica
-publishes the same global number. Filtering them by pod hash attributes nothing and `sum()`
-multiplies by replica count.
+Verified against `orders/src/main` on 2026-09-22: `countFailed` increments
+`orders.checkout.completed{result=failed}` and `orders.checkout.failed{reason}` together, once per
+failed checkout, so `confirmed + failed` is exactly the terminal count and the ratio in the gate has
+the right denominator.
 
-**The traffic weight does not control the money path.** Under ADR-011 the pipeline runs in a Kafka
-consumer. A `TraefikService` weight splits the HTTP entry — `POST /api/orders`, which persists
-`ACCEPTED` and writes one outbox row — and nothing else. Which replica reserves, pays and confirms is
-decided by **partition assignment**, so the canary pod may process the pipeline for orders that
-entered through the stable pod, and vice versa. `p95` on `http_server_requests` therefore covers a
-persist and an insert, and none of the three remote calls that can actually hurt.
+`orders_pipeline_inflight` and `orders_reconciliation_open` remain **not** attributable — both are
+published by scheduled jobs that query the whole table, so every replica reports the same global
+number. They are correctly absent from the gates.
 
 ### Settled / open / stop-and-ask
 
 **Settled.**
 
-- Canary on Orders, blue/green on Catalog. Decided in `architecture-decisions.md`; not reopened here.
-- The two unattributable gauges are replaced, not filtered better. A per-replica view of a global
-  number does not exist to be recovered.
-- Gates are expressed against per-pod counters, and every one of them must be written so that **an
-  empty query result fails the gate rather than passing it**. This is the single most important
-  property of the whole step: the most likely defect is not a wrong threshold, it is a query that
-  matches nothing and is read as success.
+- Canary on Orders, blue/green on Catalog, and the gate set as merged. The design is not reopened;
+  F1 to F3 are corrections inside it.
+- Manual promotion at every step. The merged `Rollout` pauses after each analysis, and the DoD is
+  satisfied by metric-gated promote/abort either way.
+- The two unattributable gauges stay out of the gates and remain alert material.
 
 **Open, to decide while doing it.**
 
-- Whether promotion is fully automatic or pauses for a manual approval step. The DoD asks for a
-  metric-gated promote/abort and is satisfied either way.
-- The canary weight and step durations. The ADR says "for example 5%", which is an example.
-- Whether the analysis runs against the Kafka-consumer metrics only, or also keeps an HTTP gate for
-  the entry point. Keeping one HTTP gate is defensible as long as the plan does not pretend it covers
-  the pipeline.
+- Whether F1 becomes a comparison against the stable hash, or a minimum-sample guard plus a threshold
+  chosen for the real sample size. The second is simpler and probably enough.
+- Whether to raise the k6 VU count instead of loosening thresholds. More traffic makes both F1 and F2
+  behave as written, and is the fix that changes no thresholds at all — but it also increases the
+  seat/date capacity the run consumes.
+- Whether the refund counter becomes a sixth gate once refunds appear in the demo traffic. The k6
+  script does not currently request any.
 
 **Stop-and-ask.**
 
-- **Anything that changes the shared ServiceMonitor or Traefik routing.** Both are Person 1's
-  (gateway/routing) and Person 5's (dashboards/alerts) surface. The relabeling above is required by
-  this step but is not this step's to merge alone.
-- **Installing the Argo Rollouts controller**, if that is the chosen mechanism: it is a
-  platform-level addition to the configuration repository.
+- **Every change discussed here is in the configuration repository**, which is Person 1's surface and
+  was merged by him three days ago. F1 to F3 are reported, not pushed.
+- **Turning `progressiveDelivery.enabled` on.** Platform-level, and it cannot precede the first
+  promotion anyway.
 
-### The gates
+### Sequencing, which is still the part that bites
 
-Five, replacing the five proposed in `EuroTransit-configuration#27`. Each is written to be
-**unsatisfiable by an empty result**.
+Unchanged from the previous version, and now more expensive to ignore. A canary measures a
+transition, so it needs a before and an after. **Two promotions are required:**
 
-1. **Checkout success rate on the canary pods.** The ratio of `result=confirmed` over all terminal
-   checkouts, filtered to the canary hash. Guard it with a minimum sample count: a ratio over zero
-   observations is not a high success rate, it is no information, and must abort or wait rather than
-   promote.
-2. **Dead-letter rate.** `orders_events_dlt_total` on the canary hash must stay at zero, or within a
-   stated allowance. This is the gate that catches a consumer that parses or dispatches wrongly —
-   the failure a checkout success ratio would not show, because the order never reaches a terminal
-   state at all.
-3. **Failure-class shift.** `orders_checkout_failed_total` by `reason`, compared against the stable
-   hash. A canary that fails for a *different* reason than the baseline is the interesting signal;
-   absolute counts alone will not show it.
-4. **HTTP 5xx on the entry point**, on the canary hash. Honest about its scope: it covers
-   `POST /api/orders` accepting and the read endpoints, not the pipeline.
-5. **Refund completion**, once refunds appear in traffic: `orders_postsale_refund_completed_total`.
-   Newest code on the money path and the least exercised.
-
-**Deliberately not a gate: open reconciliation incidents.** `result == 0` on that gauge makes the
-canary unpromotable the moment a chaos experiment leaves a record open — which is what those
-experiments are for. Step 6 and step 5 would deadlock each other.
-
-### Sequencing, which is the part that bites
-
-A canary measures a transition, so it needs a before and an after. **Two promotions are required**,
-and this is not negotiable by rearranging the work:
-
-1. **First promotion** — `dev` into `main`. Establishes the baseline. There is nothing to canary: a
-   first install is a cold start, not a progressive rollout. This is also what puts the money path
-   into an image for the first time.
-2. **Write the canary** — the relabeling, the rollout object, the analysis template with the gates
-   above.
+1. **First promotion** — `dev` into `main`. A first install is a cold start, not a progressive
+   rollout. This is what puts the money path into an image for the first time, and it is the baseline
+   the canary is measured against.
+2. **Enable and exercise** — turn on `progressiveDelivery`, start k6, fix F1 to F3 against real
+   numbers rather than estimated ones.
 3. **Second promotion** — a change rolled out under the canary. *That* is the proof the DoD asks for.
 
-Everything up to and including the gate definitions is doable with nothing deployed. Nothing after
-step 1 is.
+What changed since 2026-09-17 is who is waiting. The first promotion no longer blocks only this
+slice: Argo Rollouts and the k6 load test (Person 1), two new chaos experiments (Person 5), and the
+Payments outbox (#109) are all now queued behind the same event. **Nobody has had the conversation.**
 
 ### Done when
 
-- Every gate, run by hand against Prometheus with the canary hash of a real rollout, returns a value
-  — not an empty result. Verified before the gates are trusted, not after.
+- F1 to F3 are reported to the owner of the configuration repository, with the arithmetic, and either
+  corrected or explicitly accepted.
+- Every gate, run by hand against Prometheus with the canary hash of a real rollout, returns a value —
+  not an empty result. Verified before the gates are trusted, not after.
 - A rollout that should pass is promoted, and the decision is visible in the rollout status.
-- A rollout that should fail is aborted by a gate, with the aborting gate identifiable. Deliberately
-  breaking a build to watch the abort is part of this step, not an optional extra: a gate that has
-  only ever seen success has not been shown to gate anything.
+- A rollout that should fail is aborted by a gate, with the aborting gate identifiable. The merged
+  procedure already describes doing this by making one threshold temporarily impossible; that counts,
+  provided the impossible threshold never stays committed.
 - `docs/capstone-dod.md:41` can be ticked with a link to the evidence.
 
 ### Standing check
 
-Before closing: for every gate, delete the metric it queries and confirm the gate **fails**. A gate
-that passes when its metric is absent is the defect this whole step exists to avoid, and it cannot be
-found by reading the query.
+Before closing: for every gate, **compute what its threshold means at the traffic the demonstration
+will actually produce**, not at the traffic the expression implies. F1 and F2 were both invisible
+until the k6 pacing and the partition count were put next to the thresholds — the queries are
+correct, and they still do not mean what they appear to mean. A gate is only understood once its
+sample size is known.
 
 
 ---
@@ -1192,6 +1247,15 @@ the four corrections F1–F4 were applied, the refund branch was merged, and the
 "belong to someone else and are written down nowhere else" are issues #109 and #110. Nothing of that
 section is worth keeping, so none of it is kept. What follows was read from the two repositories on
 2026-09-18, not remembered.
+
+> **Amended 2026-09-22.** This remains a snapshot of 2026-09-18 and is not rewritten, but one thing
+> below stopped being true on 2026-09-21: **the progressive-delivery machinery now exists.**
+> `EuroTransit-configuration#27` merged as `eda1fb1` — Argo Rollouts, a canary `Rollout` for Orders,
+> a blue/green `Rollout` for Catalog, five metric gates, a k6 load generator, and the
+> `ServiceMonitor` relabeling this plan said was missing. It is disabled by default and nothing is
+> deployed, so no DoD item moved. Step 5 above is rewritten accordingly. Everything else here still
+> holds, including the branch table — except that all four branches were pushed on 2026-09-18 and
+> none of them has a pull request.
 
 ## Where things stand
 
