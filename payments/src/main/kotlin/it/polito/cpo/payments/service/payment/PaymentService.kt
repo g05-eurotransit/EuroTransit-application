@@ -14,12 +14,12 @@ import it.polito.cpo.payments.model.IdempotencyRecord
 import it.polito.cpo.payments.model.PaymentAuthorization
 import it.polito.cpo.payments.model.PaymentRefund
 import it.polito.cpo.payments.repository.IdempotencyRepository
+import it.polito.cpo.payments.repository.OutboxEventRepository
 import it.polito.cpo.payments.repository.PaymentAuthorizationRepository
 import kotlinx.coroutines.reactor.awaitSingleOrNull
 import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import org.springframework.http.HttpStatus
-import org.springframework.kafka.core.KafkaTemplate
 import org.springframework.stereotype.Service
 import org.springframework.transaction.ReactiveTransactionManager
 import org.springframework.transaction.reactive.TransactionalOperator
@@ -34,7 +34,7 @@ class PaymentService(
     private val idempotencyRepository: IdempotencyRepository,
     private val paymentAuthorizationRepository: PaymentAuthorizationRepository,
     private val paymentRefundRepository: it.polito.cpo.payments.repository.PaymentRefundRepository,
-    private val kafkaTemplate: KafkaTemplate<String, String>,
+    private val outboxEventRepository: OutboxEventRepository,
     private val objectMapper: ObjectMapper,
     transactionManager: ReactiveTransactionManager
 ) : IPaymentService {
@@ -107,17 +107,30 @@ class PaymentService(
             createdAt = LocalDateTime.now()
         ).apply { setAsNew(true) }
 
-        // 3+4. Persist idempotency record and authorization atomically, in a short transaction.
-        // Order matters: payment_authorizations.idempotency_key has a FK to
-        // idempotency_records(idempotency_key), so the idempotency record must be inserted first.
+        // 5. Written as an outbox row (below), not published directly — see event-publishing-durability.md.
+        val eventType = if (result.success) "payment-authorized" else "payment-declined"
+        val event = PaymentAuthorizationEvent(
+            eventType = eventType,
+            correlationId = MDC.get(CorrelationId.CONTEXT_KEY) ?: "",
+            orderId = orderId,
+            principalId = principalId,
+            payload = PaymentAuthorizationPayload(
+                status = authorization.status,
+                providerReference = authorization.providerReference,
+                amount = authorization.amount,
+                currency = authorization.currency,
+                errorCode = authorization.errorCode
+            )
+        )
+
+        // 3+4+5. Idempotency record first: payment_authorizations.idempotency_key has a FK to it.
         txOperator.executeAndAwait {
             idempotencyRepository.save(idempotencyRecord)
             paymentAuthorizationRepository.save(authorization)
+            outboxEventRepository.save(
+                paymentOutboxRow(objectMapper, "PaymentAuthorization", orderId, eventType, event)
+            )
         }
-
-        // 5. Emit event
-        val eventType = if (result.success) "payment-authorized" else "payment-declined"
-        publishAuthorizationEvent(eventType, orderId, principalId, authorization)
 
         return response
     }
@@ -186,65 +199,31 @@ class PaymentService(
             createdAt = LocalDateTime.now()
         ).apply { setAsNew(true) }
 
-        // 4+5. Persist idempotency record and refund atomically, in a short transaction.
-        // Order matters: payment_refunds.idempotency_key has a FK to
-        // idempotency_records(idempotency_key), so the idempotency record must be inserted first.
-        txOperator.executeAndAwait {
-            idempotencyRepository.save(idempotencyRecord)
-            paymentRefundRepository.save(paymentRefund)
-        }
-
-        // 6. Emit event
+        // 6. Written as an outbox row (below), same as authorize() above.
         val eventType = if (result.success) "payment-refunded" else "payment-refund-failed"
-        publishRefundEvent(eventType, orderId, authorization.principalId, paymentRefund)
-
-        return response
-    }
-
-    // Events are typed contracts (money-path-contracts) pre-serialized to a JSON String with the app's
-    // Jackson 3 ObjectMapper, then sent through the StringSerializer producer — symmetric with the
-    // String-based consumers (orders/notifications) and aligned with ADR-010 (shared envelope, no drift).
-    private fun publishAuthorizationEvent(
-        eventType: String,
-        orderId: String,
-        principalId: String,
-        authorization: PaymentAuthorization
-    ) {
-        val event = PaymentAuthorizationEvent(
-            eventType = eventType,
-            correlationId = MDC.get(CorrelationId.CONTEXT_KEY) ?: "",
-            orderId = orderId,
-            principalId = principalId,
-            payload = PaymentAuthorizationPayload(
-                status = authorization.status,
-                providerReference = authorization.providerReference,
-                amount = authorization.amount,
-                currency = authorization.currency,
-                errorCode = authorization.errorCode
-            )
-        )
-        kafkaTemplate.send(eventType, orderId, objectMapper.writeValueAsString(event))
-    }
-
-    private fun publishRefundEvent(
-        eventType: String,
-        orderId: String,
-        principalId: String,
-        refund: PaymentRefund
-    ) {
         val event = PaymentRefundEvent(
             eventType = eventType,
             correlationId = MDC.get(CorrelationId.CONTEXT_KEY) ?: "",
             orderId = orderId,
-            principalId = principalId,
+            principalId = authorization.principalId,
             payload = PaymentRefundPayload(
-                status = refund.status,
-                refundReference = refund.providerReference,
-                amount = refund.amount,
-                currency = refund.currency,
-                reason = refund.reason
+                status = paymentRefund.status,
+                refundReference = paymentRefund.providerReference,
+                amount = paymentRefund.amount,
+                currency = paymentRefund.currency,
+                reason = paymentRefund.reason
             )
         )
-        kafkaTemplate.send(eventType, orderId, objectMapper.writeValueAsString(event))
+
+        // 4+5+6. Idempotency record first: payment_refunds.idempotency_key has a FK to it.
+        txOperator.executeAndAwait {
+            idempotencyRepository.save(idempotencyRecord)
+            paymentRefundRepository.save(paymentRefund)
+            outboxEventRepository.save(
+                paymentOutboxRow(objectMapper, "PaymentRefund", orderId, eventType, event)
+            )
+        }
+
+        return response
     }
 }
