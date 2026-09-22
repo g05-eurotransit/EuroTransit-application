@@ -19,6 +19,11 @@ on:
           - payments
           - notifications
           - frontend
+      source_ref:
+        description: "Branch, tag, or commit SHA to build (run this workflow from main)"
+        type: string
+        required: true
+        default: main
 
 env:
   REGISTRY: eurotransitregistry.azurecr.io
@@ -29,7 +34,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.source_ref }}-${{ inputs.service }}
   cancel-in-progress: true
 
 jobs:
@@ -44,16 +49,27 @@ jobs:
       notifications: ${{ steps.filter.outputs.notifications }}
       frontend: ${{ steps.filter.outputs.frontend }}
       shared: ${{ steps.filter.outputs.shared }}
+      source_sha: ${{ steps.sha.outputs.full }}
       short_sha: ${{ steps.sha.outputs.short }}
     steps:
+      - name: Require the default branch for manual runs
+        if: github.event_name == 'workflow_dispatch' && github.ref_name != github.event.repository.default_branch
+        run: |
+          echo "::error::Run this workflow from the default branch and set source_ref to the branch, tag, or SHA to build."
+          exit 1
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.sha }}
           fetch-depth: 0
 
-      - name: Compute short SHA
+      - name: Resolve source SHA
         id: sha
-        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+        run: |
+          source_sha="$(git rev-parse HEAD)"
+          echo "full=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "short=${source_sha::7}" >> "$GITHUB_OUTPUT"
 
       - name: Filter changed paths
         if: github.event_name == 'push'
@@ -97,6 +113,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.detect-changes.outputs.source_sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -134,6 +152,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.detect-changes.outputs.source_sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -171,6 +191,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.detect-changes.outputs.source_sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -208,6 +230,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.detect-changes.outputs.source_sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -245,6 +269,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.detect-changes.outputs.source_sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -279,6 +305,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.detect-changes.outputs.source_sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
