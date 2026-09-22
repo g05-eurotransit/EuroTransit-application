@@ -4,7 +4,7 @@
 # EuroTransit - Local Debezium Initialization Script
 # ==============================================================================
 # Registers the PostgreSQL Debezium connectors in the local Kafka Connect instance
-# running via docker-compose, enabling the Outbox Pattern for Inventory and Orders.
+# running via docker-compose, enabling the Outbox Pattern for Inventory, Orders and Payments.
 #
 # Requirements:
 # - docker compose up -d (postgres, kafka, and debezium must be running)
@@ -14,8 +14,8 @@
 # failing with 409.
 #
 # KEEP IN SYNC with the cluster connectors in the EuroTransit-configuration repository
-# (platform/connectors/base/{orders,inventory}-outbox-connect.yaml). A local stack that
-# routes the outbox differently from production is not a rehearsal for production, and
+# (platform/connectors/base/{orders,inventory,payments}-outbox-connect.yaml). A local stack
+# that routes the outbox differently from production is not a rehearsal for production, and
 # the divergence does not announce itself: it surfaces as an order stuck in ACCEPTED.
 # ==============================================================================
 
@@ -55,6 +55,7 @@ wait_for_outbox() {
 
 wait_for_outbox "orders_db" "orders"
 wait_for_outbox "inventory_db" "inventory"
+wait_for_outbox "payments_db" "payments"
 
 # Registers one connector and fails loudly on anything other than 200/201. Without the
 # status check a 4xx would scroll past and the script would still claim success.
@@ -133,13 +134,42 @@ read -r -d '' ORDERS_CONFIG <<'JSON' || true
 }
 JSON
 
+# Payments' own database: separate connector, distinct slot/publication. Routes each row to the
+# topic named by its `type`: payment-authorized / payment-declined / payment-refunded / payment-refund-failed.
+read -r -d '' PAYMENTS_CONFIG <<'JSON' || true
+{
+  "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+  "tasks.max": "1",
+  "database.hostname": "postgres",
+  "database.port": "5432",
+  "database.user": "payments",
+  "database.password": "password",
+  "database.dbname": "payments_db",
+  "topic.prefix": "payments",
+  "plugin.name": "pgoutput",
+  "slot.name": "payments_outbox",
+  "publication.name": "payments_outbox_publication",
+  "publication.autocreate.mode": "filtered",
+  "table.include.list": "public.outbox_events",
+
+  "transforms": "outbox",
+  "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+  "transforms.outbox.table.field.event.key": "aggregate_id",
+  "transforms.outbox.table.field.event.payload": "payload",
+  "transforms.outbox.table.expand.json.payload": "true",
+  "transforms.outbox.route.topic.replacement": "${routedByValue}",
+  "transforms.outbox.route.by.field": "type"
+}
+JSON
+
 register "inventory-outbox-connector" "${INVENTORY_CONFIG}"
 register "orders-outbox-connector" "${ORDERS_CONFIG}"
+register "payments-outbox-connector" "${PAYMENTS_CONFIG}"
 
 # A connector whose task died on an earlier run stays FAILED even after a config update, so a
 # re-run would report success over a dead task. Restarting is a no-op when the task is healthy.
-for name in inventory-outbox-connector orders-outbox-connector; do
+for name in inventory-outbox-connector orders-outbox-connector payments-outbox-connector; do
   curl -s -o /dev/null -X POST "${CONNECT_URL}/connectors/${name}/restart?includeTasks=true&onlyFailed=true"
 done
 
-echo "Connectors registered. Debezium is listening to the inventory_db and orders_db outbox_events tables."
+echo "Connectors registered. Debezium is listening to the inventory_db, orders_db and payments_db outbox_events tables."

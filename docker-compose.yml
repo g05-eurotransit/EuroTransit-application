@@ -139,9 +139,6 @@ services:
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8081/realms/eurotransit
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/eurotransit/protocol/openid-connect/certs
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
-      # In-network broker address (compose PLAINTEXT listener). Without it the producer
-      # falls back to localhost, which does not resolve inside a container.
-      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       STRIPE_SANDBOX_URL: ${STRIPE_SANDBOX_URL:-https://api.stripe.com/v1}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-sk_test_1234567890}
     expose:
@@ -149,8 +146,6 @@ services:
     depends_on:
       postgres-init:
         condition: service_completed_successfully
-      kafka:
-        condition: service_started
     labels:
       - "traefik.enable=false"
 
