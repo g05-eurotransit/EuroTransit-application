@@ -70,3 +70,26 @@ Every checkout trace must include:
 - Consumer spans for asynchronous stages.
 
 The required presentation question is: "Where did this order spend its time, and where did it fail?"
+
+### Where this stands
+
+Measured on the compose stack, not assumed.
+
+**Emitted today.** The gateway span exists: Traefik runs with OTLP tracing to Tempo and injects
+`traceparent` into the forwarded request, so the service span is its child rather than a root of
+its own. A checkout renders as one tree from Traefik through Orders to Catalog — the offer lookup
+included.
+
+Catalog reached Tempo only once its exporter endpoint was set in compose. It had been falling back
+to the `application.yaml` default of `localhost:4318`, which inside a container is the container
+itself: spans were produced and dropped with no error. The service was absent from every trace.
+The other four already set it.
+
+**Still missing.** Everything downstream of the `order-placed` consumer — the Inventory hold, the
+payment authorization and the consumer stages — remains on separate traces. The context is dropped
+inside the Orders listeners and again across the outbox, tracked in issue #117. Until that lands,
+the tree above stops at the synchronous part of checkout.
+
+**Not available in the cluster at all.** `platform/` has no trace backend, and the application
+chart ships `tracing.enabled: false` with an endpoint pointing at a collector that does not exist.
+The evidence above can only be produced locally.

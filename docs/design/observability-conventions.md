@@ -101,6 +101,16 @@ These queries are the building blocks for the checkout SLOs in `docs/operations/
 - Property names are the Spring Boot 4 canonical ones (`management.opentelemetry.tracing.export.otlp.endpoint`); the Boot 3 `management.otlp.tracing.*` names are deprecated aliases.
 - Sampling is 1.0 for development; production sampling is decided with the SLO owner before the demo.
 - View traces in Grafana (`localhost:3000` → Explore → Tempo → search `service.name`).
+- **Set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` explicitly for every service in compose.** The
+  `application.yaml` default is `localhost:4318`, which inside a container is the container itself,
+  so the spans are produced and dropped and nothing reports an error. Catalog was missing from
+  every trace for exactly this reason. A service that looks instrumented and exports nowhere is the
+  failure mode to watch for here.
+- **The gateway is part of the trace.** Traefik runs with `--tracing.otlp` to Tempo, so a request
+  arriving from outside opens the root span and the service span is its child. Traefik injects
+  `traceparent` into the forwarded request, which is what makes that parenting happen. Its endpoint
+  argument is a base URL — the exporter appends `/v1/traces` itself — and the default is `https`,
+  so it has to be spelled out.
 
 ## Prometheus Scraping and the Security Baseline
 
@@ -112,7 +122,15 @@ The Notifications consumer (`notifications/src/main/kotlin/it/polito/cpo/event/`
 
 - **Event envelope drift — RESOLVED.** Previously Orders' event DTOs diverged from the frozen contract (`payloadVersion` vs `schemaVersion`, flat fields vs `payload {}` wrapper). Person 2 fixed this in PR #23: the shared `money-path-contracts` module (`money-path-contracts/src/main/kotlin/it/polito/cpo/contracts/events/OrderEvents.kt`) is now the single source of truth, aligned to `api-design.md` (`schemaVersion` + nested `payload`), and Orders emits it (ADR-010). The Notifications consumer now depends on the same module and deserializes the shared `NotificationRequestedEvent` directly — no more local DTO, no drift.
 - **Checkout 500 — producer serializer missing JSR-310 module (BLOCKER, out of slice).** Found in live end-to-end run (2026-07-09): every first `POST /api/orders` returns 500. Root cause in Orders (Person 2): `orders/.../config/KafkaConfiguration.kt` builds the producer with a bare `JsonSerializer<Any>()` whose default Jackson mapper has no `JavaTimeModule`, so serializing `OrderPlacedEvent.occurredAt` (`LocalDateTime`) throws `InvalidDefinitionException: Java 8 date/time type not supported`. The order row persists but the event never publishes, so **no `notification-requested` is emitted and the customer never gets a notification**. A retry with the same `Idempotency-Key` replays the stored `ACCEPTED` response and masks the failure (no re-publish), which is why the bug is easy to miss. Fix is Person 2's: register `JavaTimeModule` (and disable `WRITE_DATES_AS_TIMESTAMPS`) on the producer's `JsonSerializer` mapper. Not changed here — out of slice.
-- **Producer-side trace-context propagation.** The consumer enables Spring Kafka listener observation (`spring.kafka.listener.observation-enabled: true`), so a consumed event opens a span. For the async Kafka stages to actually **join** the checkout trace end-to-end (the money-path tracing requirement in `slo-observability.md`), Orders' producer (`orders/.../config/KafkaConfiguration.kt`, a plain `ProducerFactory` with no observation) must also propagate the `traceparent` in record headers. Until then, cross-service correlation still works via the `correlationId` carried in the event body and logged through the shared MDC key.
+- **Trace context does not survive the outbox.** `KafkaConfiguration.kt` now enables producer
+  observation, so a record published through `KafkaTemplate` does carry `traceparent` — but the
+  business events no longer take that path. They are written to the outbox and relayed by Debezium,
+  which has no trace context to forward because the outbox table stores none. The consumer opens a
+  span with nothing to join, and the money path lands on its own trace. Measured, not inferred: one
+  checkout produced eleven disconnected traces. Tracked in issue #117, together with a second break
+  inside the Orders listeners, where the pipeline runs in a Reactor context carrying only the
+  correlation id. Meanwhile cross-service correlation still works through that `correlationId`,
+  carried in the event body and logged through the shared MDC key.
 - **Kafka bootstrap address in compose.** Neither Orders nor Notifications set `spring.kafka.bootstrap-servers` in `docker-compose.yml`, so both fall back to `localhost:9092`, which does not resolve inside a container. Notifications now sets `SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092` for its own service block; Orders likely needs the same on its block (not changed here — out of slice).
 - **Notifications not exposed through the gateway (in-slice, FIXED).** In live E2E the frontend SSE call `GET /api/notifications/stream` (via Traefik on port 80) fell through to the SPA catch-all router because the `notifications` service block had `traefik.enable=false` and no router. Added `traefik.enable=true` + a `PathPrefix(/api/notifications)` router to the notifications block in `docker-compose.yml` (mirrors catalog/orders). `inventory`/`payments` stay unexposed — they are internal, called server-to-server by Orders.
 - **Topics rely on broker auto-create locally.** `order-placed`, `order-confirmed`, `notification-requested` are auto-created by the KRaft broker in compose (no explicit provisioning). The cluster/demo target needs explicit `KafkaTopic` CRDs (partitions/replication/retention) in `EuroTransit-configuration` (Strimzi) — a config-repo follow-up.
