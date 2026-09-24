@@ -37,6 +37,11 @@ services:
       MANAGEMENT_OTLP_METRICS_EXPORT_ENABLED: "false"
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8081/realms/eurotransit
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/eurotransit/protocol/openid-connect/certs
+      # The other four services already set this. Without it catalog falls back to the
+      # application.yaml default of localhost:4318, which inside a container is the container
+      # itself: the spans are produced and dropped, with no error to notice. Catalog was absent
+      # from every trace, and the offer lookup Orders makes during checkout ended in nothing.
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
     expose:
       - "8080"
     labels:
@@ -302,6 +307,19 @@ services:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.web.address=:80"
+      # slo-observability.md requires every checkout trace to start with a gateway inbound span.
+      # Without these the gateway is invisible: it forwards the request but appears nowhere in
+      # Tempo, and the service span is the root of its own trace. Traefik also injects
+      # `traceparent` into the forwarded request, so the service span becomes its child.
+      - "--tracing.otlp=true"
+      - "--tracing.otlp.http=true"
+      # A base URL, not the signal path: the exporter appends /v1/traces itself. Spelled out
+      # because the default is https://localhost:4318 — https, and the wrong host.
+      - "--tracing.otlp.http.endpoint=http://tempo:4318"
+      - "--tracing.servicename=traefik"
+      # Sample everything: this is a local stack where a demo is a handful of requests, and a
+      # missed trace costs more than the storage. Tempo keeps blocks for 1h anyway.
+      - "--tracing.samplerate=1.0"
     ports:
       - "80:80"     # API Gateway entrypoint
       - "8080:8080" # Traefik dashboard
