@@ -113,3 +113,16 @@ as independently stress-tested.
 `just load-checkout-unit` runs allocator/outcome/verifier tests;
 `./gradlew :orders:test --tests '*CheckoutAdmissionIntegrationTest'` proves real
 PostgreSQL cross-replica admission, replay, terminal release, lock timeout and cancellation.
+
+## Metrics prerequisite discovered by the cluster baseline
+
+The initial live baseline exposed terminal checkout counts without histogram buckets
+and absent circuit-breaker state series. Orders now explicitly exports the
+`orders_checkout_e2e_duration_seconds_bucket` histogram (including the existing2s
+objective) and binds the actual custom Resilience4j registries to Micrometer.
+`resilience4j_circuitbreaker_state{name="payments",state="open"}` observes the actual
+breaker; bulkhead/retry names use the library's tagged metric contract. Labels contain
+only bounded dependency names, states and outcomes; never run IDs or order IDs.
+These changes require publishing and deploying the new Orders image before #47 can
+observe breaker state under injected latency. A baseline against the old image must
+record missing series as unavailable rather than substitute the per-delivery timer.

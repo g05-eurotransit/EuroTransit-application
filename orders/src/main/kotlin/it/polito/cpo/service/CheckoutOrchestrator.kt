@@ -29,6 +29,7 @@ import it.polito.cpo.observability.CorrelationId
 import it.polito.cpo.repository.OutboxEventRepository
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Timer
+import it.polito.cpo.config.CheckoutMetrics
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.reactor.ReactorContext
 import org.slf4j.LoggerFactory
@@ -1009,8 +1010,6 @@ class CheckoutOrchestrator(
      */
     private fun recordEndToEnd(ctx: PipelineContext, outcome: String) {
         val elapsed = Duration.between(ctx.order.createdAt, LocalDateTime.now())
-        if (!elapsed.isNegative) {
-            meterRegistry.timer("orders.checkout.e2e.duration", "outcome", outcome).record(elapsed)
-        }
+        CheckoutMetrics.recordEndToEnd(meterRegistry, elapsed, outcome)
     }
 }
