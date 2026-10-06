@@ -59,6 +59,10 @@ export function SeatSelectionPage() {
       .then((res) => setSeats(res.seats))
       .catch((e) => {
         if (e instanceof ApiError && e.kind === "network") return; // aborted
+        if (e instanceof ApiError && e.code === "RUN_ALREADY_DEPARTED") {
+          setError("This service has already departed. Choose a later departure or a different date.");
+          return;
+        }
         if (e instanceof ApiError && e.kind === "not_found") {
           setError("No seats found for this route and date.");
           return;
