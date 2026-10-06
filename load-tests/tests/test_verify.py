@@ -5,7 +5,7 @@ spec = importlib.util.spec_from_file_location('verify', Path(__file__).parents[1
 module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 class VerifyTests(unittest.TestCase):
     def case(self):
-        row={'runId':'run','orderId':'a','outcome':'confirmed','status':'CONFIRMED','fixture':{'routeId':'r','travelDate':'2099-01-01','seatId':'1A','unitPrice':24.90}}
+        row={'runId':'run','orderId':'a','outcome':'confirmed','status':'CONFIRMED','httpStatus':202,'scenario':'baseline','fixture':{'routeId':'r','travelDate':'2099-01-01','seatId':'1A','unitPrice':24.90}}
         evidence={'runId':'run','extraction':'COMPLETE','orders':[{'id':'a','status':'CONFIRMED','route_id':'r','travel_date':'2099-01-01','seats':'1A','total_amount':'24.90','currency':'EUR'}],'payments':[{'order_id':'a','status':'AUTHORIZED','provider_reference':'charge-a','amount':'24.90','currency':'EUR'}],'reservations':[{'order_id':'a','reservation_id':'res','status':'CONFIRMED','route_id':'r','travel_date':'2099-01-01'}],'inventory':[{'route_id':'r','travel_date':'2099-01-01','seat_id':'1A','reservation_id':'res','status':'SOLD'}]}
         evidence['providerEffects']={'extraction':'COMPLETE','authorizations':[{'order_id':'a','status':'SUCCEEDED','provider_reference':'charge-a','amount':'24.90','currency':'EUR'}]}
         return [row],evidence

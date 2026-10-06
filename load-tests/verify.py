@@ -22,6 +22,13 @@ def verify(ledger, evidence):
         errors.append('no_confirmed_checkout')
     if any(r.get('outcome') not in ('confirmed', 'expected_contention', 'overload_refusal') for r in ledger):
         errors.append('unexpected_checkout_outcome')
+    for row in ledger:
+        if row.get('outcome') in ('confirmed', 'expected_contention') and row.get('httpStatus') != 202:
+            errors.append('invalid_acceptance_evidence')
+        if row.get('outcome') == 'expected_contention' and (row.get('scenario') != 'contention' or row.get('failureCode') != 'SEATS_UNAVAILABLE'):
+            errors.append('invalid_contention_evidence')
+        if row.get('outcome') == 'overload_refusal' and (row.get('scenario') not in ('ramp', 'spike') or row.get('httpStatus') != 429 or row.get('orderId')):
+            errors.append('invalid_overload_evidence')
     payments = evidence.get('payments', [])
     reservations = evidence.get('reservations', [])
     inventory = evidence.get('inventory', [])
@@ -45,7 +52,7 @@ def verify(ledger, evidence):
             errors.append(f'order_status_mismatch:{oid}')
         if row.get('outcome') == 'confirmed' and order['status'] != 'CONFIRMED':
             errors.append(f'confirmed_order_changed:{oid}')
-        if row.get('outcome') == 'expected_contention' and order['status'] != 'FAILED':
+        if row.get('outcome') == 'expected_contention' and (order['status'] != 'FAILED' or order.get('failure_code') != 'SEATS_UNAVAILABLE'):
             errors.append(f'contention_outcome_changed:{oid}')
         if order['status'] not in ('CONFIRMED', 'FAILED', 'CANCELLED'):
             errors.append(f'unresolved_order:{oid}')
