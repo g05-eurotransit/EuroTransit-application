@@ -7,7 +7,7 @@ import org.springframework.http.HttpStatus
  *
  * Use the frozen status mapping: 400 malformed, 401 unauthenticated, 403 unauthorized,
  * 404 missing/not visible, 409 idempotency or state conflict, 422 invalid business
- * action, 503 dependency unavailable or circuit open.
+ * action, 429 bounded overload refusal, 503 dependency unavailable or circuit open.
  */
 class ApiException(
     val status: HttpStatus,

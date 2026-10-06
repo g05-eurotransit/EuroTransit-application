@@ -45,6 +45,12 @@ spring:
           keycloak:
             token-uri: ${ORDERS_SERVICE_TOKEN_URI:http://localhost:8081/realms/eurotransit/protocol/openid-connect/token}
   r2dbc:
+    pool:
+      enabled: true
+      initial-size: 0
+      max-size: 10
+      max-acquire-time: 1s
+      max-create-connection-time: 2s
     url: r2dbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:eurotransit}
     username: ${DB_USER:eurotransit}
     password: ${DB_PASSWORD:password}
@@ -90,6 +96,7 @@ management:
       percentiles-histogram:
         http.server.requests: true
         orders.checkout.duration: true
+        orders.checkout.e2e.duration: true
   tracing:
     sampling:
       probability: 1.0
@@ -117,3 +124,10 @@ eurotransit:
     # collision because EUROTRANSIT_SERVICES_CATALOG_URL points at http://catalog:8080.
     catalog:
       url: http://localhost:8081
+
+# Cap is opt-in until all Orders replicas support admission; never increase for a load test.
+orders:
+  admission:
+    max-outstanding: ${ORDERS_ADMISSION_MAX_OUTSTANDING:0}
+    max-concurrent: ${ORDERS_ADMISSION_MAX_CONCURRENT:8}
+    lock-timeout-ms: ${ORDERS_ADMISSION_LOCK_TIMEOUT_MS:100}

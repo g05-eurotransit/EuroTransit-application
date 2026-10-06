@@ -24,7 +24,9 @@ class GlobalErrorHandler {
         } else {
             log.info("Request rejected: {} {}", ex.code, ex.message)
         }
-        return ResponseEntity.status(ex.status).body(body)
+        return ResponseEntity.status(ex.status)
+            .also { if (ex.status == HttpStatus.TOO_MANY_REQUESTS) it.header("Retry-After", "1") }
+            .body(body)
     }
 
     @ExceptionHandler(ResponseStatusException::class)

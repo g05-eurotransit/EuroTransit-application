@@ -22,7 +22,8 @@ import org.springframework.kafka.listener.ErrorHandlingUtils
 import org.springframework.kafka.listener.RetryListener
 import org.springframework.util.backoff.BackOff
 import org.springframework.util.backoff.ExponentialBackOff
-import org.springframework.util.backoff.FixedBackOff
+import org.springframework.util.backoff.BackOffExecution
+import java.util.concurrent.ThreadLocalRandom
 
 /**
  * Wraps the dead-letter recoverer so the pod that gives up on a delivery counts it, once the dead
@@ -170,7 +171,16 @@ class KafkaConfiguration {
     ): DefaultErrorHandler {
         registerExhaustedSeries(meterRegistry)
         val recoverer = countingRecoverer(DeadLetterPublishingRecoverer(kafkaTemplate), meterRegistry)
-        return DefaultErrorHandler(recoverer, FixedBackOff(1_000L, 3L)).apply {
+        return DefaultErrorHandler(recoverer, BackOff {
+            object : BackOffExecution {
+                private var retries = 0
+                override fun nextBackOff(): Long {
+                    if (retries >= 3) return BackOffExecution.STOP
+                    val base = 1000L shl retries++
+                    return ThreadLocalRandom.current().nextLong(base / 2, base + base / 2 + 1)
+                }
+            }
+        }).apply {
             addNotRetryableExceptions(PoisonEventException::class.java)
         }
     }

@@ -76,6 +76,7 @@ class CheckoutOrchestrator(
     private val meterRegistry: MeterRegistry,
     private val txOperator: TransactionalOperator,
     private val orderOutbox: OrderOutbox,
+    private val admission: CheckoutAdmission? = null,
 ) {
     private val logger = LoggerFactory.getLogger(CheckoutOrchestrator::class.java)
 
@@ -216,6 +217,16 @@ class CheckoutOrchestrator(
             return replayed
         }
 
+        val fresh: suspend () -> CheckoutResponse = {
+            acceptFresh(request, idempotencyKey, userId, recipientEmail, correlationId, fingerprint)
+        }
+        return admission?.withSlot(fresh) ?: fresh()
+    }
+
+    private suspend fun acceptFresh(
+        request: CheckoutRequest, idempotencyKey: String, userId: String,
+        recipientEmail: String?, correlationId: String, fingerprint: String,
+    ): CheckoutResponse {
         // 2. Resolve the offer against Catalog, which is what makes the amount below trustworthy
         //    (issue #93). Deliberately after the idempotency check: a replay must return the stored
         //    result from the original decision, and re-resolving would make an accepted order
@@ -254,7 +265,7 @@ class CheckoutOrchestrator(
         //    order/idempotency and order/Kafka dual-write). Debezium relays the outbox row.
         val response = CheckoutResponse(orderId, OrderStatus.ACCEPTED)
         val responseBody = objectMapper.writeValueAsString(response)
-        txOperator.executeAndAwait {
+        val persist: suspend () -> CheckoutResponse = {
             orderService.saveOrder(order)
             orderService.saveIdempotentRequest(idempotencyKey, responseBody, userId, "checkout", fingerprint)
             outboxEventRepository.save(
@@ -263,12 +274,28 @@ class CheckoutOrchestrator(
                     OrderPlacedEvent(correlationId = correlationId, orderId = orderId, principalId = userId),
                 )
             )
+            response
         }
 
+        val admitted = if (admission != null) admission.admit(
+            replay = {
+                orderService.findIdempotentRequest(idempotencyKey)?.let { stored ->
+                    if (stored.requestFingerprint != null && stored.requestFingerprint != fingerprint) {
+                        throw ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT", "Idempotency key was reused with a different request")
+                    }
+                    meterRegistry.counter("orders.checkout.idempotent_replay").increment()
+                    objectMapper.readValue(stored.responseBody, CheckoutResponse::class.java)
+                }
+            }, persist = persist,
+        ) else txOperator.executeAndAwait { persist() }
+
         MoneyPathAudit.record(
-            MoneyPathAudit.Action.CHECKOUT, MoneyPathAudit.Outcome.ACCEPTED, userId, orderId, correlationId,
+            MoneyPathAudit.Action.CHECKOUT,
+            if (admitted.orderId == orderId) MoneyPathAudit.Outcome.ACCEPTED else MoneyPathAudit.Outcome.REPLAYED,
+            userId, admitted.orderId, correlationId,
         )
-        return response
+        return admitted
+
     }
 
     /**

@@ -32,3 +32,14 @@ compose-down:
 
 customer-token:
     @./scripts/local-customer-token.sh
+
+# Environment, finite fixture manifest and credentials must be supplied by the caller.
+load-checkout:
+    python3 load-tests/run.py
+
+load-checkout-verify ledger evidence output:
+    python3 load-tests/verify.py --ledger '{{ledger}}' --evidence '{{evidence}}' --output '{{output}}'
+
+load-checkout-unit:
+    node --test load-tests/tests/*.test.mjs
+    python3 -m unittest discover -s load-tests/tests -p 'test_*.py'
