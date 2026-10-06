@@ -97,14 +97,15 @@ export function SeatSelectionPage() {
     );
   }
 
-  const total = offer.price * (selectedSeats.length || 0);
+  // Multiply integer cents so floating-point tails never reach Orders' decimal price check.
+  const total = (Math.round(offer.price * 100) * selectedSeats.length) / 100;
 
   function continueToCheckout() {
     navigate("/checkout", {
       state: {
         ...offer,
         seats: selectedSeats,
-        totalAmount: offer.price * selectedSeats.length,
+        totalAmount: total,
       },
     });
   }
