@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { Alert, Badge, Card, Spinner } from "react-bootstrap";
+import { Alert, Badge, Button, Card, Spinner } from "react-bootstrap";
 import { getOrder, isTerminal, type OrderStatus, type OrderView } from "../api/orders";
 import { getRoute, type Route } from "../api/catalog";
 import { ApiError } from "../api/client";
@@ -24,6 +24,29 @@ const FAILURE_COPY: Record<string, string> = {
 };
 const GENERIC_FAILURE_COPY = "This order could not be completed. Please try again.";
 
+const HOLD_GRACE_MS = 10_000;
+const HOLD_MAX_MS = 10 * 60_000;
+
+type PollStopReason = "hold-expired" | "no-progress";
+
+function pollStopReason(order: OrderView): PollStopReason | null {
+  if (order.reservationExpiresAt) {
+    const deadline = new Date(order.reservationExpiresAt).getTime();
+    return Date.now() > deadline + HOLD_GRACE_MS ? "hold-expired" : null;
+  }
+  const bound = new Date(order.createdAt).getTime() + HOLD_MAX_MS;
+  return Date.now() > bound + HOLD_GRACE_MS ? "no-progress" : null;
+}
+
+const POLL_STOPPED_COPY: Record<PollStopReason, string> = {
+  "hold-expired":
+    "The seat hold for this order has expired, so this page will no longer update on its own. " +
+    "The order may still be resolving — refresh to check its latest status.",
+  "no-progress":
+    "This order has not progressed and its seat hold can no longer be live, so this page will no " +
+    "longer update on its own. The order may still be resolving — refresh to check its latest status.",
+};
+
 const STATUS_VARIANT: Record<OrderStatus, string> = {
   CONFIRMED: "success",
   FAILED: "danger",
@@ -42,12 +65,15 @@ export function OrderStatusPage() {
   const [error, setError] = useState<string | null>(null);
   const [route, setRoute] = useState<Route | null>(null);
   const [lastKnownStepIndex, setLastKnownStepIndex] = useState(0);
+  const [stopReason, setStopReason] = useState<PollStopReason | null>(null);
+  const [refreshNonce, setRefreshNonce] = useState(0);
 
   useEffect(() => {
     if (!orderId) return;
     let stop = false;
     const ac = new AbortController();
     setLastKnownStepIndex(0); // new orderId: this session hasn't observed anything about it yet
+    setStopReason(null);
 
     async function poll() {
       while (!stop) {
@@ -58,6 +84,11 @@ export function OrderStatusPage() {
           const idx = HAPPY_PATH.findIndex((s) => s.status === o.status);
           if (idx >= 0) setLastKnownStepIndex((prev) => Math.max(prev, idx));
           if (isTerminal(o.status) || o.status === "COMPENSATING") return;
+          const reason = pollStopReason(o);
+          if (reason) {
+            setStopReason(reason);
+            return;
+          }
         } catch (e) {
           if (e instanceof ApiError && e.kind === "network") return; // aborted
           if (e instanceof ApiError && e.kind === "not_found") {
@@ -75,7 +106,7 @@ export function OrderStatusPage() {
       stop = true;
       ac.abort();
     };
-  }, [orderId]);
+  }, [orderId, refreshNonce]);
 
   useEffect(() => {
     if (!order) return;
@@ -88,7 +119,7 @@ export function OrderStatusPage() {
 
   const countdown = useCountdown(
     order?.reservationExpiresAt ?? null,
-    !!order && !isTerminal(order.status),
+    !!order && !isTerminal(order.status) && !stopReason,
   );
 
   if (error) return <p className="text-danger">{error}</p>;
@@ -108,7 +139,7 @@ export function OrderStatusPage() {
               {countdown && (
                 <div className="bg-primary text-white rounded-3 px-3 py-2 text-center">
                   <div className="text-uppercase" style={{ fontSize: "0.6rem", letterSpacing: "0.08em" }}>
-                    Expires in
+                    Hold expires in
                   </div>
                   <div className="fw-bold fs-5 lh-1">{countdown}</div>
                 </div>
@@ -141,10 +172,29 @@ export function OrderStatusPage() {
             </div>
           </div>
 
-          {!isTerminal(order.status) && order.status !== "COMPENSATING" && (
+          {!isTerminal(order.status) && order.status !== "COMPENSATING" && !stopReason && (
             <div className="text-secondary-emphasis d-flex align-items-center gap-2">
               <Spinner animation="border" size="sm" /> Refreshing…
             </div>
+          )}
+          {!isTerminal(order.status) && order.status !== "COMPENSATING" && stopReason && (
+            <Alert variant="warning" className="mb-0">
+              <div className="d-flex align-items-start gap-2 mb-2">
+                <i className="bi bi-clock-history fs-5" aria-hidden="true" />
+                <div>{POLL_STOPPED_COPY[stopReason]}</div>
+              </div>
+              <Button
+                variant="outline-dark"
+                size="sm"
+                onClick={() => {
+                  setStopReason(null);
+                  setRefreshNonce((n) => n + 1);
+                }}
+              >
+                <i className="bi bi-arrow-clockwise me-2" aria-hidden="true" />
+                Refresh
+              </Button>
+            </Alert>
           )}
           {order.status === "COMPENSATING" && (
             <Alert variant="accent" className="d-flex align-items-center gap-2 mb-0">
