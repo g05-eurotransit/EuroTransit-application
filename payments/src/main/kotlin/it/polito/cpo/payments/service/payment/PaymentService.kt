@@ -184,20 +184,26 @@ class PaymentService(
             currency = authorization.currency,
             status = refundStatus.name,
             providerReference = result.refundReference,
-            idempotencyKey = idempotencyKey,
+            idempotencyKey = if (result.success) idempotencyKey else null,
             reason = reason.name
         ).apply { setAsNew(true) }
 
         val response = it.polito.cpo.payments.dto.PaymentRefundResponse(refundStatus, result.refundReference, result.errorCode)
-        val idempotencyRecord = IdempotencyRecord(
-            idempotencyKey = idempotencyKey,
-            operation = "refund",
-            principalId = authorization.principalId,
-            requestFingerprint = fingerprint,
-            responseCode = if (result.success) 200 else 422,
-            responseBody = objectMapper.writeValueAsString(response),
-            createdAt = LocalDateTime.now()
-        ).apply { setAsNew(true) }
+        // Only a success is settled: caching a decline replays it forever under the key the caller
+        // is told to retry with. authorize() caches declines on purpose — different question.
+        val idempotencyRecord = if (result.success) {
+            IdempotencyRecord(
+                idempotencyKey = idempotencyKey,
+                operation = "refund",
+                principalId = authorization.principalId,
+                requestFingerprint = fingerprint,
+                responseCode = 200,
+                responseBody = objectMapper.writeValueAsString(response),
+                createdAt = LocalDateTime.now()
+            ).apply { setAsNew(true) }
+        } else {
+            null
+        }
 
         // 6. Written as an outbox row (below), same as authorize() above.
         val eventType = if (result.success) "payment-refunded" else "payment-refund-failed"
@@ -217,7 +223,7 @@ class PaymentService(
 
         // 4+5+6. Idempotency record first: payment_refunds.idempotency_key has a FK to it.
         txOperator.executeAndAwait {
-            idempotencyRepository.save(idempotencyRecord)
+            idempotencyRecord?.let { idempotencyRepository.save(it) }
             paymentRefundRepository.save(paymentRefund)
             outboxEventRepository.save(
                 paymentOutboxRow(objectMapper, "PaymentRefund", orderId, eventType, event)

@@ -17,7 +17,8 @@ data class PaymentRefund(
     val currency: String,
     val status: String,
     val providerReference: String?,
-    val idempotencyKey: String,
+    // Null on a decline: no idempotency record is written for one, and this has a FK to that table.
+    val idempotencyKey: String?,
     val reason: String, // "COMPENSATION" | "COMMERCIAL" | "UNKNOWN"
     val createdAt: LocalDateTime = LocalDateTime.now(),
     val updatedAt: LocalDateTime = LocalDateTime.now()

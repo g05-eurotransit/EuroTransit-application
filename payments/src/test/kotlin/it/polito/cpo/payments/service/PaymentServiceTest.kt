@@ -94,6 +94,66 @@ class PaymentServiceTest {
     }
 
     @Test
+    fun `refund - a declined refund is not cached, so an identical retry is a real attempt`() = runTest {
+        paymentAuthorizationRepository.saved.add(
+            PaymentAuthorization(
+                orderId = "order-123",
+                principalId = "user1",
+                amount = BigDecimal.TEN,
+                currency = "EUR",
+                status = PaymentAuthorization.STATUS_AUTHORIZED,
+                providerReference = "ch_123",
+                idempotencyKey = "key-123"
+            )
+        )
+        providerAdapter.refundSucceeds = false
+
+        val first = paymentService.refund("order-123", BigDecimal.TEN, "pay-refund-order-123")
+        val second = paymentService.refund("order-123", BigDecimal.TEN, "pay-refund-order-123")
+
+        assertEquals(IPaymentService.RefundStatus.FAILED, first.status)
+        assertEquals(IPaymentService.RefundStatus.FAILED, second.status)
+        // The point: the retry reached the provider instead of replaying the decline.
+        assertEquals(2, providerAdapter.refundCalls)
+        assertEquals(0, idempotencyRepository.saved.size)
+        // Both attempts on record, keyless so the FK holds.
+        assertEquals(2, paymentRefundRepository.saved.size)
+        org.junit.jupiter.api.Assertions.assertTrue(paymentRefundRepository.saved.all { it.idempotencyKey == null })
+    }
+
+    @Test
+    fun `refund - a successful refund is still replayed rather than refunding twice`() = runTest {
+        // The property the key exists for, which the fix must not cost us.
+        org.mockito.Mockito.`when`(
+            objectMapper.readValue(
+                org.mockito.Mockito.anyString(),
+                org.mockito.Mockito.eq(it.polito.cpo.payments.dto.PaymentRefundResponse::class.java)
+            )
+        ).thenReturn(
+            it.polito.cpo.payments.dto.PaymentRefundResponse(IPaymentService.RefundStatus.REFUNDED, "re_123", null)
+        )
+        paymentAuthorizationRepository.saved.add(
+            PaymentAuthorization(
+                orderId = "order-123",
+                principalId = "user1",
+                amount = BigDecimal.TEN,
+                currency = "EUR",
+                status = PaymentAuthorization.STATUS_AUTHORIZED,
+                providerReference = "ch_123",
+                idempotencyKey = "key-123"
+            )
+        )
+
+        paymentService.refund("order-123", BigDecimal.TEN, "pay-refund-order-123")
+        val replay = paymentService.refund("order-123", BigDecimal.TEN, "pay-refund-order-123")
+
+        assertEquals(IPaymentService.RefundStatus.REFUNDED, replay.status)
+        assertEquals(1, providerAdapter.refundCalls)
+        assertEquals(1, paymentRefundRepository.saved.size)
+        assertEquals(1, idempotencyRepository.saved.size)
+    }
+
+    @Test
     fun `refund - classifies the two idempotency namespaces and persists the reason`() = runTest {
         val auth = PaymentAuthorization(
             orderId = "order-123",
@@ -234,10 +294,17 @@ class PaymentServiceTest {
     }
 
     class FakePaymentProvider : IPaymentProvider {
+        var refundSucceeds = true
+        var refundCalls = 0
+
         override suspend fun authorize(amount: BigDecimal, currency: String, token: String, idempotencyKey: String) =
             ProviderAuthorizationResult(true, "ch_123", null)
-        override suspend fun refund(ref: String, amount: BigDecimal?, idempotencyKey: String) =
-            ProviderRefundResult(true, "re_123", null)
+
+        override suspend fun refund(ref: String, amount: BigDecimal?, idempotencyKey: String): ProviderRefundResult {
+            refundCalls++
+            return if (refundSucceeds) ProviderRefundResult(true, "re_123", null)
+            else ProviderRefundResult(false, null, "CARD_DECLINED")
+        }
     }
 
     // A minimal proxy that implements the Spring Data repository interface by throwing exceptions 
