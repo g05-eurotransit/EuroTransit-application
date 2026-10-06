@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { Alert, Badge, Button, Card, Spinner } from "react-bootstrap";
+import { Alert, Badge, Button, Card } from "react-bootstrap";
 import { getOrder, isTerminal, type OrderStatus, type OrderView } from "../api/orders";
 import { getRoute, type Route } from "../api/catalog";
 import { ApiError } from "../api/client";
@@ -25,17 +25,19 @@ const FAILURE_COPY: Record<string, string> = {
 const GENERIC_FAILURE_COPY = "This order could not be completed. Please try again.";
 
 const HOLD_GRACE_MS = 10_000;
-const HOLD_MAX_MS = 10 * 60_000;
+// Elapsed on the client's own clock, never against order.createdAt: that field is a LocalDateTime,
+// so it is serialized with no offset and `new Date()` reads it as LOCAL time — east of UTC it lands
+// in the past and this fires on the very first poll.
+const NO_PROGRESS_MS = 10 * 60_000;
 
 type PollStopReason = "hold-expired" | "no-progress";
 
-function pollStopReason(order: OrderView): PollStopReason | null {
+function pollStopReason(order: OrderView, watchingSinceMs: number): PollStopReason | null {
   if (order.reservationExpiresAt) {
     const deadline = new Date(order.reservationExpiresAt).getTime();
     return Date.now() > deadline + HOLD_GRACE_MS ? "hold-expired" : null;
   }
-  const bound = new Date(order.createdAt).getTime() + HOLD_MAX_MS;
-  return Date.now() > bound + HOLD_GRACE_MS ? "no-progress" : null;
+  return Date.now() - watchingSinceMs > NO_PROGRESS_MS ? "no-progress" : null;
 }
 
 const POLL_STOPPED_COPY: Record<PollStopReason, string> = {
@@ -43,8 +45,8 @@ const POLL_STOPPED_COPY: Record<PollStopReason, string> = {
     "The seat hold for this order has expired, so this page will no longer update on its own. " +
     "The order may still be resolving — refresh to check its latest status.",
   "no-progress":
-    "This order has not progressed and its seat hold can no longer be live, so this page will no " +
-    "longer update on its own. The order may still be resolving — refresh to check its latest status.",
+    "This order has not progressed since this page was opened, so this page will no longer update " +
+    "on its own. The order may still be resolving — refresh to check its latest status.",
 };
 
 const STATUS_VARIANT: Record<OrderStatus, string> = {
@@ -72,6 +74,7 @@ export function OrderStatusPage() {
     if (!orderId) return;
     let stop = false;
     const ac = new AbortController();
+    const watchingSince = Date.now();
     setLastKnownStepIndex(0); // new orderId: this session hasn't observed anything about it yet
     setStopReason(null);
 
@@ -84,7 +87,7 @@ export function OrderStatusPage() {
           const idx = HAPPY_PATH.findIndex((s) => s.status === o.status);
           if (idx >= 0) setLastKnownStepIndex((prev) => Math.max(prev, idx));
           if (isTerminal(o.status) || o.status === "COMPENSATING") return;
-          const reason = pollStopReason(o);
+          const reason = pollStopReason(o, watchingSince);
           if (reason) {
             setStopReason(reason);
             return;
@@ -172,11 +175,6 @@ export function OrderStatusPage() {
             </div>
           </div>
 
-          {!isTerminal(order.status) && order.status !== "COMPENSATING" && !stopReason && (
-            <div className="text-secondary-emphasis d-flex align-items-center gap-2">
-              <Spinner animation="border" size="sm" /> Refreshing…
-            </div>
-          )}
           {!isTerminal(order.status) && order.status !== "COMPENSATING" && stopReason && (
             <Alert variant="warning" className="mb-0">
               <div className="d-flex align-items-start gap-2 mb-2">
