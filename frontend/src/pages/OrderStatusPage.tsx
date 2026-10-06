@@ -68,7 +68,7 @@ export function OrderStatusPage() {
   const [route, setRoute] = useState<Route | null>(null);
   const [lastKnownStepIndex, setLastKnownStepIndex] = useState(0);
   const [stopReason, setStopReason] = useState<PollStopReason | null>(null);
-  const [refreshNonce, setRefreshNonce] = useState(0);
+  const [rechecking, setRechecking] = useState(false);
 
   useEffect(() => {
     if (!orderId) return;
@@ -109,7 +109,7 @@ export function OrderStatusPage() {
       stop = true;
       ac.abort();
     };
-  }, [orderId, refreshNonce]);
+  }, [orderId]);
 
   useEffect(() => {
     if (!order) return;
@@ -119,6 +119,25 @@ export function OrderStatusPage() {
       .catch(() => {}); // keep showing the raw routeId — see the comment on `route` above
     return () => ac.abort();
   }, [order?.routeId]);
+
+  async function recheck() {
+    if (!orderId || rechecking) return;
+    setRechecking(true);
+    try {
+      const o = await getOrder(orderId);
+      setOrder(o);
+      if (isTerminal(o.status) || o.status === "COMPENSATING") setStopReason(null);
+    } catch (e) {
+      if (e instanceof ApiError && e.kind === "network") return; // aborted
+      if (e instanceof ApiError && e.kind === "not_found") {
+        setError("Order not found or not visible to you.");
+        return;
+      }
+      setError(e instanceof Error ? e.message : "Failed to load order");
+    } finally {
+      setRechecking(false);
+    }
+  }
 
   const countdown = useCountdown(
     order?.reservationExpiresAt ?? null,
@@ -184,10 +203,8 @@ export function OrderStatusPage() {
               <Button
                 variant="outline-dark"
                 size="sm"
-                onClick={() => {
-                  setStopReason(null);
-                  setRefreshNonce((n) => n + 1);
-                }}
+                disabled={rechecking}
+                onClick={() => void recheck()}
               >
                 <i className="bi bi-arrow-clockwise me-2" aria-hidden="true" />
                 Refresh
