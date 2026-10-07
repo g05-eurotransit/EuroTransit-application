@@ -53,6 +53,14 @@ These cover the money-path states introduced by the synchronous Inventory confir
 | PoisonOrderEvent | `increase(orders_events_dlt_total{result="poison"}[10m]) > 0` | A record reached `order-placed-dlt` with a payload that cannot be parsed, so no incident could be attached to an order. |
 | DeadLetterUnknownOrder | `increase(orders_events_dlt_total{result="unknown_order"}[10m]) > 0` | A dead letter referenced an order id that does not exist: producer or data-retention problem. |
 
+**Two dead-letter counters, counted on different pods.** `orders_events_dlt_total{topic,result}` is
+incremented by the dead-letter *consumers*, which run in their own group (`orders-dlt`), so it lands on
+whichever pod reads the dead letter: right for the two alerts above, which do not care which pod.
+`orders_events_exhausted_total{topic,failure_class}` is incremented by the pod that **gave up** on the
+delivery, once the dead letter is published, with the same `failure_class` the incident gets. That is
+the one to filter by pod — the canary gate `canary-dead-letter-events` belongs on it, not on
+`orders_events_dlt_total` (step 5, F4).
+
 **Blocker:** none of these can fire yet. The Orders security chain authorizes only the
 health endpoints and the order APIs, then denies everything else, so
 `/actuator/prometheus` is not scrapable. Opening it is a Gateway/Security decision and
