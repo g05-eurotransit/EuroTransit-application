@@ -29,6 +29,7 @@ import it.polito.cpo.repository.ReconciliationRecordRepository
 import it.polito.cpo.controller.dtos.ResolveReconciliationRequest
 import it.polito.cpo.observability.ApiException
 import it.polito.cpo.service.CheckoutOrchestrator
+import it.polito.cpo.service.FailureClassifier
 import it.polito.cpo.service.ReconciliationOperationsService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
@@ -44,6 +45,7 @@ import org.springframework.context.annotation.Import
 import org.springframework.context.annotation.Primary
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.springframework.kafka.core.KafkaTemplate
+import org.springframework.kafka.listener.ListenerExecutionFailedException
 import org.springframework.kafka.support.KafkaHeaders
 import org.springframework.kafka.test.context.EmbeddedKafka
 import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder
@@ -486,6 +488,8 @@ class CheckoutPipelineIntegrationTest {
         val open = openRecords(response.orderId)
         assertEquals(1, open.size)
         assertEquals(ReconciliationKind.DELIVERY_EXHAUSTED.name, open.single().kind)
+        // Classified from the cause header, not the wrapper: a timeout is a dependency error.
+        assertEquals(FailureClassifier.DEPENDENCY_ERROR, open.single().failureClass)
         // The durable phase is what a later redrive resumes from, so the incident must not disturb it.
         assertEquals(OrderStatus.CONFIRMING_INVENTORY, orderRepository.findById(response.orderId)!!.status)
         assertEquals(OrderStatus.CONFIRMING_INVENTORY.name, open.single().orderState)
@@ -799,8 +803,12 @@ class CheckoutPipelineIntegrationTest {
     private fun consumedCount(): Double =
         meterRegistry.find("orders.events.consumed").counters().sumOf { it.count() }
 
-    /** Sends a record to the dead-letter topic with the headers the recoverer would have attached. */
-    private fun sendDeadLetter(orderId: UUID, exceptionFqcn: String, message: String) {
+    /**
+     * Sends a record to the dead-letter topic with the headers the recoverer actually attaches: the
+     * container's wrapper as the exception, and what the listener threw as the cause
+     * (`DeadLetterHeadersTest` pins that shape against the real recoverer).
+     */
+    private fun sendDeadLetter(orderId: UUID, causeFqcn: String, message: String) {
         val event = OrderPlacedEvent(correlationId = "corr-dlt", orderId = orderId, principalId = "user-1")
         val record = ProducerRecord<String, String>(
             "order-placed-dlt",
@@ -808,7 +816,8 @@ class CheckoutPipelineIntegrationTest {
             objectMapper.writeValueAsString(event),
         )
         record.headers().add(KafkaHeaders.DLT_ORIGINAL_TOPIC, "order-placed".toByteArray())
-        record.headers().add(KafkaHeaders.DLT_EXCEPTION_FQCN, exceptionFqcn.toByteArray())
+        record.headers().add(KafkaHeaders.DLT_EXCEPTION_FQCN, ListenerExecutionFailedException::class.java.name.toByteArray())
+        record.headers().add(KafkaHeaders.DLT_EXCEPTION_CAUSE_FQCN, causeFqcn.toByteArray())
         record.headers().add(KafkaHeaders.DLT_EXCEPTION_MESSAGE, message.toByteArray())
         kafkaTemplate.send(record)
     }

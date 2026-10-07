@@ -38,8 +38,17 @@ object FailureClassifier {
      * Mapped through a closed set rather than passing the class name through: the exception type comes
      * from a header a producer controls, so using it directly would make the metric cardinality
      * unbounded and the column unqueryable.
+     *
+     * Classify the **cause** when there is one. The listener container wraps whatever the listener
+     * threw in a `ListenerExecutionFailedException` before the recoverer sees it, so the recoverer's
+     * `DLT_EXCEPTION_FQCN` is always that wrapper and the class that says what went wrong is in
+     * `DLT_EXCEPTION_CAUSE_FQCN`. Reading only the first labelled every incident `unknown`
+     * (`DeadLetterHeadersTest`).
      */
-    fun forDeadLetter(exceptionFqcn: String?): String = when {
+    fun forDeadLetter(exceptionFqcn: String?, causeFqcn: String? = null): String =
+        classifyDeadLetterClass(causeFqcn ?: exceptionFqcn)
+
+    private fun classifyDeadLetterClass(exceptionFqcn: String?): String = when {
         exceptionFqcn == null -> UNKNOWN
         exceptionFqcn.endsWith("PoisonEventException") -> POISON_PAYLOAD
         exceptionFqcn.endsWith("TimeoutException") -> DEPENDENCY_ERROR
@@ -48,6 +57,9 @@ object FailureClassifier {
         // A saturated bulkhead refuses with BulkheadFullException (maxWaitDuration = ZERO): the same
         // "dependency not available right now" as an open breaker, not an unexplained failure.
         exceptionFqcn.contains("BulkheadFull") -> DEPENDENCY_ERROR
+        // The service token could not be obtained from Keycloak (an error response; a connection
+        // failure already surfaces as a WebClient exception). The call never reached its target.
+        exceptionFqcn.contains("ClientAuthorization") -> DEPENDENCY_ERROR
         exceptionFqcn.contains("R2dbc") || exceptionFqcn.contains("DataAccess") -> DEPENDENCY_ERROR
         else -> UNKNOWN
     }

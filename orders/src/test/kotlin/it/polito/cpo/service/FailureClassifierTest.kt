@@ -6,6 +6,8 @@ import it.polito.cpo.event.PoisonEventException
 import java.util.concurrent.TimeoutException
 import kotlin.test.assertEquals
 import org.junit.jupiter.api.Test
+import org.springframework.kafka.listener.ListenerExecutionFailedException
+import org.springframework.security.oauth2.client.ClientAuthorizationException
 import org.springframework.web.reactive.function.client.WebClientRequestException
 
 /**
@@ -38,6 +40,30 @@ class FailureClassifierTest {
         assertEquals(
             FailureClassifier.DEPENDENCY_ERROR,
             FailureClassifier.forDeadLetter(TimeoutException::class.java.name),
+        )
+    }
+
+    @Test
+    fun `a service token Keycloak refused to issue is a dependency error`() {
+        assertEquals(
+            FailureClassifier.DEPENDENCY_ERROR,
+            FailureClassifier.forDeadLetter(ClientAuthorizationException::class.java.name),
+        )
+    }
+
+    @Test
+    fun `the cause is classified, not the container's wrapper`() {
+        assertEquals(
+            FailureClassifier.DEPENDENCY_ERROR,
+            FailureClassifier.forDeadLetter(
+                ListenerExecutionFailedException::class.java.name,
+                BulkheadFullException::class.java.name,
+            ),
+        )
+        // No cause header (a record not published by the recoverer): fall back to the exception.
+        assertEquals(
+            FailureClassifier.DEPENDENCY_ERROR,
+            FailureClassifier.forDeadLetter(TimeoutException::class.java.name, null),
         )
     }
 
