@@ -32,6 +32,11 @@ import java.util.UUID
  * (`PropagatingSenderTracingObservationHandler`), the same mechanism Spring Kafka's own producer uses.
  * With tracing off nothing writes it, the column stays null, and the consumer starts a trace of its
  * own — exactly the behaviour before.
+ *
+ * Two things the span is not. It marks the row being built, and ends before the transaction commits:
+ * if that transaction rolls back, the trace still shows a publish for an event that never left. And
+ * its duration is near zero, so the `orders.outbox.publish` timer Micrometer derives from it is a
+ * count of rows written per event type, not a latency.
  */
 @Component
 class OrderOutbox(
@@ -65,14 +70,17 @@ class OrderOutbox(
     }
 
     /**
-     * The observation this publish belongs to. WebClient-style lookup first — the Reactor context the
-     * coroutine carries, which `executeAndAwait` hands into the transaction — then the thread, for a
-     * caller whose context does not carry the key.
+     * The observation this publish belongs to, read where WebClient reads its parent: the Reactor
+     * context the coroutine carries. It is there on every path that writes a row — WebFlux puts the
+     * request's observation in it, the listeners put the consumer's (`pipelineReactorContext`), and
+     * `executeAndAwait` hands the caller's context into the transaction.
+     *
+     * Deliberately no fallback to the observation on the thread: under unconfined dispatch that thread
+     * can be a Netty or R2DBC one with an unrelated scope open, and a wrong parent is worse than none.
      */
     private suspend fun currentObservation(): Observation? =
         currentCoroutineContext()[ReactorContext]?.context
             ?.getOrEmpty<Observation>(ObservationThreadLocalAccessor.KEY)?.orElse(null)
-            ?: observationRegistry.currentObservation
 
     private companion object {
         const val OBSERVATION_NAME = "orders.outbox.publish"

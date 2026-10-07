@@ -89,7 +89,8 @@ The other four already set it.
 listeners the pipeline now runs with the consumer's observation (break A), and every outbox row
 carries the `traceparent` of an `<event> publish` span that the Orders connector places in a record
 header (break B), so each consumer is a child of the span that wrote its event. Measured on compose,
-one checkout to `CONFIRMED` is a single trace of 36 spans across all six services:
+one checkout to `CONFIRMED` is a single trace of 36 spans across Traefik and the five services it
+touches:
 
 ```
 traefik POST → orders POST /api/orders
@@ -105,6 +106,11 @@ traefik POST → orders POST /api/orders
 A refund is likewise one trace: `POST /api/orders/{orderId}/refund` → `refund-requested publish` →
 `refund-requested process` → Payments refund → Inventory seat return. A row written with tracing off
 relays a null header; its consumer starts a new trace and nothing fails.
+
+Two shapes worth knowing before reading one in Tempo. A redelivered record — a Kafka retry or a
+duplicate relay — is another `process` span under the same `publish` span, so retries are visible
+as siblings. A **redrive** writes a new row from the operator's request, so the resumed pipeline
+lives in the redrive's trace, not the original checkout's; `correlationId` links the two.
 
 **Still missing in the cluster.** The AKS Orders connector
 (`EuroTransit-configuration/platform/connectors/base/orders-outbox-connect.yaml`) does not yet place

@@ -70,15 +70,16 @@ class OrderOutboxTest {
     }
 
     @Test
-    fun `without the key in the Reactor context the observation on the thread is the parent`() {
-        val caller = Observation.start("http post /api/orders", registry)
+    fun `without the key in the Reactor context there is no parent, even with a scope open on the thread`() {
+        // The thread is not trusted: under unconfined dispatch it can carry an unrelated observation.
+        val unrelated = Observation.start("unrelated", registry)
 
-        caller.openScope().use {
+        unrelated.openScope().use {
             runBlocking { outbox.row("refund-requested", orderId, mapOf("orderId" to orderId.toString())) }
         }
-        caller.stop()
+        unrelated.stop()
 
-        assertSame(caller, publishes.single().parent)
+        assertNull(publishes.single().parent)
     }
 
     @Test
