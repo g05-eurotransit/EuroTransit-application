@@ -1,6 +1,8 @@
 package it.polito.cpo.config
 
+import io.micrometer.core.instrument.MeterRegistry
 import it.polito.cpo.event.PoisonEventException
+import it.polito.cpo.service.FailureClassifier
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.kafka.common.serialization.StringSerializer
@@ -12,9 +14,52 @@ import org.springframework.kafka.core.DefaultKafkaConsumerFactory
 import org.springframework.kafka.core.DefaultKafkaProducerFactory
 import org.springframework.kafka.core.KafkaTemplate
 import org.springframework.kafka.core.ProducerFactory
+import org.springframework.kafka.listener.ConsumerAwareRecordRecoverer
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer
 import org.springframework.kafka.listener.DefaultErrorHandler
+import org.springframework.kafka.listener.ErrorHandlingUtils
 import org.springframework.util.backoff.FixedBackOff
+
+/**
+ * Wraps the dead-letter recoverer so the pod that gives up on a delivery counts it, once the dead
+ * letter is actually published.
+ *
+ * Consumer-aware on purpose: the error handler passes the consumer to a recoverer that accepts one,
+ * and [DeadLetterPublishingRecoverer] uses it (partition checks, consumer-group header). A plain
+ * `ConsumerRecordRecoverer` wrapper would silently drop it.
+ *
+ * Counted after `accept` returns because `accept` throws when the publish fails
+ * (`failIfSendResultIsError` defaults to true): the record is then redelivered and recovered again,
+ * and counting first would count it twice.
+ */
+internal fun countingRecoverer(
+    deadLetters: ConsumerAwareRecordRecoverer,
+    meterRegistry: MeterRegistry,
+) = ConsumerAwareRecordRecoverer { record, consumer, exception ->
+    deadLetters.accept(record, consumer, exception)
+    countExhausted(meterRegistry, record.topic(), exception)
+}
+
+/**
+ * `orders.events.exhausted{topic,failure_class}`: a delivery this pod gave up on and dead-lettered.
+ *
+ * It exists beside `orders.events.dlt` because the two count different pods. `orders.events.dlt` is
+ * incremented by the dead-letter *consumers*, which run in their own group (`orders-dlt`), so it
+ * lands on whichever pod reads the dead letter — fine for the poison and unknown-order alerts, wrong
+ * for a canary gate filtered by pod hash, which needs the pod whose code failed (step 5, F4). This one
+ * is incremented where the delivery was abandoned.
+ *
+ * `failure_class` uses the same closed set as the incident, classified from the same cause the
+ * recoverer writes to `DLT_EXCEPTION_CAUSE_FQCN` ([ErrorHandlingUtils.findRootCause] unwraps only the
+ * container's wrappers). Two source topics times that set keeps the series count small.
+ */
+internal fun countExhausted(meterRegistry: MeterRegistry, topic: String, exception: Exception?) {
+    val failureClass = FailureClassifier.forDeadLetter(
+        exception?.javaClass?.name,
+        ErrorHandlingUtils.findRootCause(exception)?.javaClass?.name,
+    )
+    meterRegistry.counter("orders.events.exhausted", "topic", topic, "failure_class", failureClass).increment()
+}
 
 @Configuration
 class KafkaConfiguration {
@@ -50,10 +95,15 @@ class KafkaConfiguration {
      *
      * A [PoisonEventException] skips the retries. A payload that does not parse will never parse, so
      * three redeliveries a second apart only delay the record reaching an operator.
+     *
+     * Every dead letter published is counted here, on the pod that gave up ([countExhausted]).
      */
     @Bean
-    fun kafkaErrorHandler(kafkaTemplate: KafkaTemplate<String, String>): DefaultErrorHandler {
-        val recoverer = DeadLetterPublishingRecoverer(kafkaTemplate)
+    fun kafkaErrorHandler(
+        kafkaTemplate: KafkaTemplate<String, String>,
+        meterRegistry: MeterRegistry,
+    ): DefaultErrorHandler {
+        val recoverer = countingRecoverer(DeadLetterPublishingRecoverer(kafkaTemplate), meterRegistry)
         return DefaultErrorHandler(recoverer, FixedBackOff(1_000L, 3L)).apply {
             addNotRetryableExceptions(PoisonEventException::class.java)
         }

@@ -496,6 +496,7 @@ class CheckoutPipelineIntegrationTest {
     @Test
     fun `an unparseable order-placed payload reaches the dead-letter topic`() = runBlocking {
         val before = dltCount("poison")
+        val exhaustedBefore = exhaustedCount("order-placed", FailureClassifier.POISON_PAYLOAD)
         // Scoped to the delta, not to an absolute count: sibling tests in this shared context create
         // records of their own.
         val recordsBefore = reconciliationRepository.findAll().toList().size
@@ -507,6 +508,10 @@ class CheckoutPipelineIntegrationTest {
         awaitDltCount("poison", before + 1)
         // No order id means no incident can be attached to anything.
         assertEquals(recordsBefore, reconciliationRepository.findAll().toList().size)
+        // F4: the real error handler counted it where the delivery was abandoned, not where the DLT
+        // was read. The recoverer publishes before the DLT listener can see the record, so by now the
+        // count has landed.
+        assertEquals(exhaustedBefore + 1, exhaustedCount("order-placed", FailureClassifier.POISON_PAYLOAD))
     }
 
     @Test
@@ -864,6 +869,10 @@ class CheckoutPipelineIntegrationTest {
 
     private fun dltCount(result: String): Double =
         meterRegistry.find("orders.events.dlt").tag("result", result).counter()?.count() ?: 0.0
+
+    private fun exhaustedCount(topic: String, failureClass: String): Double =
+        meterRegistry.find("orders.events.exhausted").tags("topic", topic, "failure_class", failureClass)
+            .counter()?.count() ?: 0.0
 
     private suspend fun awaitDltCount(result: String, target: Double) = withTimeout(30_000) {
         while (dltCount(result) < target) delay(100)
