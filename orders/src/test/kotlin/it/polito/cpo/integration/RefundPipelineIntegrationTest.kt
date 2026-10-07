@@ -136,6 +136,8 @@ class RefundPipelineIntegrationTest {
         // Payments (200, no money moved) instead of performing this commercial refund (ADR-015).
         assertTrue(payment.refundIdempotencyKeys.none { it == "refund-$orderId" })
         assertTrue(inventory.refundedReservationIds.contains("res-$orderId"))
+        // #117 break A: the reversal ran with the Kafka consumer's observation as its parent.
+        assertEquals("KafkaRecordReceiverContext", payment.refundParentObservation[orderId])
     }
 
     @Test
@@ -370,12 +372,16 @@ class RefundPipelineIntegrationTest {
         val refundedOrderIds = CopyOnWriteArrayList<UUID>()
         val refundIdempotencyKeys = CopyOnWriteArrayList<String>()
 
+        /** orderId -> the observation type the reversal call would have been a child of. */
+        val refundParentObservation = ConcurrentHashMap<UUID, String>()
+
         override suspend fun authorizePayment(request: PaymentRequest, idempotencyKey: String, correlationId: String): AuthorizationOutcome =
             throw UnsupportedOperationException("not used by the refund pipeline")
 
         override suspend fun refund(orderId: UUID, idempotencyKey: String): ReversalOutcome {
             refundedOrderIds.add(orderId)
             refundIdempotencyKeys.add(idempotencyKey)
+            parentObservationContextType()?.let { refundParentObservation[orderId] = it }
             return ReversalOutcome.Reversed(providerReference = "prov-ref-it")
         }
     }

@@ -14,12 +14,12 @@ import tools.jackson.databind.ObjectMapper
 
 /**
  * Consumes `refund-requested` and drives the post-sale refund (ADR-015). Modelled directly on
- * [OrderPlacedEventListener] — same correlation-id and observation seeding into MDC and Reactor
- * context ([pipelineReactorContext]), same poison-versus-retryable distinction, same
- * `orders.events.consumed{topic,result}` counter — because the two consumers share every property
- * that matters for durability: at-least-once delivery, an offset committed only after processing, and
- * an unparseable payload classified non-retryable so it reaches the dead-letter topic immediately
- * instead of burning the retry budget on a certainty.
+ * [OrderPlacedEventListener] — same correlation id in the MDC and the Reactor context, same consumer
+ * observation in the Reactor context ([pipelineReactorContext]), same poison-versus-retryable
+ * distinction, same `orders.events.consumed{topic,result}` counter — because the two consumers share
+ * every property that matters for durability: at-least-once delivery, an offset committed only after
+ * processing, and an unparseable payload classified non-retryable so it reaches the dead-letter topic
+ * immediately instead of burning the retry budget on a certainty.
  *
  * A separate topic and a separate listener from `order-placed` on purpose (ADR-015): that pipeline's
  * consumer must keep treating `CONFIRMED` as terminal, so a redelivered `order-placed` never restarts

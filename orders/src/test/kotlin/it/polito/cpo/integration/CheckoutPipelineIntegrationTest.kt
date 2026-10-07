@@ -160,6 +160,8 @@ class CheckoutPipelineIntegrationTest {
         assertEquals(OrderStatus.CONFIRMED, order.status)
         assertTrue(payment.authorizedOrderIds.contains(response.orderId))
         assertFalse(inventory.releasedReservationIds.contains("res-${response.orderId}")) // no compensation
+        // #117 break A: the hold ran with the Kafka consumer's observation as its parent.
+        assertEquals("KafkaRecordReceiverContext", inventory.holdParentObservation[response.orderId])
     }
 
     @Test
@@ -901,6 +903,9 @@ class CheckoutPipelineIntegrationTest {
     class ControllableInventoryClient : InventoryClient {
         val reservedOrderIds = CopyOnWriteArrayList<UUID>()
 
+        /** orderId -> the observation type the hold call would have been a child of. */
+        val holdParentObservation = ConcurrentHashMap<UUID, String>()
+
         /** (routeId, travelDate, seat) triples held, i.e. what Inventory is keyed by. */
         val heldTriples = CopyOnWriteArrayList<Triple<String, LocalDate, String>>()
         val releasedReservationIds = ConcurrentHashMap.newKeySet<String>()
@@ -921,6 +926,7 @@ class CheckoutPipelineIntegrationTest {
             userId: String,
         ): HoldOutcome {
             reservedOrderIds.add(request.orderId)
+            parentObservationContextType()?.let { holdParentObservation[request.orderId] = it }
             request.seats.forEach { heldTriples.add(Triple(request.routeId, request.travelDate, it)) }
             return HoldOutcome.Held("res-${request.orderId}", OffsetDateTime.now().plusMinutes(10))
         }
