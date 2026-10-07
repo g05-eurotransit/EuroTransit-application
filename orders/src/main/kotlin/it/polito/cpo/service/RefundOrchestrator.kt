@@ -58,6 +58,7 @@ class RefundOrchestrator(
     private val objectMapper: ObjectMapper,
     private val meterRegistry: MeterRegistry,
     private val txOperator: TransactionalOperator,
+    private val orderOutbox: OrderOutbox,
 ) {
     private val logger = LoggerFactory.getLogger(RefundOrchestrator::class.java)
 
@@ -112,8 +113,8 @@ class RefundOrchestrator(
                     fingerprint,
                 )
                 outboxEventRepository.save(
-                    orderOutboxRow(
-                        objectMapper, "refund-requested", orderId,
+                    orderOutbox.row(
+                        "refund-requested", orderId,
                         RefundRequestedEvent(
                             correlationId = correlationId,
                             orderId = orderId,

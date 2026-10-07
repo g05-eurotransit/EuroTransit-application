@@ -48,6 +48,7 @@ class ReconciliationOperationsService(
     private val objectMapper: ObjectMapper,
     private val meterRegistry: MeterRegistry,
     private val txOperator: TransactionalOperator,
+    private val orderOutbox: OrderOutbox,
 ) {
     private val logger = LoggerFactory.getLogger(ReconciliationOperationsService::class.java)
 
@@ -154,7 +155,7 @@ class ReconciliationOperationsService(
                 OPERATION_REDRIVE,
                 fingerprint,
             )
-            outboxEventRepository.save(orderOutboxRow(objectMapper, outboxType, orderId, event))
+            outboxEventRepository.save(orderOutbox.row(outboxType, orderId, event))
             records.touchRedrive(orderId, correlationId)
         }
 

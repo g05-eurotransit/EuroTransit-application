@@ -75,6 +75,7 @@ class CheckoutOrchestrator(
     private val objectMapper: ObjectMapper,
     private val meterRegistry: MeterRegistry,
     private val txOperator: TransactionalOperator,
+    private val orderOutbox: OrderOutbox,
 ) {
     private val logger = LoggerFactory.getLogger(CheckoutOrchestrator::class.java)
 
@@ -856,7 +857,7 @@ class CheckoutOrchestrator(
      * conditions and none of them means the seats were taken, while the refusal that does mean it is
      * not a 409 at all. The message stays the authority on anything to do with money.
      */
-    private fun failureNotification(ctx: PipelineContext, code: CustomerFailureCode): OutboxEvent = outbox(
+    private suspend fun failureNotification(ctx: PipelineContext, code: CustomerFailureCode): OutboxEvent = outbox(
         "notification-requested", ctx.orderId,
         NotificationRequestedEvent(
             correlationId = ctx.correlationId,
@@ -873,8 +874,8 @@ class CheckoutOrchestrator(
         ),
     )
 
-    private fun outbox(type: String, orderId: UUID, event: Any): OutboxEvent =
-        orderOutboxRow(objectMapper, type, orderId, event)
+    private suspend fun outbox(type: String, orderId: UUID, event: Any): OutboxEvent =
+        orderOutbox.row(type, orderId, event)
 
     // Delivery address for the notification, captured at checkout from the JWT `email` claim. If the
     // token had no email, fall back to a placeholder and warn — the checkout must not fail for this.

@@ -21,6 +21,7 @@ import it.polito.cpo.contracts.inventory.ReservationRequest
 import it.polito.cpo.controller.dtos.CheckoutRequest
 import it.polito.cpo.model.Order
 import it.polito.cpo.model.OrderStatus
+import it.polito.cpo.model.OutboxEvent
 import it.polito.cpo.model.ReconciliationKind
 import it.polito.cpo.model.ReconciliationStatus
 import it.polito.cpo.repository.OrderRepository
@@ -38,6 +39,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.micrometer.tracing.test.autoconfigure.AutoConfigureTracing
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.context.annotation.Bean
@@ -45,6 +47,7 @@ import org.springframework.context.annotation.Import
 import org.springframework.context.annotation.Primary
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.springframework.kafka.core.KafkaTemplate
+import org.springframework.kafka.core.ProducerFactory
 import org.springframework.kafka.listener.ListenerExecutionFailedException
 import org.springframework.kafka.support.KafkaHeaders
 import org.springframework.kafka.test.context.EmbeddedKafka
@@ -91,7 +94,16 @@ import kotlin.test.assertTrue
  * bookkeeping is keyed by order id) so tests stay isolated despite the shared singleton beans and the
  * asynchronous consumer thread.
  */
-@SpringBootTest(properties = ["spring.kafka.bootstrap-servers=\${spring.embedded.kafka.brokers}"])
+@SpringBootTest(
+    properties = [
+        "spring.kafka.bootstrap-servers=\${spring.embedded.kafka.brokers}",
+        // Tracing on, export off: @AutoConfigureTracing re-enables the W3C propagators the test
+        // context otherwise disables (which left every outbox traceparent null), and this keeps the
+        // OTLP exporter from reaching for a collector that is not there.
+        "management.tracing.export.otlp.enabled=false",
+    ],
+)
+@AutoConfigureTracing
 @EmbeddedKafka(
     partitions = 1,
     topics = ["order-placed", "order-placed-dlt", "order-confirmed", "notification-requested"],
@@ -102,6 +114,9 @@ class CheckoutPipelineIntegrationTest {
 
     companion object {
         const val DECLINE_TOKEN = "DECLINE"
+
+        /** W3C trace context: version 00, 32-hex trace id, 16-hex span id, flags. */
+        val TRACEPARENT = Regex("^00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]$")
 
         /** A stable future date: the checkout guard rejects anything in the past. */
         val TRAVEL_DATE: LocalDate = LocalDate.now().plusDays(7)
@@ -140,6 +155,14 @@ class CheckoutPipelineIntegrationTest {
     @Autowired private lateinit var orderRepository: OrderRepository
     @Autowired private lateinit var outboxRepository: OutboxEventRepository
     @Autowired private lateinit var kafkaTemplate: KafkaTemplate<String, String>
+    @Autowired private lateinit var producerFactory: ProducerFactory<String, String>
+
+    /**
+     * Relays like Debezium does: no producer span of its own, and the row's `traceparent` copied into
+     * the record header. The application template has producer observation on, which would replace
+     * that header with a span of the relay's — something Debezium never adds.
+     */
+    private val relayTemplate by lazy { KafkaTemplate(producerFactory) }
     @Autowired private lateinit var inventory: ControllableInventoryClient
     @Autowired private lateinit var payment: ControllablePaymentClient
     @Autowired private lateinit var catalog: ControllableCatalogClient
@@ -162,6 +185,14 @@ class CheckoutPipelineIntegrationTest {
         assertFalse(inventory.releasedReservationIds.contains("res-${response.orderId}")) // no compensation
         // #117 break A: the hold ran with the Kafka consumer's observation as its parent.
         assertEquals("KafkaRecordReceiverContext", inventory.holdParentObservation[response.orderId])
+
+        // #117 break B: every row carries a W3C traceparent, and the rows the consumer wrote inside its
+        // transaction share the accept's trace — the header was read, and the context survived the
+        // transaction hop into executeAndAwait.
+        val rows = listOf("order-placed", "order-confirmed", "notification-requested")
+            .map { type -> outboxRows(response.orderId, type).single() }
+        rows.forEach { assertTrue(TRACEPARENT.matches(it.traceparent.orEmpty()), "${it.type}: ${it.traceparent}") }
+        assertEquals(1, rows.map { it.traceparent!!.split("-")[1] }.toSet().size, rows.map { it.traceparent }.toString())
     }
 
     @Test
@@ -750,7 +781,14 @@ class CheckoutPipelineIntegrationTest {
     private suspend fun relayOrderPlaced(orderId: UUID) {
         outboxRepository.findAll().toList()
             .filter { it.aggregateId == orderId.toString() && it.type == "order-placed" }
-            .forEach { kafkaTemplate.send("order-placed", it.aggregateId, it.payload.asString()) }
+            .forEach { relay(it) }
+    }
+
+    /** One outbox row onto its topic, the way the connector's `additional.placement` does it. */
+    private fun relay(row: OutboxEvent) {
+        val record = ProducerRecord<String, String>(row.type, row.aggregateId, row.payload.asString())
+        row.traceparent?.let { record.headers().add("traceparent", it.toByteArray()) }
+        relayTemplate.send(record)
     }
 
     /**
@@ -760,7 +798,7 @@ class CheckoutPipelineIntegrationTest {
     private suspend fun relayLatestOrderPlaced(orderId: UUID) {
         outboxRows(orderId, "order-placed")
             .maxByOrNull { it.createdAt }
-            ?.let { kafkaTemplate.send("order-placed", it.aggregateId, it.payload.asString()) }
+            ?.let { relay(it) }
     }
 
     private suspend fun openIncident(orderId: UUID, kind: ReconciliationKind) {
