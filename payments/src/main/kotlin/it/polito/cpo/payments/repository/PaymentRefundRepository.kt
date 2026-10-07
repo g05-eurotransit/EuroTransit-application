@@ -6,4 +6,6 @@ import org.springframework.stereotype.Repository
 import java.util.UUID
 
 @Repository
-interface PaymentRefundRepository : CoroutineCrudRepository<PaymentRefund, UUID>
+interface PaymentRefundRepository : CoroutineCrudRepository<PaymentRefund, UUID> {
+    suspend fun countByRequestKeyAndStatus(requestKey: String, status: String): Long
+}

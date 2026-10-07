@@ -119,6 +119,9 @@ class PaymentServiceTest {
         // Both attempts on record, keyless so the FK holds.
         assertEquals(2, paymentRefundRepository.saved.size)
         org.junit.jupiter.api.Assertions.assertTrue(paymentRefundRepository.saved.all { it.idempotencyKey == null })
+        org.junit.jupiter.api.Assertions.assertTrue(
+            paymentRefundRepository.saved.all { it.requestKey == "pay-refund-order-123" }
+        )
     }
 
     @Test
@@ -151,6 +154,54 @@ class PaymentServiceTest {
         assertEquals(1, providerAdapter.refundCalls)
         assertEquals(1, paymentRefundRepository.saved.size)
         assertEquals(1, idempotencyRepository.saved.size)
+    }
+
+    @Test
+    fun `refund - a retry after a decline reaches the provider with a different idempotency key`() = runTest {
+        paymentAuthorizationRepository.saved.add(
+            PaymentAuthorization(
+                orderId = "order-123",
+                principalId = "user1",
+                amount = BigDecimal.TEN,
+                currency = "EUR",
+                status = PaymentAuthorization.STATUS_AUTHORIZED,
+                providerReference = "ch_123",
+                idempotencyKey = "key-123"
+            )
+        )
+        providerAdapter.refundSucceeds = false
+
+        paymentService.refund("order-123", BigDecimal.TEN, "pay-refund-order-123")
+        paymentService.refund("order-123", BigDecimal.TEN, "pay-refund-order-123")
+
+        // Stripe caches a decline for 24h; same key would replay it and the redrive stays a no-op.
+        assertEquals(2, providerAdapter.refundKeys.size)
+        org.junit.jupiter.api.Assertions.assertNotEquals(
+            providerAdapter.refundKeys[0], providerAdapter.refundKeys[1]
+        )
+    }
+
+    @Test
+    fun `refund - a retry after an unknown outcome keeps the same provider key`() = runTest {
+        paymentAuthorizationRepository.saved.add(
+            PaymentAuthorization(
+                orderId = "order-123",
+                principalId = "user1",
+                amount = BigDecimal.TEN,
+                currency = "EUR",
+                status = PaymentAuthorization.STATUS_AUTHORIZED,
+                providerReference = "ch_123",
+                idempotencyKey = "key-123"
+            )
+        )
+        providerAdapter.refundThrows = true
+
+        val first = paymentService.refund("order-123", BigDecimal.TEN, "pay-refund-order-123")
+        paymentService.refund("order-123", BigDecimal.TEN, "pay-refund-order-123")
+
+        // The refund may have gone through: a fresh key would let Stripe run it a second time.
+        assertEquals(IPaymentService.RefundStatus.DEPENDENCY_FAILED, first.status)
+        assertEquals(providerAdapter.refundKeys[0], providerAdapter.refundKeys[1])
     }
 
     @Test
@@ -295,13 +346,17 @@ class PaymentServiceTest {
 
     class FakePaymentProvider : IPaymentProvider {
         var refundSucceeds = true
+        var refundThrows = false
         var refundCalls = 0
+        val refundKeys = mutableListOf<String>()
 
         override suspend fun authorize(amount: BigDecimal, currency: String, token: String, idempotencyKey: String) =
             ProviderAuthorizationResult(true, "ch_123", null)
 
         override suspend fun refund(ref: String, amount: BigDecimal?, idempotencyKey: String): ProviderRefundResult {
             refundCalls++
+            refundKeys.add(idempotencyKey)
+            if (refundThrows) throw RuntimeException("provider unreachable")
             return if (refundSucceeds) ProviderRefundResult(true, "re_123", null)
             else ProviderRefundResult(false, null, "CARD_DECLINED")
         }
@@ -324,6 +379,8 @@ class PaymentServiceTest {
     open class FakePaymentRefundRepository : PaymentRefundRepository by org.mockito.Mockito.mock(PaymentRefundRepository::class.java) {
         val saved = mutableListOf<PaymentRefund>()
         override suspend fun <S : PaymentRefund> save(entity: S): S { saved.add(entity); return entity }
+        override suspend fun countByRequestKeyAndStatus(requestKey: String, status: String): Long =
+            saved.count { it.requestKey == requestKey && it.status == status }.toLong()
     }
 
     open class FakeOutboxEventRepository : OutboxEventRepository by org.mockito.Mockito.mock(OutboxEventRepository::class.java) {

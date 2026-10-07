@@ -167,9 +167,15 @@ class PaymentService(
             return it.polito.cpo.payments.dto.PaymentRefundResponse(IPaymentService.RefundStatus.FAILED, null, "INVALID_AUTHORIZATION_STATUS")
         }
 
+        // Stripe caches a decline under its idempotency key for 24h, so a retry would replay it.
+        // Only a recorded decline moves this; an unknown outcome writes no row and keeps the key.
+        val failedAttempts = paymentRefundRepository.countByRequestKeyAndStatus(
+            idempotencyKey, IPaymentService.RefundStatus.FAILED.name
+        )
+
         // 3. Call provider (outside any DB transaction)
         val result = try {
-            providerAdapter.refund(authorization.providerReference, amount, idempotencyKey)
+            providerAdapter.refund(authorization.providerReference, amount, "${idempotencyKey}_$failedAttempts")
         } catch (e: Exception) {
             log.error("Payment provider failed on refund", e)
             return it.polito.cpo.payments.dto.PaymentRefundResponse(IPaymentService.RefundStatus.DEPENDENCY_FAILED, null, "PROVIDER_UNAVAILABLE")
@@ -185,6 +191,7 @@ class PaymentService(
             status = refundStatus.name,
             providerReference = result.refundReference,
             idempotencyKey = if (result.success) idempotencyKey else null,
+            requestKey = idempotencyKey,
             reason = reason.name
         ).apply { setAsNew(true) }
 
