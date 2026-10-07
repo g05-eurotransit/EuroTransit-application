@@ -85,10 +85,32 @@ to the `application.yaml` default of `localhost:4318`, which inside a container 
 itself: spans were produced and dropped with no error. The service was absent from every trace.
 The other four already set it.
 
-**Still missing.** Everything downstream of the `order-placed` consumer — the Inventory hold, the
-payment authorization and the consumer stages — remains on separate traces. The context is dropped
-inside the Orders listeners and again across the outbox, tracked in issue #117. Until that lands,
-the tree above stops at the synchronous part of checkout.
+**One checkout, one trace (2026-10-07, #117).** The two breaks are fixed. Inside the Orders
+listeners the pipeline now runs with the consumer's observation (break A), and every outbox row
+carries the `traceparent` of an `<event> publish` span that the Orders connector places in a record
+header (break B), so each consumer is a child of the span that wrote its event. Measured on compose,
+one checkout to `CONFIRMED` is a single trace of 36 spans across all six services:
+
+```
+traefik POST → orders POST /api/orders
+  → catalog GET /api/catalog/offers/{offerId}
+  → order-placed publish → order-placed process
+       → inventory POST /api/inventory/reservations        (hold)
+       → payments  POST /api/payments/authorize             (authorize)
+       → inventory PUT  …/reservations/{id}/confirmation    (confirm)
+       → order-confirmed publish
+       → notification-requested publish → notifications notification-requested process
+```
+
+A refund is likewise one trace: `POST /api/orders/{orderId}/refund` → `refund-requested publish` →
+`refund-requested process` → Payments refund → Inventory seat return. A row written with tracing off
+relays a null header; its consumer starts a new trace and nothing fails.
+
+**Still missing in the cluster.** The AKS Orders connector
+(`EuroTransit-configuration/platform/connectors/base/orders-outbox-connect.yaml`) does not yet place
+the header, so there the consumer still starts its own trace. The line is the same as in
+`scripts/init-local-debezium.sh`; it waits for the AKS maintenance window because the Connect worker
+is shared.
 
 **Not available in the cluster at all.** `platform/` has no trace backend, and the application
 chart ships `tracing.enabled: false` with an endpoint pointing at a collector that does not exist.

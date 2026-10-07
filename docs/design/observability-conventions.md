@@ -122,15 +122,16 @@ The Notifications consumer (`notifications/src/main/kotlin/it/polito/cpo/event/`
 
 - **Event envelope drift — RESOLVED.** Previously Orders' event DTOs diverged from the frozen contract (`payloadVersion` vs `schemaVersion`, flat fields vs `payload {}` wrapper). Person 2 fixed this in PR #23: the shared `money-path-contracts` module (`money-path-contracts/src/main/kotlin/it/polito/cpo/contracts/events/OrderEvents.kt`) is now the single source of truth, aligned to `api-design.md` (`schemaVersion` + nested `payload`), and Orders emits it (ADR-010). The Notifications consumer now depends on the same module and deserializes the shared `NotificationRequestedEvent` directly — no more local DTO, no drift.
 - **Checkout 500 — producer serializer missing JSR-310 module (BLOCKER, out of slice).** Found in live end-to-end run (2026-07-09): every first `POST /api/orders` returns 500. Root cause in Orders (Person 2): `orders/.../config/KafkaConfiguration.kt` builds the producer with a bare `JsonSerializer<Any>()` whose default Jackson mapper has no `JavaTimeModule`, so serializing `OrderPlacedEvent.occurredAt` (`LocalDateTime`) throws `InvalidDefinitionException: Java 8 date/time type not supported`. The order row persists but the event never publishes, so **no `notification-requested` is emitted and the customer never gets a notification**. A retry with the same `Idempotency-Key` replays the stored `ACCEPTED` response and masks the failure (no re-publish), which is why the bug is easy to miss. Fix is Person 2's: register `JavaTimeModule` (and disable `WRITE_DATES_AS_TIMESTAMPS`) on the producer's `JsonSerializer` mapper. Not changed here — out of slice.
-- **Trace context does not survive the outbox.** `KafkaConfiguration.kt` now enables producer
-  observation, so a record published through `KafkaTemplate` does carry `traceparent` — but the
-  business events no longer take that path. They are written to the outbox and relayed by Debezium,
-  which has no trace context to forward because the outbox table stores none. The consumer opens a
-  span with nothing to join, and the money path lands on its own trace. Measured, not inferred: one
-  checkout produced eleven disconnected traces. Tracked in issue #117, together with a second break
-  inside the Orders listeners, where the pipeline runs in a Reactor context carrying only the
-  correlation id. Meanwhile cross-service correlation still works through that `correlationId`,
-  carried in the event body and logged through the shared MDC key.
+- **Trace context across the outbox — RESOLVED for Orders (#117).** Business events do not go
+  through `KafkaTemplate`; they are written to the outbox and relayed by Debezium, which had no trace
+  context to forward, so one checkout produced eleven disconnected traces. Two fixes: the Orders
+  listeners run the pipeline with the consumer's observation (`PipelineReactorContext`), and
+  `OrderOutbox` writes each row under a short `PRODUCER` span `<event> publish` and stores its W3C
+  `traceparent` in `outbox_events.traceparent`. The Orders connector copies that column into a
+  `traceparent` record header (`transforms.outbox.table.fields.additional.placement`), which Spring
+  Kafka's consumer observation reads. Locally a checkout is now one trace; the AKS connector still
+  needs the same line. Inventory's and Payments' outboxes do not carry trace context yet — the same
+  pattern applies. `correlationId` remains the cross-check in logs.
 - **Kafka bootstrap address in compose.** Neither Orders nor Notifications set `spring.kafka.bootstrap-servers` in `docker-compose.yml`, so both fall back to `localhost:9092`, which does not resolve inside a container. Notifications now sets `SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092` for its own service block; Orders likely needs the same on its block (not changed here — out of slice).
 - **Notifications not exposed through the gateway (in-slice, FIXED).** In live E2E the frontend SSE call `GET /api/notifications/stream` (via Traefik on port 80) fell through to the SPA catch-all router because the `notifications` service block had `traefik.enable=false` and no router. Added `traefik.enable=true` + a `PathPrefix(/api/notifications)` router to the notifications block in `docker-compose.yml` (mirrors catalog/orders). `inventory`/`payments` stay unexposed — they are internal, called server-to-server by Orders.
 - **Topics rely on broker auto-create locally.** `order-placed`, `order-confirmed`, `notification-requested` are auto-created by the KRaft broker in compose (no explicit provisioning). The cluster/demo target needs explicit `KafkaTopic` CRDs (partitions/replication/retention) in `EuroTransit-configuration` (Strimzi) — a config-repo follow-up.
