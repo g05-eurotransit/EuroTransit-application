@@ -145,8 +145,9 @@ and `orders_reconciliation_open` by `rollouts_pod_template_hash`, but both gauge
 scheduled job querying the whole database, so every replica publishes the same global value. The
 filter attributes nothing, `sum()` multiplies by replica count, and `result == 0` on open incidents
 makes the canary unpromotable the moment a chaos experiment leaves a record open — which is what
-those experiments are for. Attributable per-pod replacements exist: `orders_events_dlt_total`,
-`orders_checkout_failed_total`, `orders_checkout_completed_total{result="confirmed"}`.
+those experiments are for. Attributable per-pod replacements exist: `orders_checkout_failed_total`,
+`orders_checkout_completed_total{result="confirmed"}`. *(Corrected 2026-10-07: this list also named
+`orders_events_dlt_total`, which is not attributable — see step 5, F4.)*
 
 Related and worth writing down beside the template: under ADR-011 the pipeline runs in a Kafka
 consumer, so the `TraefikService` weight controls only the HTTP entry. Which instance runs the money
@@ -1129,7 +1130,8 @@ Full build after these fixes: **368 tests, 0 failures**.
 
 ## Step 5 — Orders canary: prove the one that now exists
 
-**Not a decision this step gets to make.** The canary is required by `docs/capstone-dod.md:41`
+**Not a decision this step gets to make.** The canary is required by the DoD item *"Orders canary is
+demonstrated with metric-gated promote/abort"* (`docs/capstone-dod.md`)
 ("Orders canary is demonstrated with metric-gated promote/abort"), chosen in
 `architecture-decisions.md:61-74` with its alternatives rejected in writing, and assigned to Person 2
 in `team-agentic-implementation-plan.md:24`. This step schedules it; it does not relitigate it.
@@ -1145,7 +1147,8 @@ is no longer a plan to build a canary. It is a plan to prove one, and to fix wha
 repositories that day: the money path *is* in images (two `workflow_dispatch` runs of
 `docker-gitops.yml`), so no promotion to `main` is needed; Orders runs **one** replica on AKS, not
 two, which makes F1 and F3 worse than first computed; and F1 to F3 have been reported, as
-configuration #50. The sections changed are marked.
+configuration #50. A review of #125 the same day added F4: the dead-letter gate counts the pod that
+consumed the dead letter, not the one that gave up. The sections changed are marked.
 
 ### Verified before writing
 
@@ -1171,7 +1174,8 @@ what every gate filters on.
 **The money path is in images** *(corrected 2026-10-07)*. `origin/main` of the application
 repository is still `f08ed67` (2026-08-28), but `docker-gitops.yml` also runs on `workflow_dispatch`
 and was run from `dev` — `e2748f8` on 2026-09-22 and `98bedf2` on 2026-09-27 — each time building every
-service and bumping the configuration repository; later frontend fixes moved the tags to `4364f1f`.
+service and bumping the configuration repository. The five backend services are at `98bedf2`; later
+frontend fixes moved only the frontend, to `4364f1f`.
 Successive image generations therefore already exist in GitOps history, which is the transition a
 canary measures. An AKS cluster is running — configuration #43 to #45 operate on it — but on
 2026-10-07 it is inside the memory-reduction maintenance window
@@ -1249,21 +1253,32 @@ attribution — but not the safety consequence, which is that a reader who promo
 up to two thirds of the money path. The ratio is set by replica counts and partition count, not by the weight, and it moves
 whenever either changes.
 
-**None of the three is a reason to delay enabling the canary.** F1 and F2 make it abort too eagerly
+**F4 — the dead-letter gate counts the wrong pod** *(added 2026-10-07, found in review of #125)*.
+`canary-dead-letter-events` requires `increase(orders_events_dlt_total{hash=canary}) == 0`. But that
+counter is incremented by the dead-letter *consumers* (`OrderPlacedDeadLetterListener`,
+`RefundRequestedDeadLetterListener`), which run in their own group, `orders-dlt`. The pod that gave
+up only publishes the record; whichever pod owns that DLT partition in the other group counts it. So a
+stable pod's dead letter can abort a healthy canary, and a canary's dead letter can be counted on a
+stable pod and pass unseen. The attributable signal has to be emitted where the delivery is given up:
+a counter incremented by the recoverer in `KafkaConfiguration.kafkaErrorHandler` (an Orders change),
+with the gate switched to it (a configuration change).
+
+**None of the four is a reason to delay enabling the canary.** F1 and F2 make it abort too eagerly
 and refuse too late respectively; neither lets a bad build through silently, which was the failure
 mode worth fearing. They are worth fixing before the demonstration run, because a canary that aborts
 on noise cannot be used to demonstrate anything.
 
 ### Which metrics are attributable, and which are not
 
-Kept from the previous version because it is still true and is what the gates rest on. These are
-per-pod counters, incremented in process, so they describe what *that replica* did:
+Kept from the previous version, corrected on 2026-10-07. The first three are per-pod counters,
+incremented in the process that did the work, so they describe what *that replica* did. The DLT
+counter is not, and that is F4 below:
 
 | Metric | Tags | What it means |
 | --- | --- | --- |
 | `orders_checkout_completed_total` | `result=confirmed\|failed` | A checkout this pod drove to a terminal state |
 | `orders_checkout_failed_total` | `reason` | The failure classes, separated |
-| `orders_events_dlt_total` | `topic`, `result` | Deliveries this pod gave up on |
+| `orders_events_dlt_total` | `topic`, `result` | Dead letters this pod **consumed** — not the ones it gave up on (F4) |
 | `orders_postsale_refund_completed_total` | `result` | Refunds this pod completed |
 
 Verified against `orders/src/main` on 2026-09-22: `countFailed` increments
@@ -1280,7 +1295,7 @@ number. They are correctly absent from the gates.
 **Settled.**
 
 - Canary on Orders, blue/green on Catalog, and the gate set as merged. The design is not reopened;
-  F1 to F3 are corrections inside it.
+  F1 to F4 are corrections inside it.
 - Manual promotion at every step. The merged `Rollout` pauses after each analysis, and the DoD is
   satisfied by metric-gated promote/abort either way.
 - The two unattributable gauges stay out of the gates and remain alert material.
@@ -1297,10 +1312,13 @@ number. They are correctly absent from the gates.
 
 **Stop-and-ask.**
 
-- **Every change discussed here is in the configuration repository**, which is Person 1's surface.
+- **Every change discussed here except F4's counter is in the configuration repository**, which is
+  Person 1's surface.
   F1 to F3 are reported, not pushed: configuration #50, assigned to `matteogastaldello` on
   2026-10-07, linked to configuration #46 and application #123, which are rebuilding the load
   generator — where F1 and F2, both sample-size problems, are cheapest to fix.
+- **F4 is half an Orders change.** The attributable counter is emitted by Orders' recoverer; only
+  the gate switch is configuration. F4 is added to configuration #50 once the counter exists.
 - **Turning `progressiveDelivery.enabled` on.** Platform-level, and not during the AKS maintenance
   window.
 
@@ -1321,7 +1339,7 @@ being ready to read the gates when it happens.
 
 ### Done when
 
-- F1 to F3 are reported to the owner of the configuration repository, with the arithmetic, and either
+- F1 to F4 are reported to the owner of the configuration repository, with the arithmetic, and either
   corrected or explicitly accepted.
 - Every gate, run by hand against Prometheus with the canary hash of a real rollout, returns a value —
   not an empty result. Verified before the gates are trusted, not after.
@@ -1329,7 +1347,8 @@ being ready to read the gates when it happens.
 - A rollout that should fail is aborted by a gate, with the aborting gate identifiable. The merged
   procedure already describes doing this by making one threshold temporarily impossible; that counts,
   provided the impossible threshold never stays committed.
-- `docs/capstone-dod.md:41` can be ticked with a link to the evidence.
+- The DoD item *"Orders canary is demonstrated with metric-gated promote/abort"* can be ticked with a
+  link to the evidence.
 
 ### Standing check
 
@@ -1418,6 +1437,9 @@ rather than a recovery failure to be discovered during it.
 | `docs/adr-006-authorize-semantics` | **local only**, 1 commit | `b4d2be2` | The ADR-006 amendment: `authorize` charges immediately, and why deferring the capture is worse |
 | `docs/issue-72-analysis` | **local only**, 1 commit | `271a617` | #72 costed properly, with a recommendation against it for now |
 
+*(Corrected 2026-10-07: the heading says four and the table lists three — the fourth,
+`docs/dod-orders-ticks`, was committed fifteen minutes after this table was written.)*
+
 Three of the four touch `docs/planning/orders-slice-plan.md`, in three non-overlapping regions
 (#72 near line 310, step 5 and this handover at the end), so they merge into each other cleanly.
 `docs/orders-step-5-canary` is two commits behind `origin/dev` — it predates the #113 merge — and
@@ -1432,7 +1454,7 @@ hypothetical: it happened while writing this.
 **Step 5 needs two promotions to `main`, not one.** A canary measures a transition. The first
 promotion is a cold install with nothing to compare against — it is the baseline, and it is also what
 first puts the money path into an image. The canary is demonstrated on the *second*. Until both have
-happened, `docs/capstone-dod.md:41` cannot be ticked no matter what is written or configured.
+happened, the DoD canary item cannot be ticked no matter what is written or configured.
 
 **The blocker is a conversation, not code.** Promotion to `main` is the Technical Coordinator's
 sequencing call, and **that conversation has not happened yet**. Steps 0 to 4 were all doable alone.
