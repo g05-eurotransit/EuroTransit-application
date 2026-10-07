@@ -36,6 +36,7 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Import
 import org.springframework.context.annotation.Primary
 import org.springframework.kafka.core.KafkaTemplate
+import org.springframework.kafka.listener.ListenerExecutionFailedException
 import org.springframework.kafka.support.KafkaHeaders
 import org.springframework.kafka.test.context.EmbeddedKafka
 import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder
@@ -135,6 +136,8 @@ class RefundPipelineIntegrationTest {
         // Payments (200, no money moved) instead of performing this commercial refund (ADR-015).
         assertTrue(payment.refundIdempotencyKeys.none { it == "refund-$orderId" })
         assertTrue(inventory.refundedReservationIds.contains("res-$orderId"))
+        // #117 break A: the reversal ran with the Kafka consumer's observation as its parent.
+        assertEquals("KafkaRecordReceiverContext", payment.refundParentObservation[orderId])
     }
 
     @Test
@@ -273,6 +276,7 @@ class RefundPipelineIntegrationTest {
         val open = reconciliationRepository.findAllByOrderIdAndStatus(orderId, ReconciliationStatus.OPEN.name).toList()
         assertEquals(1, open.size)
         assertEquals(ReconciliationKind.DELIVERY_EXHAUSTED.name, open.single().kind)
+        assertEquals(FailureClassifier.DEPENDENCY_ERROR, open.single().failureClass)
 
         // And it is now redrivable, which is the entire point of recording it.
         val response = operations.redrive(orderId, "it-dlt-redrive-${UUID.randomUUID()}", "ops-1")
@@ -325,9 +329,10 @@ class RefundPipelineIntegrationTest {
             ?.let { kafkaTemplate.send("refund-requested", it.aggregateId, it.payload.asString()) }
     }
 
-    // Sends a record to refund-requested-dlt with the headers DeadLetterPublishingRecoverer would
-    // have attached, mirroring CheckoutPipelineIntegrationTest's sendDeadLetter for order-placed-dlt.
-    private fun sendRefundDeadLetter(orderId: UUID, exceptionFqcn: String, message: String) {
+    // Sends a record to refund-requested-dlt with the headers DeadLetterPublishingRecoverer actually
+    // attaches (the container's wrapper as the exception, the listener's as the cause), mirroring
+    // CheckoutPipelineIntegrationTest's sendDeadLetter for order-placed-dlt.
+    private fun sendRefundDeadLetter(orderId: UUID, causeFqcn: String, message: String) {
         val event = RefundRequestedEvent(correlationId = "corr-dlt", orderId = orderId, principalId = "user-1")
         val record = ProducerRecord<String, String>(
             "refund-requested-dlt",
@@ -335,7 +340,8 @@ class RefundPipelineIntegrationTest {
             objectMapper.writeValueAsString(event),
         )
         record.headers().add(KafkaHeaders.DLT_ORIGINAL_TOPIC, "refund-requested".toByteArray())
-        record.headers().add(KafkaHeaders.DLT_EXCEPTION_FQCN, exceptionFqcn.toByteArray())
+        record.headers().add(KafkaHeaders.DLT_EXCEPTION_FQCN, ListenerExecutionFailedException::class.java.name.toByteArray())
+        record.headers().add(KafkaHeaders.DLT_EXCEPTION_CAUSE_FQCN, causeFqcn.toByteArray())
         record.headers().add(KafkaHeaders.DLT_EXCEPTION_MESSAGE, message.toByteArray())
         kafkaTemplate.send(record)
     }
@@ -366,12 +372,16 @@ class RefundPipelineIntegrationTest {
         val refundedOrderIds = CopyOnWriteArrayList<UUID>()
         val refundIdempotencyKeys = CopyOnWriteArrayList<String>()
 
+        /** orderId -> the observation type the reversal call would have been a child of. */
+        val refundParentObservation = ConcurrentHashMap<UUID, String>()
+
         override suspend fun authorizePayment(request: PaymentRequest, idempotencyKey: String, correlationId: String): AuthorizationOutcome =
             throw UnsupportedOperationException("not used by the refund pipeline")
 
         override suspend fun refund(orderId: UUID, idempotencyKey: String): ReversalOutcome {
             refundedOrderIds.add(orderId)
             refundIdempotencyKeys.add(idempotencyKey)
+            parentObservationContextType()?.let { refundParentObservation[orderId] = it }
             return ReversalOutcome.Reversed(providerReference = "prov-ref-it")
         }
     }

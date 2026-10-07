@@ -4,7 +4,7 @@ Working plan for the Orders slice owner. It is deliberately incomplete: only the
 the next one are written in detail. **When a step is finished, write the following step here before
 starting it.** This keeps each step doable in a fresh session without reconstructing context.
 
-Last updated: 2026-09-13.
+Last updated: 2026-09-22.
 
 ## Decisions already taken
 
@@ -145,8 +145,9 @@ and `orders_reconciliation_open` by `rollouts_pod_template_hash`, but both gauge
 scheduled job querying the whole database, so every replica publishes the same global value. The
 filter attributes nothing, `sum()` multiplies by replica count, and `result == 0` on open incidents
 makes the canary unpromotable the moment a chaos experiment leaves a record open — which is what
-those experiments are for. Attributable per-pod replacements exist: `orders_events_dlt_total`,
-`orders_checkout_failed_total`, `orders_checkout_completed_total{result="confirmed"}`.
+those experiments are for. Attributable per-pod replacements exist: `orders_checkout_failed_total`,
+`orders_checkout_completed_total{result="confirmed"}`. *(Corrected 2026-10-07: this list also named
+`orders_events_dlt_total`, which is not attributable — see step 5, F4.)*
 
 Related and worth writing down beside the template: under ADR-011 the pipeline runs in a Kafka
 consumer, so the `TraefikService` weight controls only the HTTP entry. Which instance runs the money
@@ -167,8 +168,8 @@ counter-proposal to negotiate.
 | 1 | Seat availability façade on Orders | **done** — merged as `a3ce792` |
 | 2 | Refund part 1 — the ADR and `offerId` in the checkout contract | **done** — see the outcome below |
 | 3 | Refund part 2 — Catalog client and policy resolution | **done** — see the outcome below |
-| 4 | Refund part 3 — refund state machine and endpoint | **next, detailed below** |
-| 5 | Orders canary with metric-gated promote/abort | to be written; findings already recorded below |
+| 4 | Refund part 3 — refund state machine and endpoint | **done** — merged as #108 |
+| 5 | Orders canary — prove the one that now exists | **rewritten 2026-09-22, corrected 2026-10-07.** The machinery merged in configuration `eda1fb1`, disabled; three defects in the gates, reported as configuration #50; waits on `progressiveDelivery` and the AKS maintenance window, not on promotions |
 | 6 | Chaos experiments, postmortem, agent log | to be written |
 
 Steps 2 to 4 are one feature split by dependency, not three features. Step 3 needs part of #85 to
@@ -309,6 +310,89 @@ separate and tested, and #84 item 3 is unblocked with the response shape communi
 > it should be planned as its own cross-slice block with Inventory, Payments and the configuration
 > repository involved from the start — not as an Orders task.
 
+
+## #72 — detailed analysis, 2026-09-17
+
+The draft comment above asked for a decision on budget and sequencing and left the technical case
+alone, because it looked settled. Reading the Payments and frontend code to cost it properly found
+that it is not: **the headline benefit needs a change nobody had counted.** This section supersedes
+the cost estimate in the draft; the rest of the draft still holds.
+
+### What the proposal is actually worth
+
+The argument for #72 is that today there is no Strong Customer Authentication anywhere in the money
+path: `paymentMethodToken` arrives in the checkout body and the whole pipeline runs server-side with
+no user interaction, so there is no point at which a customer can be challenged. For a European rail
+marketplace that is not a realistic flow. That argument is correct and is not in dispute here.
+
+### The cost nobody had counted: the Stripe integration is pre-SCA on both ends
+
+- **Payments calls the legacy Charges API.** `StripeSandboxProvider.authorize` posts to `/charges`
+  with a `source` token.
+- **The frontend produces legacy tokens.** `CheckoutPage` calls `stripe.createToken(cardNumberElement)`
+  and sends `token.id`.
+
+3-D Secure and SCA are not features you switch on over that pairing. They are properties of the
+**PaymentIntents** flow, where the server creates an intent, the client confirms it, and the provider
+may answer `requires_action` for the challenge. Accepting #72 therefore means replacing the payment
+integration end to end — `createToken` → PaymentElement/`confirmPayment` on the client,
+`/charges` → `/payment_intents` plus `next_action` handling and webhooks on the server — **before**
+any of the four-slice state machine work in the proposal begins.
+
+The draft costed #72 as "four durable states in Orders, three endpoints, plus Inventory, Payments and
+config work". That is the second half. The first half is a rewrite of how the system takes money, and
+it is the half that carries the risk, because it replaces the one part of the money path that is
+already proven against a real provider sandbox (#87).
+
+### What the Definition of Done asks for
+
+`capstone-dod.md` requires that Payments integrates with a provider sandbox or test API, and that no
+real card data or live charges are handled. Both are satisfied. **No DoD item requires SCA, 3-D
+Secure, a customer-driven payment call, or a payment window.** Nothing about the grading of this work
+improves by accepting #72.
+
+### What accepting it would invalidate
+
+- **The hold deadline's meaning**, shipped in #88 and constrained ever since: the countdown covers
+  crash, retry and Kafka lag, and no client may present it as "you have ten minutes to pay". Under
+  #72 that inverts and the copy has to be rewritten.
+- **The availability façade's advisory design**, which exists precisely because the read creates no
+  hold. Under #72 it becomes the point where a hold is created, which changes its resilience posture,
+  its idempotency story, and the departed-run filter just merged into it.
+- **The checkout idempotency fingerprint**, which the SPA would have to persist across reloads —
+  called out in the draft and still true.
+
+### Recommendation: no, and keep it open
+
+Out of scope for this delivery. Not rejected on merit — the proposal is sound and the realism
+argument is real — but on three grounds:
+
+1. **The DoD does not ask for it,** and the project's binding constraint right now is proving what
+   already exists. Nothing is demonstrated, most DoD items are unticked, and the canary has
+   not yet run.
+2. **It is materially more expensive than the draft said,** because the SCA benefit requires
+   replacing the Stripe integration on both ends first.
+3. **It would put the one already-proven part of the money path back into flux** to gain something
+   nothing is measuring.
+
+Revisit only if the money path is complete, demonstrated in the cluster, and time remains. If it is
+ever accepted it must be planned as its own cross-slice block with Inventory, Payments and the
+configuration repository involved from the start — and with the PaymentIntents migration as its
+first step, not as an implementation detail of the third.
+
+### The cheap subset this analysis first proposed — withdrawn
+
+Costing #72 surfaced a mismatch: Orders' vocabulary (`payment_authorizations`, `AUTHORIZED`, a
+`CONFIRMING_INVENTORY` phase, a "reversal") reads as authorize-then-capture, while
+`StripeSandboxProvider.authorize` charges immediately and a compensation refunds. The first version of
+this section proposed closing that gap with `capture: false` and a capture after Inventory confirms.
+
+**That proposal is withdrawn.** ADR-006, written the same afternoon, records why deferring the
+capture is the weaker ordering: Payments cannot know when Inventory has confirmed, so Orders would
+have to call a capture as a new remote step with its own durable phase, and a capture failing
+**after** Inventory has committed the sale leaves the seat `SOLD` with no money taken. Money first
+means a sale is never confirmed that cannot be charged for. The cost — two statement movements on a
+compensated checkout — is the accepted trade, and the naming stays as it is on purpose.
 
 ---
 
@@ -1044,119 +1128,419 @@ Full build after these fixes: **368 tests, 0 failures**.
 
 ---
 
-# Handover — 2026-09-16
+## Step 5 — Orders canary: prove the one that now exists
 
-Written at the end of a long session, for whoever picks this up next (including me, in a fresh
-session with none of that conversation). Everything below existed only in a chat transcript when it
-was written, which is why it is here.
+**Not a decision this step gets to make.** The canary is required by the DoD item *"Orders canary is
+demonstrated with metric-gated promote/abort"* (`docs/capstone-dod.md`), chosen in
+`architecture-decisions.md:61-74` with its alternatives rejected in writing, and assigned to Person 2
+in `team-agentic-implementation-plan.md:24`. This step schedules it; it does not relitigate it.
+
+**Rewritten on 2026-09-22, because the version written on 2026-09-17 is now false.** It said the
+canary machinery did not exist and that the `ServiceMonitor` exposed no rollout label. Both were true
+when written and stopped being true on 2026-09-21, when `EuroTransit-configuration#27` merged as
+`eda1fb1`. The plan's own rule is that a fact turning out wrong is met as a contradiction and
+re-decided, not worked around — so the step below is a different step from the one it replaces. **It
+is no longer a plan to build a canary. It is a plan to prove one, and to fix what is wrong with it.**
+
+**Corrected on 2026-10-07**, in place, because three facts below were wrong when read against both
+repositories that day: the money path *is* in images (two `workflow_dispatch` runs of
+`docker-gitops.yml`), so no promotion to `main` is needed; Orders runs **one** replica on AKS, not
+two, which makes F1 and F3 worse than first computed; and F1 to F3 have been reported, as
+configuration #50. A review of #125 the same day added F4: the dead-letter gate counts the pod that
+consumed the dead letter, not the one that gave up. The sections changed are marked.
+
+### Verified before writing
+
+Read from both repositories on 2026-09-22.
+
+**The machinery exists and is merged.** `eda1fb1` in the configuration repository added, in
+`charts/eurotransit/templates/progressive-delivery.yaml`: a `Rollout` for Orders with a canary
+strategy at 10/25/50/100 and a manual pause at every step, a `Rollout` for Catalog with blue/green
+and `autoPromotionEnabled: false`, a `TraefikService` named `orders-weighted`, and two
+`AnalysisTemplate`s. Argo Rollouts itself is installed through ArgoCD
+(`platform/argocd/base/platform-applications.yaml`). Both `Rollout`s adopt the existing `Deployment`s
+through `workloadRef` rather than replacing them.
+
+**It is switched off.** `progressiveDelivery.enabled` is `false` in `values.yaml` and is overridden
+nowhere, so the default render contains no `Rollout` at all. That is deliberate and stated in the
+pull request.
+
+**The `ServiceMonitor` now carries the hash.** `podTargetLabels: [rollouts-pod-template-hash]` is set
+for `orders` and `catalog` only. This was the blocking defect the previous version of this step
+identified, and it is fixed: Prometheus sanitises the label to `rollouts_pod_template_hash`, which is
+what every gate filters on.
+
+**The money path is in images** *(corrected 2026-10-07)*. `origin/main` of the application
+repository is still `f08ed67` (2026-08-28), but `docker-gitops.yml` also runs on `workflow_dispatch`
+and was run from `dev` — `e2748f8` on 2026-09-22 and `98bedf2` on 2026-09-27 — each time building every
+service and bumping the configuration repository. The five backend services are at `98bedf2`; later
+frontend fixes moved only the frontend, to `4364f1f`.
+Successive image generations therefore already exist in GitOps history, which is the transition a
+canary measures. An AKS cluster is running — configuration #43 to #45 operate on it — but on
+2026-10-07 it is inside the memory-reduction maintenance window
+(`docs/platform/aks-memory-reduction-runbook.md`), with the Argo root paused and sources pinned.
+What is live cannot be read from Git. The residual problem is different: the configuration points at
+images built from commits that are not on `main`, so `main`'s history does not describe what runs.
+
+**The traffic source is a suspended k6 CronJob.** `progressive-delivery-k6`: two VUs, each doing a
+token fetch, one `POST /api/orders` for a single seat on `of-001`, a poll to a terminal state at two
+second intervals, then `sleep(15)`. Seats and travel dates come from a non-wrapping 24-seat ×
+15-day block, so a run that exceeds capacity fails rather than reusing a booked seat.
+
+**The consumer group is static.** `spring.kafka.consumer.group-id` is `orders`, hardcoded in
+`application.yaml` and not overridden by the chart. Canary pods therefore join the *same* group as
+stable pods.
+
+**AKS runs one Orders replica** *(added 2026-10-07)*. The AKS application renders with
+`values-production.yaml`, where `orders.replicaCount` is `1`; `values.yaml`'s `2` is not what runs
+there. With `canaryReplicaCount: 1`, a canary means two consumers for three partitions.
+
+### Where the merged design came from, so the next reader does not re-derive it
+
+The five gates that merged are substantially the Orders-side review posted on
+`EuroTransit-configuration#27` on **2026-09-10**. Three of its four points were adopted in full: the
+two database-wide gauges (`orders_pipeline_inflight`, `orders_reconciliation_open`) were dropped as
+rollout gates rather than filtered better, the replacements are per-pod counters, and the
+HTTP-weight-is-not-pipeline-share caveat is written next to the template and in
+`docs/delivery/progressive-delivery.md`. The gates are also written so an empty result fails rather
+than passes, which was the single most important property the previous version of this step asked
+for.
+
+**This is worth recording because it is the one thing this slice has done that reached anyone.**
+Everything else it produced in September sits on branches nobody has opened.
+
+### What is still wrong, and it is arithmetic rather than opinion
+
+All three findings below come from combining the merged thresholds with the k6 load that is meant to
+drive them. None is visible by reading either file alone, which is why they survived review.
+
+**Throughput first, because everything else depends on it.** Two VUs, `sleep(15)` plus roughly five
+seconds of work per iteration, gives about **6 checkouts per minute, so ~12 terminal checkouts per
+two-minute analysis window**. `order-placed` has **3 partitions**; during a canary on AKS there is 1 stable
+replica plus 1 canary replica in one consumer group, so the canary owns **one or two partitions of
+three** — which one depends on member ordering at the rebalance, not on the weight. Its share of
+terminal checkouts in a window is therefore about **four or eight**. *(Corrected 2026-10-07: the
+2026-09-22 version assumed two stable replicas and a fixed one-in-three.)*
+
+**F1 — the checkout failure-rate gate is a zero-failure gate in disguise.**
+`canary-checkout-failure-rate` computes `failed / (confirmed + failed)` over `[2m]` and requires
+`< 0.02`. With four to eight terminal checkouts attributable to the canary in that window, the smallest
+non-zero value the expression can take is **0.125 to 0.25**, six to twelve times the threshold. The gate therefore
+does not mean "fewer than 2% of checkouts failed"; it means **"no checkout failed at all"**. Orders
+has a non-zero background failure rate by design — seat conflicts, expired holds, sandbox declines —
+so the canary will abort on ordinary noise, and the symptom will read as a bad build. The 2026-09-10
+review asked for a comparison against the stable hash precisely so a pre-existing failure rate would
+not read as a regression; the merged version uses an absolute threshold instead.
+
+**F2 — the 5xx gate is an absolute count wearing a percentage.** `http-5xx-rate` divides
+`rate(...{status=~"5.."}[2m])` by `clamp_min(rate(...[2m]), 1)`. The clamp is there to avoid dividing
+by zero, but it clamps a **rate in requests per second**, not a count. At demo volume the canary sees
+a few requests per two minutes — on the order of 0.03 req/s — so the denominator clamps to **1** and
+the expression collapses to the numerator alone. One 5xx in the window gives `1/120 = 0.0083`, two
+give `0.0167`, three give `0.025`. So the gate actually fires at **three 5xx responses per two
+minutes**, regardless of how much traffic there was. It would behave as a true 2% ratio only at
+volumes above one request per second, which this demo will never reach. The threshold is not wrong,
+but what it measures changes with load, and the number written next to it describes neither regime
+honestly.
+
+**F3 — the canary's blast radius is about three times its stated weight.** `setWeight: 10` splits
+**HTTP**. The money path runs in the Kafka consumer, and partition assignment gives the canary one or
+two partitions of three. So at the first step the canary carries 10% of the entry traffic and **a
+third to two thirds of the checkouts that actually reserve, pay and confirm**. The merged
+documentation states the measurement consequence — that the guardrails do not claim end-to-end
+attribution — but not the safety consequence, which is that a reader who promotes at "10%" has exposed
+up to two thirds of the money path. The ratio is set by replica counts and partition count, not by the weight, and it moves
+whenever either changes.
+
+**F4 — the dead-letter gate counts the wrong pod** *(added 2026-10-07, found in review of #125)*.
+`canary-dead-letter-events` requires `increase(orders_events_dlt_total{hash=canary}) == 0`. But that
+counter is incremented by the dead-letter *consumers* (`OrderPlacedDeadLetterListener`,
+`RefundRequestedDeadLetterListener`), which run in their own group, `orders-dlt`. The pod that gave
+up only publishes the record; whichever pod owns that DLT partition in the other group counts it. So a
+stable pod's dead letter can abort a healthy canary, and a canary's dead letter can be counted on a
+stable pod and pass unseen. The attributable signal has to be emitted where the delivery is given up:
+a counter incremented by the recoverer in `KafkaConfiguration.kafkaErrorHandler` (an Orders change),
+with the gate switched to it (a configuration change).
+
+**None of the four is a reason to delay enabling the canary.** F1 and F2 make it abort too eagerly
+and refuse too late respectively; neither lets a bad build through silently, which was the failure
+mode worth fearing. They are worth fixing before the demonstration run, because a canary that aborts
+on noise cannot be used to demonstrate anything.
+
+### Which metrics are attributable, and which are not
+
+Kept from the previous version, corrected on 2026-10-07. The first three are per-pod counters,
+incremented in the process that did the work, so they describe what *that replica* did. The DLT
+counter is not, and that is F4 below:
+
+| Metric | Tags | What it means |
+| --- | --- | --- |
+| `orders_checkout_completed_total` | `result=confirmed\|failed` | A checkout this pod drove to a terminal state |
+| `orders_checkout_failed_total` | `reason` | The failure classes, separated |
+| `orders_events_dlt_total` | `topic`, `result` | Dead letters this pod **consumed** — not the ones it gave up on (F4) |
+| `orders_postsale_refund_completed_total` | `result` | Refunds this pod completed |
+
+Verified against `orders/src/main` on 2026-09-22: `countFailed` increments
+`orders.checkout.completed{result=failed}` and `orders.checkout.failed{reason}` together, once per
+failed checkout, so `confirmed + failed` is exactly the terminal count and the ratio in the gate has
+the right denominator.
+
+`orders_pipeline_inflight` and `orders_reconciliation_open` remain **not** attributable — both are
+published by scheduled jobs that query the whole table, so every replica reports the same global
+number. They are correctly absent from the gates.
+
+### Settled / open / stop-and-ask
+
+**Settled.**
+
+- Canary on Orders, blue/green on Catalog, and the gate set as merged. The design is not reopened;
+  F1 to F4 are corrections inside it.
+- Manual promotion at every step. The merged `Rollout` pauses after each analysis, and the DoD is
+  satisfied by metric-gated promote/abort either way.
+- The two unattributable gauges stay out of the gates and remain alert material.
+
+**Open, to decide while doing it.**
+
+- Whether F1 becomes a comparison against the stable hash, or a minimum-sample guard plus a threshold
+  chosen for the real sample size. The second is simpler and probably enough.
+- Whether to raise the k6 VU count instead of loosening thresholds. More traffic makes both F1 and F2
+  behave as written, and is the fix that changes no thresholds at all — but it also increases the
+  seat/date capacity the run consumes.
+- Whether the refund counter becomes a sixth gate once refunds appear in the demo traffic. The k6
+  script does not currently request any.
+
+**Stop-and-ask.**
+
+- **Every change discussed here except F4's counter is in the configuration repository**, which is
+  Person 1's surface.
+  F1 to F3 are reported, not pushed: configuration #50, assigned to `matteogastaldello` on
+  2026-10-07, linked to configuration #46 and application #123, which are rebuilding the load
+  generator — where F1 and F2, both sample-size problems, are cheapest to fix.
+- **F4 is half an Orders change.** The attributable counter is emitted by Orders' recoverer; only
+  the gate switch is configuration. F4 is added to configuration #50 once the counter exists.
+- **Turning `progressiveDelivery.enabled` on.** Platform-level, and not during the AKS maintenance
+  window.
+
+### Sequencing, which is still the part that bites
+
+*Rewritten 2026-10-07.* A canary measures a transition, so it needs a before and an after. The
+2026-09-22 version said that took two promotions to `main`; it does not, because `workflow_dispatch`
+already produced successive image generations from `dev`. What it takes is:
+
+1. **The window closes** — the AKS memory-reduction release completes and the Argo root resumes.
+2. **Enable and exercise** — turn on `progressiveDelivery`, start the load generator, recompute F1
+   to F3 against real numbers rather than estimated ones.
+3. **One change rolled out under the canary**, promoted, and one aborted by a gate. *That* is the
+   proof the DoD asks for — any new image from `dev` is a valid change to roll.
+
+All three are the configuration owner's to schedule. This slice's part is configuration #50 and
+being ready to read the gates when it happens.
+
+### Done when
+
+- F1 to F4 are reported to the owner of the configuration repository, with the arithmetic, and either
+  corrected or explicitly accepted.
+- Every gate, run by hand against Prometheus with the canary hash of a real rollout, returns a value —
+  not an empty result. Verified before the gates are trusted, not after.
+- A rollout that should pass is promoted, and the decision is visible in the rollout status.
+- A rollout that should fail is aborted by a gate, with the aborting gate identifiable. The merged
+  procedure already describes doing this by making one threshold temporarily impossible; that counts,
+  provided the impossible threshold never stays committed.
+- The DoD item *"Orders canary is demonstrated with metric-gated promote/abort"* can be ticked with a
+  link to the evidence.
+
+### Standing check
+
+Before closing: for every gate, **compute what its threshold means at the traffic the demonstration
+will actually produce**, not at the traffic the expression implies. F1 and F2 were both invisible
+until the k6 pacing and the partition count were put next to the thresholds — the queries are
+correct, and they still do not mean what they appear to mean. A gate is only understood once its
+sample size is known.
+
+
+---
+
+# Handover — 2026-09-18
+
+Replaces the handover written on 2026-09-16, which is now wrong in every particular that mattered:
+the four corrections F1–F4 were applied (step 4's review corrections, not the canary findings of the
+same names in step 5), the refund branch was merged, and the two defects that
+"belong to someone else and are written down nowhere else" are issues #109 and #110. Nothing of that
+section is worth keeping, so none of it is kept. What follows was read from the two repositories on
+2026-09-18, not remembered.
+
+> **Amended 2026-09-22.** This remains a snapshot of 2026-09-18 and is not rewritten, but one thing
+> below stopped being true on 2026-09-21: **the progressive-delivery machinery now exists.**
+> `EuroTransit-configuration#27` merged as `eda1fb1` — Argo Rollouts, a canary `Rollout` for Orders,
+> a blue/green `Rollout` for Catalog, five metric gates, a k6 load generator, and the
+> `ServiceMonitor` relabeling this plan said was missing. It is disabled by default and nothing is
+> deployed, so no DoD item moved. Step 5 above is rewritten accordingly. Everything else here still
+> holds, including the branch table — except that all four branches were pushed on 2026-09-18 and
+> none of them has a pull request.
+
+> **Amended 2026-10-07.** Three more things below stopped being true. **No promotion to `main` is
+> needed** — `workflow_dispatch` built images from `dev` twice, so "the one thing that is actually
+> blocked" is now `progressiveDelivery` and the AKS maintenance window, not a conversation about
+> `main`; step 5 is corrected accordingly. **#109 and #110 are closed** (the work landed in #114 and #120), and
+> #111 has a fix in review (#122). **The four branches will not get pull requests of their own**: their
+> commits travel with the first Orders code pull request. Sequencing from here lives in the local work
+> order, not in this snapshot.
 
 ## Where things stand
 
-Merged to `dev` today: the Catalog offer resolution follow-up (`7a1f7a6`, #107 — per-seat pricing and
-a required `offerId`, closing #93) and the local Debezium outbox fix (`89d9afc`, #105). `dev` is green
-at **347 tests**. Nothing is deployed: both `ci.yml` and `docker-gitops.yml` trigger on a push to
-`main`, and `main` has not been promoted.
+**`dev` is at `b4d2be2` and green at 392 tests. Nothing is deployed, and nothing has ever been
+deployed.** `origin/main` is at `f08ed67` (2026-08-28). The image tags in
+`EuroTransit-configuration/charts/eurotransit/values.yaml` are `0078e3d` (2026-08-26) for orders,
+payments, catalog, notifications and frontend, and `7975ee0` (2026-08-28) for inventory. `dev` is
+**100 commits ahead of `origin/main`**. Checkout visibility, the Catalog client, per-seat pricing,
+the post-sale refund, the `503` on the seat-map façade and the departed-run filter exist in no image.
 
-Issues closed today: #93, #83, #84, #81, #70. Still open: **#104** (mine, small — see below), **#98**
-(the same-day departed-run filter), **#86** (the umbrella; it closes when the refund lands), **#72**
-(deferred by decision, keep it open).
+**The delivery loop itself works; it just never runs.** `docker-gitops.yml` and `connect-gitops.yml`
+trigger only on a push to `main`, and we merge into `dev`. The loop is not theoretical: the
+configuration repository holds ten `github-actions[bot]` commits of the form
+`ci: bump EuroTransit images to <sha>`, and CI carries only ACR credentials and a config-repo PAT —
+no cluster credentials. `ci.yml` and `smoke-tests.yml` also trigger on `pull_request`, so **CI on
+pull requests is real**; it is only image publication and GitOps that are frozen.
 
-## The refund — step 4 is one step from done, on an unpushed branch
+**Because we merge into `dev` and not `main`, no `Closes #N` ever fires.** Every issue this slice has
+closed was closed by hand, and the next one will be too.
 
-`feature/orders-refund`, **12 local commits, never pushed**, build green at **368 tests**. As of
-today it is **22 commits behind `dev` with zero conflicts**, so rebasing is painless. Two rounds of
-implementation and two adversarial reviews are already in it.
+## Steps
 
-**Four corrections were decided and never applied.** They are the whole of what stands between that
-branch and a pull request.
+| Step | State |
+| --- | --- |
+| 0–4 | Done. Step 4 merged as #108. |
+| 5 — Orders canary | **Written above, not started.** Everything up to and including the gate definitions needs no cluster. Everything after needs two promotions to `main`. |
+| 6 — chaos, postmortem, agent log | Not written. Parts of it are unblocked; see below. |
 
-**F1 — a stuck refund's redrive is a guaranteed no-op, and the docs claim otherwise.** When a refund's
-payment reversal is definitively declined, Payments stores an idempotency record for the failure
-(`PaymentService`, the `FAILED` branch writes `responseCode = 422` and saves). A redrive re-sends the
-same deterministic `pay-refund-{orderId}` key, Payments replays the stored `FAILED`, and the incident
-re-opens unchanged. Nothing can close that record either: `closeAutoResolvable` only runs from
-`markRefunded` (unreachable), `closeStaleFor`'s callers all exclude `REFUNDING`, and `resolve` is
-filtered to `INVARIANT_VIOLATION`. The dead end pre-exists on the checkout side, so it is not a
-regression — what the branch introduced is the *claim*, in `api-design.md` and in ADR-015, that
-redrive is the operator's retry path for a stuck refund. For one of the three stuck states it is not.
-**Minimum: remove the promise.** The real fix probably lives in `payments/` (do not cache a
-provider-declined refund), which is a stop-and-ask.
+## Issues
 
-**F2 — the third `isTerminal` reader was left alone.** `ReconciliationOperationsService.resolve`
-guards on `!order.status.isTerminal` with a KDoc saying "so the money question is already settled".
-`REFUNDING` now answers `true` to a gate written to mean the opposite. **Not reachable today** —
-`resolve` only touches `INVARIANT_VIOLATION`, whose sole writer is `enterCompensating` inside the
-`CONFIRMING_INVENTORY -> COMPENSATING` transaction, and `COMPENSATING`'s only SQL exit is `FAILED`,
-so no order carrying one can reach `CONFIRMED`. Worth fixing anyway: it is one line, and it is the
-last instance of the exact class of mistake the correction round existed to eliminate.
+Closed recently, all by hand: **#86** (post-sale refund, via PR #108), **#104** (unknown Inventory
+outcome → `503` on the seat-map façade, via #112), **#98** (seat map refused for a same-day run that
+has already departed, via #113).
 
-**F3 — the new gauge test cannot fail the way the query actually breaks.** For a `REFUNDING` row with
-a null `refund_requested_at`, `CURRENT_TIMESTAMP - NULL` is `NULL`, `MAX` skips it, and `COALESCE`
-yields **0** — so a stuck refund is counted but reports age zero forever and no age alert fires. The
-test seeds `now() - 5s` and asserts `age >= 0 && age < 60`; zero satisfies that. Assert a lower bound
-(`age > 1`) and add a case for a null column so the masking is a recorded decision.
+Open: **#72** — mine, deferred by decision. Do not reopen the subject. **#109**, **#110**, **#111** —
+all `eravreto`'s, none blocking Orders.
 
-**F4 — an integration test is named for the half it does not exercise.**
-`redriving an already REFUNDED order is refused as terminal, and closes stale records` drives a clean
-refund, so no reconciliation record is ever opened and `closeStaleFor` returns 0. It would pass
-unchanged if that call were deleted. Force a `SEAT_RETURN_FAILURE` first, then assert the record is
-`RESOLVED` after the refused redrive.
+**#111 is the one to know about.** It is the Payments half of what the old handover called F1: a
+definitively declined refund is cached under the same deterministic key, so the redrive that Orders
+offers the operator replays the stored failure and the incident cannot close. Orders no longer
+*promises* that redrive works for that case, which is the whole of what F1 fixed. The chaos plan
+(experiment 4, and experiment 6) already names this as an expected outcome to be stated in the report
+rather than a recovery failure to be discovered during it.
 
-**Fold in with F1: refuse a redrive whose seat hold has expired.** Observed live today — Inventory's
-sweeper expires the reservation and releases the seats, and Orders never learns: the order sits in
-`PAYMENT_PENDING`/`REFUNDING` pointing at an `EXPIRED` reservation. The money is safe (Inventory
-refuses the confirmation with `RESERVATION_EXPIRED`, Orders compensates), so the cost is a pointless
-authorize-and-reverse cycle, not a hole. **Do not check `reservation_expires_at` before authorizing**
-— that instant comes from Inventory's database clock, and comparing it against Orders' clock at the
-boundary would throw away sales Inventory would still honour; Invariant 4 makes Inventory the only
-authority. At redrive time hours have passed, the ambiguity is gone, and the operator gets an honest
-refusal instead of triggering a charge and a refund with one click. F1 already touches `redrive`.
+## Unmerged work: four branches, and a stale local `dev`
 
-## Two things in the step 4 plan above that are now stale
+| Branch | Where | On top of | Contents |
+| --- | --- | --- | --- |
+| `docs/orders-step-5-canary` | `origin`, **no PR** | `271a617` | Step 5, the chaos-plan rewrite, and this handover |
+| `docs/adr-006-authorize-semantics` | **local only**, 1 commit | `b4d2be2` | The ADR-006 amendment: `authorize` charges immediately, and why deferring the capture is worse |
+| `docs/issue-72-analysis` | **local only**, 1 commit | `271a617` | #72 costed properly, with a recommendation against it for now |
 
-**The `#70` collision note is obsolete.** It says to read `feature/issue-70-readable-notifications`
-before writing a third notification. That branch is merged (`6ad3de2`, #106) and deleted. A refund
-notification must be written against the payload as it is on `dev` now, not against that branch.
+*(Corrected 2026-10-07: the heading says four and the table lists three — the fourth,
+`docs/dod-orders-ticks`, was committed fifteen minutes after this table was written.)*
 
-**`V13`'s promise to tighten `offer_id` to `NOT NULL` is wrong** and the correction is on the entity,
-not in the migration. Editing an applied migration changes its Flyway checksum and breaks startup
-everywhere it has already run — found the hard way today, by a local startup failing with
-`Migration checksum mismatch for migration version 13` after a comment-only edit, on a green build.
-The test suites cannot catch this: they always start from an empty database.
+Three of the four touch `docs/planning/orders-slice-plan.md`, in three non-overlapping regions
+(#72 near line 310, step 5 and this handover at the end), so they merge into each other cleanly.
+`docs/orders-step-5-canary` is two commits behind `origin/dev` — it predates the #113 merge — and
+being docs-only that is a rebase with nothing in it, not a conflict.
 
-## Two defects found today that belong to someone else and are written down nowhere else
+**Local `dev` is stale at `271a617`, one merge behind `origin/dev`.** Fetch before branching off it,
+or `git diff dev...` will show other people's merged work as if it were yours. That is not a
+hypothetical: it happened while writing this.
 
-Both are for the frontend/payments owner (`eravreto`). Neither is blocking. Neither has an issue yet.
+## The one thing that is actually blocked, and on whom
 
-**Payments publishes to Kafka after the charge, with no outbox.** Observed: Stripe accepted the
-charge, the event publish then failed, the endpoint answered `500`, and Orders classified it as an
-unknown outcome — correctly, because it cannot know whether money moved. So a real charge can exist
-with no order that knows about it. The specific publish bug that produced it is already fixed in the
-source, but the structural question is untouched: Orders solved exactly this with an outbox row
-written in the same transaction; Payments publishes directly.
+**Step 5 needs two promotions to `main`, not one.** A canary measures a transition. The first
+promotion is a cold install with nothing to compare against — it is the baseline, and it is also what
+first puts the money path into an image. The canary is demonstrated on the *second*. Until both have
+happened, the DoD canary item cannot be ticked no matter what is written or configured.
 
-**The order page never gives up.** `OrderStatusPage.poll()` polls every 1500 ms until the status is
-terminal or `COMPENSATING`; `reservationExpiresAt` appears in no exit condition. When the hold
-expires the seats are released and the order can no longer complete, but the page keeps polling an
-outcome that will never arrive. Also, the countdown copy says the *payment* expires; it is the seat
-hold, and #88 set that as an explicit copy constraint.
+**The blocker is a conversation, not code.** Promotion to `main` is the Technical Coordinator's
+sequencing call, and **that conversation has not happened yet**. Steps 0 to 4 were all doable alone.
+Steps 5 and 6 are the first that are not: they need a cluster, shared surface (the ServiceMonitor
+relabeling, Traefik routing) and other people's services running. This slice is the only one with
+work stopped on a decision that is not its own to make.
 
-## Operational traps this session hit twice each, worth not repeating
+## What the DoD says versus what is true
 
-**Stale local images.** `docker compose up -d` reuses an existing image. Two investigations were sent
-down the wrong path by months-old images: once an endpoint that did not exist yet, once a bug already
-fixed in source. Run `docker compose build <service>` before trusting any local reproduction.
+`docs/capstone-dod.md` has 55 items and **zero ticked**, while roughly half are done and evidenced in
+the repositories. Nobody maintains it, so today it carries no information about where the project is.
+Audited against the code and both repositories on 2026-09-18, the shape is:
 
-**Green build, broken change.** Both defects that mattered today — the per-seat price and the Flyway
-checksum — passed CI. The first because every test used one seat; the second because suites start
-from an empty database. Neither would have been found without running the real thing by hand.
+- **Consistency and idempotency (§2)** is essentially complete across Orders, Inventory and Payments,
+  with tests naming the invariants.
+- **Resilience (§3)** is complete in code: breakers, per-dependency bulkheads (seat-map load sheds
+  without touching checkout), bounded retries, durable phases preserved across unknown outcomes,
+  reconciliation records and redrive. Probes and PDBs are configured in the chart. What is missing is
+  cluster *proof*, not mechanism.
+- **Design (§1)** is documented; the one gap is that graceful shutdown is configured and its
+  idempotency consequences are tested, but the drain itself has never been *demonstrated*.
+- **Delivery and observability (§4)** is where the damage is, and most of it is not mine — see below.
+- **Chaos (§6)**, the **postmortem** and the **demo** (§8) are not started, and the chaos reports and
+  postmortem in the configuration repository are still empty templates.
 
-## Suggested order from here
+## Things that are provably not done and are not mine
 
-1. Write the two reports above as issues, before they are lost.
-2. Step 4: apply F1-F4 plus the redrive item, rebase on `dev`, open the PR. This closes #86.
-3. #104 — map the unknown outcome from the seat-map façade to `503`. Small, self-contained; the issue
-   body carries the full analysis and the measurements.
-4. #98 — the same-day departed-run filter. The Catalog client makes it reachable;
-   `GET /api/catalog/routes/{routeId}` already returns `departureTime` and `departureZone`.
-5. Steps 5 and 6 of this plan, still unwritten.
+Each read from the configuration repository, not from a document claiming it:
+
+- **The gateway does not reject unauthenticated requests.** `ingress.forwardAuth.enabled` is `false`
+  in `values.yaml` and is overridden in no environment file, and no forward-auth workload exists
+  under `platform/`. The `IngressRoute` correctly omits the middleware when it is disabled, so this
+  is off, not broken. Orders enforces the principal and ownership locally regardless (DoD §5.2/§5.3
+  hold), but §5.1 does not. Person 1's.
+- **There is no tracing.** `global.observability.tracing.enabled` is `false` everywhere, and the OTLP
+  endpoint points at `otel-collector.monitoring.svc.cluster.local`, which exists in no manifest in
+  the repository. §4.9 — one order traced across the money path — cannot be produced today. Person 5's.
+- **No progressive-delivery machinery exists at all.** No `kind: Rollout`, no `AnalysisTemplate`, no
+  `rollouts_pod_template_hash`, and nothing blue/green for Catalog. §4.4 is mine and blocked; §4.5 is
+  Person 5's and blocked the same way.
+- **Dashboards and alerts exist as manifests and have never run.** Three dashboard ConfigMaps, a
+  chart `PrometheusRule` and a platform rules file — none of it live, because nothing is deployed.
+- **The configuration repository has no `.github` directory.** No CI, no policy-as-code. §7.3
+  ("agent-generated delivery artifacts require human review *or* policy-as-code") rests entirely on
+  human review. Defensible, but it should be a stated choice rather than an accident.
+- **`EuroTransit-configuration/docs/governance/agent-log.md` is still the empty three-slot template**,
+  while `EuroTransit-application/docs/agent-log.md` has fourteen real cases. Either point one at the
+  other or delete the stub; as it stands the configuration repository looks like the log was never
+  started.
+
+## Orders work that needs no cluster and no permission
+
+1. **The postmortem has already happened and nobody wrote it up.**
+   `EuroTransit-configuration/docs/delivery/kind-payment-authorized-order-failed-incident.md` is a
+   168-line report of a real money-path incident on kind — Stripe authorized, the
+   `payment-authorized` publish blocked on a missing topic, Orders timed out at three seconds,
+   classified the checkout as failed and compensated the reservation, leaving Orders `FAILED`,
+   Payments `AUTHORIZED` and the seat cancelled. Correlation ID, order ID and idempotency key are all
+   recorded. That is a blameless postmortem with the investigation already done; what is missing is
+   the write-up into `docs/templates/postmortem-template.md`, which satisfies §8.2 with no cluster.
+   It is also the incident #109 is the structural fix for, which makes the two worth writing together.
+2. **`principalId` is not in the money-path logs.** Logging is ECS-structured with the correlation ID
+   propagated into the MDC, and order IDs appear in the messages, but no log statement in
+   `orders/src/main` carries the principal. §5.9 asks for correlation ID, principal ID, order ID and
+   outcome. Three of four. Small, local, mine.
+3. **Step 6 can be written now**, the same way step 5 was: the plan costs nothing to write and is
+   what makes the cluster time productive when it arrives.
+4. **Tick the DoD.** Nothing about it requires the coordinator's agreement to *start*: the items that
+   are done are done, and an accurate checklist is what turns the promotion conversation from a
+   request into a status report.
+
+## Traps this slice has already paid for twice
+
+**Stale local images.** `docker compose up -d` reuses whatever image exists. Two investigations went
+down the wrong path on months-old images — once chasing an endpoint that did not exist yet, once a
+bug already fixed in source. Run `docker compose build <service>` before trusting any local
+reproduction.
+
+**A green build is not a working change.** The two defects that mattered most recently — the per-seat
+price and a Flyway checksum mismatch — both passed CI. The first because every test used a single
+seat; the second because every suite starts from an empty database. Neither would have been caught
+without running the real thing by hand.
+
+**Never edit an applied migration.** Changing a file Flyway has already run changes its checksum and
+breaks startup everywhere it has run, a comment-only edit included. `V13`'s note promising to tighten
+`offer_id` to `NOT NULL` is therefore wrong: that correction belongs on the entity or in a new
+migration.
+
+**A stale local branch reads as your own work.** See `dev` above.

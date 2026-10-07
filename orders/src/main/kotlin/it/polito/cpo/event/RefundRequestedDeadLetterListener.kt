@@ -54,6 +54,8 @@ class RefundRequestedDeadLetterListener(
         @Header(KafkaHeaders.RECEIVED_KEY, required = false) recordKey: String?,
         @Header(KafkaHeaders.DLT_ORIGINAL_OFFSET, required = false) originalOffset: ByteArray?,
         @Header(KafkaHeaders.DLT_EXCEPTION_FQCN, required = false) exceptionFqcn: String?,
+        // What the listener actually threw: exceptionFqcn is the container's wrapper around it.
+        @Header(KafkaHeaders.DLT_EXCEPTION_CAUSE_FQCN, required = false) causeFqcn: String?,
         @Header(KafkaHeaders.DLT_EXCEPTION_MESSAGE, required = false) exceptionMessage: String?,
     ) {
         val event = try {
@@ -64,17 +66,22 @@ class RefundRequestedDeadLetterListener(
             count("poison")
             log.error(
                 "Poison record on {}: key={} originalOffset={} cause={}",
-                TOPIC, recordKey, originalOffset?.let { String(it) }, exceptionFqcn, ex,
+                TOPIC, recordKey, originalOffset?.let { String(it) }, causeFqcn ?: exceptionFqcn, ex,
             )
             return
         }
 
         MDC.putCloseable(CorrelationId.CONTEXT_KEY, event.correlationId).use {
-            runBlocking { record(event, exceptionFqcn, exceptionMessage) }
+            runBlocking { record(event, exceptionFqcn, causeFqcn, exceptionMessage) }
         }
     }
 
-    private suspend fun record(event: RefundRequestedEvent, exceptionFqcn: String?, exceptionMessage: String?) {
+    private suspend fun record(
+        event: RefundRequestedEvent,
+        exceptionFqcn: String?,
+        causeFqcn: String?,
+        exceptionMessage: String?,
+    ) {
         val order = orderService.getOrderById(event.orderId)
         if (order == null) {
             // An incident an operator cannot redrive is alert noise, so none is opened.
@@ -111,7 +118,7 @@ class RefundRequestedDeadLetterListener(
             orderId = event.orderId,
             orderState = order.status.name,
             correlationId = event.correlationId,
-            failureClass = FailureClassifier.forDeadLetter(exceptionFqcn),
+            failureClass = FailureClassifier.forDeadLetter(exceptionFqcn, causeFqcn),
             detail = exceptionMessage,
         )
         count("recorded")

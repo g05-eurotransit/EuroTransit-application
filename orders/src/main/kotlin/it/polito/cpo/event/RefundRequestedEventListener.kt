@@ -1,25 +1,25 @@
 package it.polito.cpo.event
 
 import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.observation.ObservationRegistry
 import it.polito.cpo.contracts.events.RefundRequestedEvent
 import it.polito.cpo.observability.CorrelationId
 import it.polito.cpo.service.RefundOrchestrator
-import kotlinx.coroutines.reactor.ReactorContext
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import org.springframework.kafka.annotation.KafkaListener
 import org.springframework.stereotype.Component
-import reactor.util.context.Context
 import tools.jackson.databind.ObjectMapper
 
 /**
  * Consumes `refund-requested` and drives the post-sale refund (ADR-015). Modelled directly on
- * [OrderPlacedEventListener] — same correlation-id seeding into MDC and Reactor context, same
- * poison-versus-retryable distinction, same `orders.events.consumed{topic,result}` counter — because
- * the two consumers share every property that matters for durability: at-least-once delivery, an
- * offset committed only after processing, and an unparseable payload classified non-retryable so it
- * reaches the dead-letter topic immediately instead of burning the retry budget on a certainty.
+ * [OrderPlacedEventListener] — same correlation id in the MDC and the Reactor context, same consumer
+ * observation in the Reactor context ([pipelineReactorContext]), same poison-versus-retryable
+ * distinction, same `orders.events.consumed{topic,result}` counter — because the two consumers share
+ * every property that matters for durability: at-least-once delivery, an offset committed only after
+ * processing, and an unparseable payload classified non-retryable so it reaches the dead-letter topic
+ * immediately instead of burning the retry budget on a certainty.
  *
  * A separate topic and a separate listener from `order-placed` on purpose (ADR-015): that pipeline's
  * consumer must keep treating `CONFIRMED` as terminal, so a redelivered `order-placed` never restarts
@@ -30,6 +30,7 @@ class RefundRequestedEventListener(
     private val objectMapper: ObjectMapper,
     private val orchestrator: RefundOrchestrator,
     private val meterRegistry: MeterRegistry,
+    private val observationRegistry: ObservationRegistry,
 ) {
     private val log = LoggerFactory.getLogger(RefundRequestedEventListener::class.java)
     private val topic = "refund-requested"
@@ -47,7 +48,7 @@ class RefundRequestedEventListener(
         }
 
         MDC.putCloseable(CorrelationId.CONTEXT_KEY, event.correlationId).use {
-            runBlocking(ReactorContext(Context.of(CorrelationId.CONTEXT_KEY, event.correlationId))) {
+            runBlocking(pipelineReactorContext(event.correlationId, observationRegistry)) {
                 orchestrator.processRefundRequested(event)
             }
             count("processed")
