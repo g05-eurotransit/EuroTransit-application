@@ -1131,8 +1131,7 @@ Full build after these fixes: **368 tests, 0 failures**.
 ## Step 5 — Orders canary: prove the one that now exists
 
 **Not a decision this step gets to make.** The canary is required by the DoD item *"Orders canary is
-demonstrated with metric-gated promote/abort"* (`docs/capstone-dod.md`)
-("Orders canary is demonstrated with metric-gated promote/abort"), chosen in
+demonstrated with metric-gated promote/abort"* (`docs/capstone-dod.md`), chosen in
 `architecture-decisions.md:61-74` with its alternatives rejected in writing, and assigned to Person 2
 in `team-agentic-implementation-plan.md:24`. This step schedules it; it does not relitigate it.
 
@@ -1364,7 +1363,8 @@ sample size is known.
 # Handover — 2026-09-18
 
 Replaces the handover written on 2026-09-16, which is now wrong in every particular that mattered:
-the four corrections F1–F4 were applied, the refund branch was merged, and the two defects that
+the four corrections F1–F4 were applied (step 4's review corrections, not the canary findings of the
+same names in step 5), the refund branch was merged, and the two defects that
 "belong to someone else and are written down nowhere else" are issues #109 and #110. Nothing of that
 section is worth keeping, so none of it is kept. What follows was read from the two repositories on
 2026-09-18, not remembered.

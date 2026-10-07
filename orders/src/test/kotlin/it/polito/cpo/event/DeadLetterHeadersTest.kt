@@ -77,8 +77,11 @@ class DeadLetterHeadersTest {
         )
     }
 
+    // Only the classifier mapping: in production a poison record never reaches classification. Its
+    // payload is the one the main listener could not parse, so the dead-letter listener cannot parse
+    // it either, takes its poison branch (a counter and an error log), and opens no incident.
     @Test
-    fun `a poison payload keeps its own label through the wrapper`() {
+    fun `the classifier maps a PoisonEventException through the wrapper`() {
         assertEquals(
             FailureClassifier.POISON_PAYLOAD,
             classify(PoisonEventException("Unparseable order-placed payload", IllegalArgumentException("bad json"))),
