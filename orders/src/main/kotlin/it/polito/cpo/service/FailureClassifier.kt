@@ -45,6 +45,9 @@ object FailureClassifier {
         exceptionFqcn.endsWith("TimeoutException") -> DEPENDENCY_ERROR
         exceptionFqcn.contains("WebClient") -> DEPENDENCY_ERROR
         exceptionFqcn.contains("CallNotPermitted") -> DEPENDENCY_ERROR
+        // A saturated bulkhead refuses with BulkheadFullException (maxWaitDuration = ZERO): the same
+        // "dependency not available right now" as an open breaker, not an unexplained failure.
+        exceptionFqcn.contains("BulkheadFull") -> DEPENDENCY_ERROR
         exceptionFqcn.contains("R2dbc") || exceptionFqcn.contains("DataAccess") -> DEPENDENCY_ERROR
         else -> UNKNOWN
     }
