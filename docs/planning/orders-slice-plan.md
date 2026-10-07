@@ -168,7 +168,7 @@ counter-proposal to negotiate.
 | 2 | Refund part 1 — the ADR and `offerId` in the checkout contract | **done** — see the outcome below |
 | 3 | Refund part 2 — Catalog client and policy resolution | **done** — see the outcome below |
 | 4 | Refund part 3 — refund state machine and endpoint | **done** — merged as #108 |
-| 5 | Orders canary — prove the one that now exists | **rewritten 2026-09-22.** The machinery merged in configuration `eda1fb1`, disabled; three defects found in the gates; still needs two promotions to `main` |
+| 5 | Orders canary — prove the one that now exists | **rewritten 2026-09-22, corrected 2026-10-07.** The machinery merged in configuration `eda1fb1`, disabled; three defects in the gates, reported as configuration #50; waits on `progressiveDelivery` and the AKS maintenance window, not on promotions |
 | 6 | Chaos experiments, postmortem, agent log | to be written |
 
 Steps 2 to 4 are one feature split by dependency, not three features. Step 3 needs part of #85 to
@@ -367,8 +367,8 @@ Out of scope for this delivery. Not rejected on merit — the proposal is sound 
 argument is real — but on three grounds:
 
 1. **The DoD does not ask for it,** and the project's binding constraint right now is proving what
-   already exists. Nothing is deployed, 55 DoD items are unticked, and the canary needs two
-   promotions that have not started.
+   already exists. Nothing is demonstrated, most DoD items are unticked, and the canary has
+   not yet run.
 2. **It is materially more expensive than the draft said,** because the SCA benefit requires
    replacing the Stripe integration on both ends first.
 3. **It would put the one already-proven part of the money path back into flux** to gain something
@@ -379,29 +379,19 @@ ever accepted it must be planned as its own cross-slice block with Inventory, Pa
 configuration repository involved from the start — and with the PaymentIntents migration as its
 first step, not as an implementation detail of the third.
 
-### The cheap subset worth doing instead
+### The cheap subset this analysis first proposed — withdrawn
 
-Costing #72 surfaced a smaller mismatch that stands on its own and does **not** need any of it.
+Costing #72 surfaced a mismatch: Orders' vocabulary (`payment_authorizations`, `AUTHORIZED`, a
+`CONFIRMING_INVENTORY` phase, a "reversal") reads as authorize-then-capture, while
+`StripeSandboxProvider.authorize` charges immediately and a compensation refunds. The first version of
+this section proposed closing that gap with `capture: false` and a capture after Inventory confirms.
 
-**Orders' state machine is built on authorize-then-capture semantics, and Payments implements
-charge-then-refund.** Orders has `payment_authorizations`, a status of `AUTHORIZED`, a
-`CONFIRMING_INVENTORY` phase that exists so money is committed only after Inventory confirms, and a
-`COMPENSATING` phase that "reverses" it. But `StripeSandboxProvider.authorize` posts to `/charges`
-with capture defaulting to true — it takes the money immediately — and compensation issues a refund.
-
-The consequences are real but small, which is why this is a subset and not an emergency:
-
-- A checkout that compensates produces **two movements on the customer's statement**, a charge and a
-  refund, where an authorization that is voided produces none.
-- The reversal costs a real refund rather than a free void, and inherits the dead end in #111.
-- The word "authorization" in ADR-015, `api-design.md` and the Orders code describes something the
-  system does not do.
-
-Making the provider call an actual authorization (`capture: false`) and capturing after Inventory
-confirms would align the implementation with the model Orders already documents. It is **local to
-Payments**, needs no new states anywhere, and it is the part of #72's value that can be had without
-#72. Belongs to the Payments owner; not filed as an issue yet.
-
+**That proposal is withdrawn.** ADR-006, written the same afternoon, records why deferring the
+capture is the weaker ordering: Payments cannot know when Inventory has confirmed, so Orders would
+have to call a capture as a new remote step with its own durable phase, and a capture failing
+**after** Inventory has committed the sale leaves the seat `SOLD` with no money taken. Money first
+means a sale is never confirmed that cannot be charged for. The cost — two statement movements on a
+compensated checkout — is the accepted trade, and the naming stays as it is on purpose.
 
 ---
 
@@ -1151,6 +1141,12 @@ when written and stopped being true on 2026-09-21, when `EuroTransit-configurati
 re-decided, not worked around — so the step below is a different step from the one it replaces. **It
 is no longer a plan to build a canary. It is a plan to prove one, and to fix what is wrong with it.**
 
+**Corrected on 2026-10-07**, in place, because three facts below were wrong when read against both
+repositories that day: the money path *is* in images (two `workflow_dispatch` runs of
+`docker-gitops.yml`), so no promotion to `main` is needed; Orders runs **one** replica on AKS, not
+two, which makes F1 and F3 worse than first computed; and F1 to F3 have been reported, as
+configuration #50. The sections changed are marked.
+
 ### Verified before writing
 
 Read from both repositories on 2026-09-22.
@@ -1172,10 +1168,16 @@ for `orders` and `catalog` only. This was the blocking defect the previous versi
 identified, and it is fixed: Prometheus sanitises the label to `rollouts_pod_template_hash`, which is
 what every gate filters on.
 
-**Nothing is deployed, still.** `origin/main` of the application repository is at `f08ed67`
-(2026-08-28) and `origin/dev` is 100 commits ahead of it. The image tags in `values.yaml` are still
-`0078e3d` (2026-08-26) and `7975ee0` for inventory. The money path exists in no image, so none of the
-machinery above has ever run.
+**The money path is in images** *(corrected 2026-10-07)*. `origin/main` of the application
+repository is still `f08ed67` (2026-08-28), but `docker-gitops.yml` also runs on `workflow_dispatch`
+and was run from `dev` — `e2748f8` on 2026-09-22 and `98bedf2` on 2026-09-27 — each time building every
+service and bumping the configuration repository; later frontend fixes moved the tags to `4364f1f`.
+Successive image generations therefore already exist in GitOps history, which is the transition a
+canary measures. An AKS cluster is running — configuration #43 to #45 operate on it — but on
+2026-10-07 it is inside the memory-reduction maintenance window
+(`docs/platform/aks-memory-reduction-runbook.md`), with the Argo root paused and sources pinned.
+What is live cannot be read from Git. The residual problem is different: the configuration points at
+images built from commits that are not on `main`, so `main`'s history does not describe what runs.
 
 **The traffic source is a suspended k6 CronJob.** `progressive-delivery-k6`: two VUs, each doing a
 token fetch, one `POST /api/orders` for a single seat on `of-001`, a poll to a terminal state at two
@@ -1185,6 +1187,10 @@ second intervals, then `sleep(15)`. Seats and travel dates come from a non-wrapp
 **The consumer group is static.** `spring.kafka.consumer.group-id` is `orders`, hardcoded in
 `application.yaml` and not overridden by the chart. Canary pods therefore join the *same* group as
 stable pods.
+
+**AKS runs one Orders replica** *(added 2026-10-07)*. The AKS application renders with
+`values-production.yaml`, where `orders.replicaCount` is `1`; `values.yaml`'s `2` is not what runs
+there. With `canaryReplicaCount: 1`, a canary means two consumers for three partitions.
 
 ### Where the merged design came from, so the next reader does not re-derive it
 
@@ -1207,14 +1213,16 @@ drive them. None is visible by reading either file alone, which is why they surv
 
 **Throughput first, because everything else depends on it.** Two VUs, `sleep(15)` plus roughly five
 seconds of work per iteration, gives about **6 checkouts per minute, so ~12 terminal checkouts per
-two-minute analysis window**. `order-placed` has **3 partitions**; during a canary there are 2 stable
-replicas plus 1 canary replica in one consumer group, so the canary owns **one partition of three**.
-Its share of terminal checkouts in a window is therefore about **four**.
+two-minute analysis window**. `order-placed` has **3 partitions**; during a canary on AKS there is 1 stable
+replica plus 1 canary replica in one consumer group, so the canary owns **one or two partitions of
+three** — which one depends on member ordering at the rebalance, not on the weight. Its share of
+terminal checkouts in a window is therefore about **four or eight**. *(Corrected 2026-10-07: the
+2026-09-22 version assumed two stable replicas and a fixed one-in-three.)*
 
 **F1 — the checkout failure-rate gate is a zero-failure gate in disguise.**
 `canary-checkout-failure-rate` computes `failed / (confirmed + failed)` over `[2m]` and requires
-`< 0.02`. With about four terminal checkouts attributable to the canary in that window, the smallest
-non-zero value the expression can take is **0.25**, twelve times the threshold. The gate therefore
+`< 0.02`. With four to eight terminal checkouts attributable to the canary in that window, the smallest
+non-zero value the expression can take is **0.125 to 0.25**, six to twelve times the threshold. The gate therefore
 does not mean "fewer than 2% of checkouts failed"; it means **"no checkout failed at all"**. Orders
 has a non-zero background failure rate by design — seat conflicts, expired holds, sandbox declines —
 so the canary will abort on ordinary noise, and the symptom will read as a bad build. The 2026-09-10
@@ -1233,12 +1241,12 @@ but what it measures changes with load, and the number written next to it descri
 honestly.
 
 **F3 — the canary's blast radius is about three times its stated weight.** `setWeight: 10` splits
-**HTTP**. The money path runs in the Kafka consumer, and partition assignment gives the canary one
-partition of three. So at the first step the canary carries 10% of the entry traffic and **roughly a
-third of the checkouts that actually reserve, pay and confirm**. The merged documentation states the
-measurement consequence — that the guardrails do not claim end-to-end attribution — but not the
-safety consequence, which is that a reader who promotes at "10%" has exposed a third of the money
-path. The ratio is set by replica counts and partition count, not by the weight, and it moves
+**HTTP**. The money path runs in the Kafka consumer, and partition assignment gives the canary one or
+two partitions of three. So at the first step the canary carries 10% of the entry traffic and **a
+third to two thirds of the checkouts that actually reserve, pay and confirm**. The merged
+documentation states the measurement consequence — that the guardrails do not claim end-to-end
+attribution — but not the safety consequence, which is that a reader who promotes at "10%" has exposed
+up to two thirds of the money path. The ratio is set by replica counts and partition count, not by the weight, and it moves
 whenever either changes.
 
 **None of the three is a reason to delay enabling the canary.** F1 and F2 make it abort too eagerly
@@ -1289,26 +1297,27 @@ number. They are correctly absent from the gates.
 
 **Stop-and-ask.**
 
-- **Every change discussed here is in the configuration repository**, which is Person 1's surface and
-  was merged by him three days ago. F1 to F3 are reported, not pushed.
-- **Turning `progressiveDelivery.enabled` on.** Platform-level, and it cannot precede the first
-  promotion anyway.
+- **Every change discussed here is in the configuration repository**, which is Person 1's surface.
+  F1 to F3 are reported, not pushed: configuration #50, assigned to `matteogastaldello` on
+  2026-10-07, linked to configuration #46 and application #123, which are rebuilding the load
+  generator — where F1 and F2, both sample-size problems, are cheapest to fix.
+- **Turning `progressiveDelivery.enabled` on.** Platform-level, and not during the AKS maintenance
+  window.
 
 ### Sequencing, which is still the part that bites
 
-Unchanged from the previous version, and now more expensive to ignore. A canary measures a
-transition, so it needs a before and an after. **Two promotions are required:**
+*Rewritten 2026-10-07.* A canary measures a transition, so it needs a before and an after. The
+2026-09-22 version said that took two promotions to `main`; it does not, because `workflow_dispatch`
+already produced successive image generations from `dev`. What it takes is:
 
-1. **First promotion** — `dev` into `main`. A first install is a cold start, not a progressive
-   rollout. This is what puts the money path into an image for the first time, and it is the baseline
-   the canary is measured against.
-2. **Enable and exercise** — turn on `progressiveDelivery`, start k6, fix F1 to F3 against real
-   numbers rather than estimated ones.
-3. **Second promotion** — a change rolled out under the canary. *That* is the proof the DoD asks for.
+1. **The window closes** — the AKS memory-reduction release completes and the Argo root resumes.
+2. **Enable and exercise** — turn on `progressiveDelivery`, start the load generator, recompute F1
+   to F3 against real numbers rather than estimated ones.
+3. **One change rolled out under the canary**, promoted, and one aborted by a gate. *That* is the
+   proof the DoD asks for — any new image from `dev` is a valid change to roll.
 
-What changed since 2026-09-17 is who is waiting. The first promotion no longer blocks only this
-slice: Argo Rollouts and the k6 load test (Person 1), two new chaos experiments (Person 5), and the
-Payments outbox (#109) are all now queued behind the same event. **Nobody has had the conversation.**
+All three are the configuration owner's to schedule. This slice's part is configuration #50 and
+being ready to read the gates when it happens.
 
 ### Done when
 
@@ -1349,6 +1358,14 @@ section is worth keeping, so none of it is kept. What follows was read from the 
 > deployed, so no DoD item moved. Step 5 above is rewritten accordingly. Everything else here still
 > holds, including the branch table — except that all four branches were pushed on 2026-09-18 and
 > none of them has a pull request.
+
+> **Amended 2026-10-07.** Three more things below stopped being true. **No promotion to `main` is
+> needed** — `workflow_dispatch` built images from `dev` twice, so "the one thing that is actually
+> blocked" is now `progressiveDelivery` and the AKS maintenance window, not a conversation about
+> `main`; step 5 is corrected accordingly. **#109 and #110 are closed** (the work landed in #114 and #120), and
+> #111 has a fix in review (#122). **The four branches will not get pull requests of their own**: their
+> commits travel with the first Orders code pull request. Sequencing from here lives in the local work
+> order, not in this snapshot.
 
 ## Where things stand
 
