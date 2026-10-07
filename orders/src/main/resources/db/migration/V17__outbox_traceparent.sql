@@ -1,0 +1,12 @@
+-- #117, break B: carry the trace context across the outbox.
+--
+-- Orders never publishes to Kafka itself. It writes a row here in the same transaction as the state
+-- change, and Debezium's EventRouter relays it. Nothing in the row said which trace it belonged to,
+-- so every consumer of an Orders event -- the checkout pipeline, Notifications, the refund pipeline --
+-- started a trace of its own, and one checkout could never be followed end to end.
+--
+-- The column holds the W3C `traceparent` of the span that wrote the row (OrderOutbox). The connector
+-- places it in a record header of the same name (`table.fields.additional.placement`), where Spring
+-- Kafka's consumer observation reads it. Nullable: a row written with tracing off carries none, and
+-- its consumer simply starts a new trace, exactly as before.
+ALTER TABLE outbox_events ADD COLUMN traceparent TEXT;

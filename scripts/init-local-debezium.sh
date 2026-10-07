@@ -107,7 +107,12 @@ JSON
 
 # Orders has its own database (orders_db) so it needs a separate connector with distinct
 # replication slot/publication. The EventRouter routes each outbox row to the topic named by its
-# `type` column: order-placed / order-confirmed / notification-requested.
+# `type` column: order-placed / order-confirmed / notification-requested / refund-requested.
+#
+# `additional.placement` copies the row's `traceparent` column into a record header of the same name
+# (#117): the consumer's observation reads it, so the consumer joins the trace of the span that wrote
+# the row instead of starting its own. Orders only for now -- it is the only outbox that writes the
+# column. The cluster connector (configuration, orders-outbox-connect.yaml) needs the same line.
 read -r -d '' ORDERS_CONFIG <<'JSON' || true
 {
   "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
@@ -130,7 +135,8 @@ read -r -d '' ORDERS_CONFIG <<'JSON' || true
   "transforms.outbox.table.field.event.payload": "payload",
   "transforms.outbox.table.expand.json.payload": "true",
   "transforms.outbox.route.topic.replacement": "${routedByValue}",
-  "transforms.outbox.route.by.field": "type"
+  "transforms.outbox.route.by.field": "type",
+  "transforms.outbox.table.fields.additional.placement": "traceparent:header:traceparent"
 }
 JSON
 

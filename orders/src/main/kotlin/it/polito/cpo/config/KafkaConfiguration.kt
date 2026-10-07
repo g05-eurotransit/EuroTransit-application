@@ -32,8 +32,9 @@ class KafkaConfiguration {
     @Bean
     fun kafkaTemplate(producerFactory: ProducerFactory<String, String>): KafkaTemplate<String, String> {
         val template = KafkaTemplate(producerFactory)
-        // Emit producer observation spans so `traceparent` is injected into record headers and the
-        // async Kafka stages join the checkout trace end-to-end (slo-observability.md §Tracing).
+        // Producer observation, so a record sent through this template carries `traceparent`. Since the
+        // outbox, that is only the dead-letter path: business events are written to `outbox_events`
+        // and relayed by Debezium, and their trace context travels in the row instead (OrderOutbox).
         template.setObservationEnabled(true)
         return template
     }

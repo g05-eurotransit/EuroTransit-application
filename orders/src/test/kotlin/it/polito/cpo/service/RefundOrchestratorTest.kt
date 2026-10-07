@@ -1,5 +1,6 @@
 package it.polito.cpo.service
 
+import io.micrometer.observation.ObservationRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import it.polito.cpo.client.AuthorizationOutcome
 import it.polito.cpo.client.ConfirmReservationOutcome
@@ -213,6 +214,8 @@ class RefundOrchestratorTest {
         objectMapper = mapper,
         meterRegistry = SimpleMeterRegistry(),
         txOperator = inlineTx,
+        // NOOP: no tracing in these tests, so rows carry no traceparent (OrderOutboxTest covers it).
+        orderOutbox = OrderOutbox(mapper, ObservationRegistry.NOOP),
     )
 
     private fun refundableOrder(
