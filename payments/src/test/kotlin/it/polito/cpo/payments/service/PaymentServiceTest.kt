@@ -176,6 +176,8 @@ class PaymentServiceTest {
 
         // Stripe caches a decline for 24h; same key would replay it and the redrive stays a no-op.
         assertEquals(2, providerAdapter.refundKeys.size)
+        // First attempt unsuffixed, so a refund in flight across this change still dedupes.
+        assertEquals("pay-refund-order-123", providerAdapter.refundKeys[0])
         org.junit.jupiter.api.Assertions.assertNotEquals(
             providerAdapter.refundKeys[0], providerAdapter.refundKeys[1]
         )

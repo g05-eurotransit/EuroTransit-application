@@ -172,10 +172,13 @@ class PaymentService(
         val failedAttempts = paymentRefundRepository.countByRequestKeyAndStatus(
             idempotencyKey, IPaymentService.RefundStatus.FAILED.name
         )
+        // Unsuffixed on the first attempt: an in-flight refund from before this change must still
+        // dedupe against the key the old code sent.
+        val providerKey = if (failedAttempts == 0L) idempotencyKey else "${idempotencyKey}_$failedAttempts"
 
         // 3. Call provider (outside any DB transaction)
         val result = try {
-            providerAdapter.refund(authorization.providerReference, amount, "${idempotencyKey}_$failedAttempts")
+            providerAdapter.refund(authorization.providerReference, amount, providerKey)
         } catch (e: Exception) {
             log.error("Payment provider failed on refund", e)
             return it.polito.cpo.payments.dto.PaymentRefundResponse(IPaymentService.RefundStatus.DEPENDENCY_FAILED, null, "PROVIDER_UNAVAILABLE")
