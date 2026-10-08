@@ -518,6 +518,17 @@ class CheckoutPipelineIntegrationTest {
     }
 
     @Test
+    fun `the checkout-outcome series are registered at startup, before any checkout`() {
+        // Only presence: siblings in this shared context have already counted into some of them.
+        listOf("confirmed", "failed").forEach {
+            assertNotNull(meterRegistry.find("orders.checkout.completed").tag("result", it).counter(), it)
+        }
+        FailureClassifier.CHECKOUT_FAILURE_REASONS.forEach {
+            assertNotNull(meterRegistry.find("orders.checkout.failed").tag("reason", it).counter(), it)
+        }
+    }
+
+    @Test
     fun `the dead-letter series are registered at startup, before any dead letter`() {
         // Only presence: siblings in this shared context may already have counted into some of them.
         EXHAUSTABLE_TOPICS.forEach { topic ->

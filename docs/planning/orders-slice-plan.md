@@ -1265,7 +1265,12 @@ with the gate switched to it (a configuration change). **Orders half done (C5):*
 dead letter is published, and every series is registered at zero at startup — otherwise the first dead
 letter on a fresh canary pod creates the series at 1 and `increase()` reports 0, so the gate would pass
 on exactly the failure it exists for. The gate switch is configuration's. The same zero-at-start
-problem applies to the lazily created `orders_checkout_failed_total{reason}` that F1's gate uses.
+problem applied to `orders_checkout_completed_total{result}` and `orders_checkout_failed_total{reason}`,
+which F1's failure-rate gate and the sample-count gate read; Orders now registers those at zero too
+(C8), so as far as zero-at-start goes the gates can stay as written — F1's sample-size problem is a
+separate matter and still stands. One small window remains: the listeners start before Prometheus
+first scrapes a new pod (every 30s), so checkouts in that first interval are folded into the first
+sample and `increase()` still cannot see them.
 
 **None of the four is a reason to delay enabling the canary.** F1 and F2 make it abort too eagerly
 and refuse too late respectively; neither lets a bad build through silently, which was the failure
