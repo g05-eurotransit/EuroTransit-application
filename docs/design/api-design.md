@@ -511,7 +511,7 @@ The selected money path is hybrid sync+async:
 ## Resilience Requirements
 
 - All synchronous service calls must have timeouts, bounded retries with backoff/jitter, circuit breakers, and bulkheads.
-- Orders must flip readiness to refuse new traffic during shutdown while in-flight coroutine work drains or is cancelled cooperatively.
+- Orders must flip readiness to refuse new traffic during shutdown while in-flight coroutine work drains or is cancelled cooperatively. Orders drains: the record in progress finishes and the rest is redelivered and resumed from durable state ([orders-shutdown-and-replay.md](../operations/orders-shutdown-and-replay.md)).
 - Inventory and Payments must persist idempotency records so duplicate events or HTTP retries return the same outcome.
 - Orders persists checkout idempotency records for 24 hours, Inventory persists reservation idempotency records for 30 minutes, and Payments persists authorization idempotency records for 24 hours.
 - Inventory holds must expire after 10 minutes if payment does not complete, returning the seat to available state. Inventory idempotency retention must not renew an expired hold.

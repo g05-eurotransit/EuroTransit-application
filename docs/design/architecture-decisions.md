@@ -158,7 +158,7 @@ ordering, and it is the reason the naming was left alone rather than the behavio
 - HTTP calls from Orders to Inventory and Payments are I/O-bound. Suspending while waiting for those responses reduces blocked threads under latency or provider slowdown.
 - Kafka publishing and consuming are I/O-bound and benefit from coroutine-based backpressure, structured cancellation, and bounded concurrency.
 - Notification processing is naturally asynchronous because customer notification must not determine checkout success.
-- Graceful shutdown is easier to reason about when the Orders pipeline has an explicit coroutine scope as a failure domain and can stop accepting new work while draining or cancelling in-flight tasks.
+- Graceful shutdown is easier to reason about when the Orders pipeline has a clear failure domain and can stop accepting new work while in-flight work drains. Since ADR-011 that domain is one Kafka record: each pipeline runs inside the listener call that received it, and nothing is held in a detached scope ([orders-shutdown-and-replay.md](../operations/orders-shutdown-and-replay.md)).
 
 ### Where Async Does Not Help
 
@@ -170,7 +170,7 @@ ordering, and it is the reason the naming was left alone rather than the behavio
 ### Operational Consequences
 
 - Bound coroutine concurrency for the checkout pipeline instead of allowing unbounded fan-out.
-- Propagate cancellation on SIGTERM and flip readiness before draining.
+- Flip readiness on SIGTERM, finish the record in progress, and leave everything not started to Kafka redelivery — the pipeline resumes from durable state, so draining needs no cancellation (ADR-011; `spring.kafka.listener.immediate-stop`).
 - Track queue depth, coroutine failures, Kafka lag, and terminal order states so async work is observable.
 - Treat blocking calls inside coroutine paths as defects unless they are explicitly isolated on a bounded dispatcher.
 

@@ -221,6 +221,9 @@ class KafkaConfiguration {
             deadLetterErrorHandler(dltRetryBackOff(initialIntervalMs, maxIntervalMs), meterRegistry),
         )
         factory.containerProperties.isObservationEnabled = true
+        // The Boot-built factory's shutdown rule (`spring.kafka.listener.immediate-stop`) does not reach
+        // a factory built by hand; read the same property so one switch governs both.
+        factory.containerProperties.isStopImmediate = properties.listener.isImmediateStop
         return factory
     }
 }

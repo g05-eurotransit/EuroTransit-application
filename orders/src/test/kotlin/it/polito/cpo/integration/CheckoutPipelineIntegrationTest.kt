@@ -49,6 +49,7 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Import
 import org.springframework.context.annotation.Primary
 import org.apache.kafka.clients.producer.ProducerRecord
+import org.springframework.kafka.config.KafkaListenerEndpointRegistry
 import org.springframework.kafka.core.KafkaTemplate
 import org.springframework.kafka.core.ProducerFactory
 import org.springframework.kafka.listener.ListenerExecutionFailedException
@@ -177,6 +178,7 @@ class CheckoutPipelineIntegrationTest {
     @Autowired private lateinit var meterRegistry: MeterRegistry
     @Autowired private lateinit var objectMapper: ObjectMapper
     @Autowired private lateinit var operations: ReconciliationOperationsService
+    @Autowired private lateinit var listenerRegistry: KafkaListenerEndpointRegistry
 
     @Test
     fun `happy path drives the order through the outbox and Kafka to CONFIRMED`() = runBlocking {
@@ -622,6 +624,16 @@ class CheckoutPipelineIntegrationTest {
                 it,
             )
         }
+    }
+
+    @Test
+    fun `every listener is configured to stop after the record in progress, not after its batch`() {
+        // The pipeline and the dead-letter listeners alike: a slow dependency multiplied by a whole
+        // polled batch would outlast the shutdown phase and the pod's grace period. The behaviour
+        // itself is proven on compose (docs/operations/orders-shutdown-and-replay.md).
+        val containers = listenerRegistry.allListenerContainers
+        assertEquals(4, containers.size, "two pipeline and two dead-letter listeners")
+        containers.forEach { assertTrue(it.containerProperties.isStopImmediate, it.listenerId.toString()) }
     }
 
     @Test
