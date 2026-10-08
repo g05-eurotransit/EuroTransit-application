@@ -58,8 +58,28 @@ internal fun countExhausted(meterRegistry: MeterRegistry, topic: String, excepti
         exception?.javaClass?.name,
         ErrorHandlingUtils.findRootCause(exception)?.javaClass?.name,
     )
-    meterRegistry.counter("orders.events.exhausted", "topic", topic, "failure_class", failureClass).increment()
+    exhaustedCounter(meterRegistry, topic, failureClass).increment()
 }
+
+/** The topics whose listeners run on the default container factory, i.e. through [countingRecoverer]. */
+internal val EXHAUSTABLE_TOPICS = listOf("order-placed", "refund-requested")
+
+/**
+ * Registers every `orders.events.exhausted` series at zero when the error handler is built.
+ *
+ * Without this a series is created by its first increment, so Prometheus first scrapes it at 1 and
+ * `increase()` — which needs an earlier sample — reports 0. On a fresh canary pod that hides exactly
+ * the first dead letter, which is usually the only one in a gate's window, and an `== 0` gate passes
+ * on the failure it exists to catch. Two topics times [FailureClassifier.DEAD_LETTER_LABELS].
+ */
+internal fun registerExhaustedSeries(meterRegistry: MeterRegistry) {
+    EXHAUSTABLE_TOPICS.forEach { topic ->
+        FailureClassifier.DEAD_LETTER_LABELS.forEach { label -> exhaustedCounter(meterRegistry, topic, label) }
+    }
+}
+
+private fun exhaustedCounter(meterRegistry: MeterRegistry, topic: String, failureClass: String) =
+    meterRegistry.counter("orders.events.exhausted", "topic", topic, "failure_class", failureClass)
 
 @Configuration
 class KafkaConfiguration {
@@ -103,6 +123,7 @@ class KafkaConfiguration {
         kafkaTemplate: KafkaTemplate<String, String>,
         meterRegistry: MeterRegistry,
     ): DefaultErrorHandler {
+        registerExhaustedSeries(meterRegistry)
         val recoverer = countingRecoverer(DeadLetterPublishingRecoverer(kafkaTemplate), meterRegistry)
         return DefaultErrorHandler(recoverer, FixedBackOff(1_000L, 3L)).apply {
             addNotRetryableExceptions(PoisonEventException::class.java)

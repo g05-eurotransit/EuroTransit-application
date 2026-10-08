@@ -68,6 +68,26 @@ class FailureClassifierTest {
     }
 
     @Test
+    fun `DEAD_LETTER_LABELS is exactly what forDeadLetter can return`() {
+        // The dead-letter counter pre-registers one series per label. A label returned but not listed
+        // would be a series that first appears at 1, which increase() cannot see.
+        val returned = listOf(
+            null,
+            PoisonEventException::class.java.name,
+            TimeoutException::class.java.name,
+            WebClientRequestException::class.java.name,
+            CallNotPermittedException::class.java.name,
+            BulkheadFullException::class.java.name,
+            ClientAuthorizationException::class.java.name,
+            "org.springframework.dao.DataAccessResourceFailureException",
+            "io.r2dbc.spi.R2dbcTransientResourceException",
+            IllegalStateException::class.java.name,
+        ).map { FailureClassifier.forDeadLetter(it) }.toSet()
+
+        assertEquals(returned, FailureClassifier.DEAD_LETTER_LABELS.toSet())
+    }
+
+    @Test
     fun `a poison payload keeps its own label, and anything unrecognised stays unknown`() {
         assertEquals(
             FailureClassifier.POISON_PAYLOAD,

@@ -48,6 +48,13 @@ object FailureClassifier {
     fun forDeadLetter(exceptionFqcn: String?, causeFqcn: String? = null): String =
         classifyDeadLetterClass(causeFqcn ?: exceptionFqcn)
 
+    /**
+     * Every label [forDeadLetter] can return. Kept beside it so the two cannot drift: the dead-letter
+     * counter pre-registers one series per label, and a label missing here would be a series that
+     * appears at 1 — invisible to `increase()` (`FailureClassifierTest` pins the set).
+     */
+    val DEAD_LETTER_LABELS = listOf(POISON_PAYLOAD, DEPENDENCY_ERROR, UNKNOWN)
+
     private fun classifyDeadLetterClass(exceptionFqcn: String?): String = when {
         exceptionFqcn == null -> UNKNOWN
         exceptionFqcn.endsWith("PoisonEventException") -> POISON_PAYLOAD

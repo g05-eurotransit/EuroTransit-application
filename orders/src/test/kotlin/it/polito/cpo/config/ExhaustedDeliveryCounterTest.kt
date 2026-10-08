@@ -88,6 +88,20 @@ class ExhaustedDeliveryCounterTest {
     }
 
     @Test
+    fun `every series exists at zero before the first dead letter, so increase() can see it`() {
+        registerExhaustedSeries(registry)
+
+        val series = registry.find("orders.events.exhausted").counters()
+        assertEquals(EXHAUSTABLE_TOPICS.size * FailureClassifier.DEAD_LETTER_LABELS.size, series.size)
+        EXHAUSTABLE_TOPICS.forEach { topic ->
+            FailureClassifier.DEAD_LETTER_LABELS.forEach { label ->
+                val counter = registry.find("orders.events.exhausted").tags("topic", topic, "failure_class", label).counter()
+                assertEquals(0.0, counter?.count(), "$topic/$label")
+            }
+        }
+    }
+
+    @Test
     fun `the consumer reaches the wrapped recoverer`() {
         var received: Consumer<*, *>? = null
         val consumer = mock(Consumer::class.java)
