@@ -61,6 +61,13 @@ Use the canonical team SLOs in `docs/operations/slo-observability.md`; a small
 successful sample is not evidence of the 30-day SLO. Throughput and expected
 refusals remain separate from terminal/technical failures and timeouts.
 
+The configuration repository records the
+[2026-10-06 AKS baseline](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/feat/resilience-verification/docs/reliability/baseline-2026-10-06.md):
+20/20 confirmed orders, matching reservations/seats and independently enumerated
+sandbox charges, with a final passing correctness audit. The run exercised the
+existing deployed application; it did not deploy the new admission or metrics
+code and does not complete the overload or chaos acceptance criteria.
+
 Run `python3 load-tests/verify.py --ledger <orders.jsonl> --evidence <evidence.json>
 --output <verification.json>`. Configuration's read-only collector emits:
 `{runId, extraction:"COMPLETE", orders:[], reservations:[], payments:[], inventory:[],

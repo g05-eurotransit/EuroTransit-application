@@ -2,6 +2,18 @@
 
 This log is intentionally required by the assignment. It records concrete cases where an agent-generated artifact was wrong, unsafe, or incomplete, and how the team corrected it.
 
+## 2026-10-08: Correctness verifier accepted inconsistent evidence
+
+- **Agent output:** The initial load-test verifier could accept a confirmed client
+  ledger alongside a durable failed order, or a matching charge reference with
+  the wrong amount. It also treated an empty successful-effect audit as sufficient.
+- **Detection:** Independent agent review supplied contradictory snapshots and
+  reproduced the false positives. Team ownership/reproduction of this review is
+  still required; this was not a team-run chaos experiment.
+- **Correction:** Check ledger/durable state, scenario, fixture, effect scope,
+  amount, currency and independently enumerated provider effects. Missing evidence
+  fails closed. Regression cases are in `load-tests/tests/test_verify.py`.
+
 ## Case 1: Liveness Probe Checked Downstream Dependency
 
 - **Agent output:** A liveness probe failed when Kafka or Postgres was unavailable.
