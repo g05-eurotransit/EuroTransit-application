@@ -62,7 +62,19 @@ one is opened (a poison payload, an unknown order or an already-terminal order o
 the one to filter by pod — the canary gate `canary-dead-letter-events` belongs on it, not on
 `orders_events_dlt_total` (step 5, F4). Every `topic` × `failure_class` series is registered at zero
 when Orders starts, so `increase()` sees the first dead letter on a new pod rather than a series that
-appears already at 1.
+appears already at 1. The checkout outcomes the canary also gates on are registered the same way:
+`orders_checkout_completed_total` for `result="confirmed"` and `"failed"`, and
+`orders_checkout_failed_total` for every `reason` a failed checkout can carry.
+
+**Not yet for the alerts.** Five alerts above still read counters created by their first event, so
+the first such event on a pod is invisible to `increase()`: PaymentReversalFailure and
+InvariantViolation (`orders_reconciliation_required_total`), InventorySeatConflict
+(`orders_inventory_confirm_total`), PoisonOrderEvent and DeadLetterUnknownOrder
+(`orders_events_dlt_total`). For rare events the first is usually the only one. Until those series are
+registered at zero too, a reversal failure or invariant violation still surfaces through
+`ReconciliationRecordOpen` and `ReconciliationAgeHigh` (gauges, unaffected), and a seat conflict
+through the invariant record it opens; a poison record or a dead letter for an unknown order opens no
+incident, so for those there is no other signal.
 
 `/actuator/prometheus` is scrapable: the shared security baseline
 (`EuroTransitSecurity.UNAUTHENTICATED_ACTUATOR_ENDPOINTS`) permits it, and no Traefik route exposes
