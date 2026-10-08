@@ -21,6 +21,11 @@ spring:
     listener:
       # Joins the consumer span to the originating checkout trace (money-path tracing).
       observation-enabled: true
+      # On shutdown, finish the record in progress and stop: the rest of the polled batch stays
+      # uncommitted and is redelivered to the partition's next owner (this pod after a restart, or
+      # another replica during a rollout), where the pipeline resumes from the durable order state. The default finishes the whole batch, which with a slow dependency can outlast
+      # the shutdown phase and the pod's grace period (docs/operations/orders-shutdown-and-replay.md).
+      immediate-stop: true
   security:
     oauth2:
       resourceserver:
