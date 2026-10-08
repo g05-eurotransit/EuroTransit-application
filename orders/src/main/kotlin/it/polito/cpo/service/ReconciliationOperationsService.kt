@@ -156,7 +156,7 @@ class ReconciliationOperationsService(
                 fingerprint,
             )
             outboxEventRepository.save(orderOutbox.row(outboxType, orderId, event))
-            records.touchRedrive(orderId, correlationId)
+            records.touchRedrive(orderId, fitCorrelationId(correlationId))
         }
 
         meterRegistry.counter("orders.reconciliation.redrive", "result", "accepted").increment()

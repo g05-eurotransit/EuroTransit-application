@@ -179,7 +179,7 @@ class ReconciliationService(
         orderId = orderId,
         kind = kind.name,
         orderState = orderState,
-        correlationId = correlationId,
+        correlationId = fitCorrelationId(correlationId),
         failureClass = failureClass,
         failureDetail = detail?.take(MAX_DETAIL),
     )
@@ -189,3 +189,15 @@ class ReconciliationService(
         const val MAX_DETAIL = 1024
     }
 }
+
+/**
+ * The correlation id as `reconciliation_records.correlation_id` (`VARCHAR(255)`) can hold it.
+ *
+ * The id comes from the caller's `X-Correlation-Id`, which the shared web filter accepts at any length.
+ * An oversized one used to fail the incident write; since the dead-letter consumer retries without
+ * limit, that would now stall it forever on a value no retry can fix. Truncated, the record is written
+ * and the id still matches the start of the one in the logs.
+ */
+internal fun fitCorrelationId(correlationId: String): String = correlationId.take(MAX_CORRELATION_ID)
+
+private const val MAX_CORRELATION_ID = 255

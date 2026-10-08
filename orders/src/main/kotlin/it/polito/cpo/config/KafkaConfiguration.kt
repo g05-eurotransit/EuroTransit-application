@@ -6,6 +6,7 @@ import it.polito.cpo.service.FailureClassifier
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.kafka.common.serialization.StringSerializer
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.boot.kafka.autoconfigure.KafkaProperties
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
@@ -18,6 +19,9 @@ import org.springframework.kafka.listener.ConsumerAwareRecordRecoverer
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer
 import org.springframework.kafka.listener.DefaultErrorHandler
 import org.springframework.kafka.listener.ErrorHandlingUtils
+import org.springframework.kafka.listener.RetryListener
+import org.springframework.util.backoff.BackOff
+import org.springframework.util.backoff.ExponentialBackOff
 import org.springframework.util.backoff.FixedBackOff
 
 /**
@@ -60,6 +64,47 @@ internal fun countExhausted(meterRegistry: MeterRegistry, topic: String, excepti
     )
     exhaustedCounter(meterRegistry, topic, failureClass).increment()
 }
+
+/**
+ * Unbounded exponential back-off for the dead-letter listeners: [initialIntervalMs], doubling, capped
+ * at [maxIntervalMs], with no limit on attempts or elapsed time. The cap stays far below
+ * `max.poll.interval.ms` (5 minutes by default), so the waiting itself never triggers a rebalance. A
+ * single listener call blocked on an unreachable database still counts toward that limit; a
+ * rebalance then costs one duplicate attempt, not the record.
+ */
+internal fun dltRetryBackOff(initialIntervalMs: Long, maxIntervalMs: Long) =
+    ExponentialBackOff(initialIntervalMs, 2.0).apply { maxInterval = maxIntervalMs }
+
+/**
+ * The dead-letter listeners' error handler: [backOff], with **every** exception retryable, and each
+ * failed attempt counted.
+ *
+ * The default classification treats a handful of types as fatal (`ClassCastException`, message and
+ * header conversion failures, and others): one attempt, then the logging recoverer, then the offset
+ * is committed — the very drop the unbounded back-off exists to prevent. Clearing it makes "never
+ * committed until recorded" hold for those too.
+ */
+internal fun deadLetterErrorHandler(backOff: BackOff, meterRegistry: MeterRegistry) =
+    DefaultErrorHandler(backOff).apply {
+        setClassifications(emptyMap(), true)
+        setRetryListeners(countFailedDeadLetterRecording(meterRegistry))
+    }
+
+/** The dead-letter topics, read by the listeners on `deadLetterListenerContainerFactory`. */
+internal val DEAD_LETTER_TOPICS = listOf("order-placed-dlt", "refund-requested-dlt")
+
+/** Counts every failed attempt to turn a dead letter into an incident, per DLT topic. */
+internal fun countFailedDeadLetterRecording(meterRegistry: MeterRegistry) = RetryListener { record, _, _ ->
+    deadLetterRecordFailed(meterRegistry, record.topic()).increment()
+}
+
+/** Registers `orders.events.dlt{result="record_failed"}` at zero, so an alert on `increase()` sees the first. */
+internal fun registerDeadLetterRecordFailedSeries(meterRegistry: MeterRegistry) {
+    DEAD_LETTER_TOPICS.forEach { deadLetterRecordFailed(meterRegistry, it) }
+}
+
+private fun deadLetterRecordFailed(meterRegistry: MeterRegistry, topic: String) =
+    meterRegistry.counter("orders.events.dlt", "topic", topic, "result", "record_failed")
 
 /** The topics whose listeners run on the default container factory, i.e. through [countingRecoverer]. */
 internal val EXHAUSTABLE_TOPICS = listOf("order-placed", "refund-requested")
@@ -131,14 +176,31 @@ class KafkaConfiguration {
     }
 
     /**
-     * Dedicated container factory for the dead-letter listener, with its own consumer group and
+     * Dedicated container factory for the dead-letter listeners, with its own consumer group and
      * deliberately **no** [DeadLetterPublishingRecoverer].
      *
-     * Without this the DLT listener would be served by the default factory, which does have one. A
+     * Without this the DLT listeners would be served by the default factory, which does have one. A
      * transient database failure while recording a `DELIVERY_EXHAUSTED` incident would then publish
      * to `order-placed-dlt-dlt` — a topic nobody consumes — and the record would be lost precisely
-     * when it matters most. Here a failure retries a couple of times and is then logged, leaving the
-     * offset uncommitted so the next poll sees it again.
+     * when it matters most.
+     *
+     * **It retries until the incident is written, and never gives up.** An error handler with no
+     * recoverer does not leave the record for the next poll once its back-off runs out: the container
+     * substitutes a recoverer that only logs, the record counts as recovered, and its offset is
+     * committed. With the bounded back-off this factory used to have, a database unavailable for more
+     * than about two seconds lost the incident — the order stuck, with nothing but an error log. So the
+     * back-off here is exponential and unbounded ([dltRetryBackOff]) and every exception is retryable
+     * ([deadLetterErrorHandler]): a failure that ends delays the incident, it cannot drop it.
+     *
+     * Retrying is safe: recording upserts on the one-open-incident-per-(order, kind) index, and every
+     * other branch of the listeners (unknown order, terminal order, stale close) is idempotent too.
+     * The price is head-of-line blocking, and it is wider than one partition: each listener has one
+     * consumer thread per pod, which owns all of its DLT topic's partitions there, so while one dead
+     * letter keeps failing, that whole DLT stream waits on that pod (the other DLT topic has its own
+     * container and is unaffected). With the database down nothing could be recorded anyway; if the
+     * failure is permanent instead — a bug, or data that cannot be stored — the stream stays stuck
+     * until someone acts, which is what the `orders.events.dlt{result="record_failed"}` count of every
+     * failed attempt is for.
      *
      * The separate group id also keeps dead-letter consumption from sharing offsets with the
      * checkout pipeline.
@@ -146,12 +208,18 @@ class KafkaConfiguration {
     @Bean
     fun deadLetterListenerContainerFactory(
         properties: KafkaProperties,
+        meterRegistry: MeterRegistry,
+        @Value("\${orders.kafka.dlt-retry.initial-interval-ms:1000}") initialIntervalMs: Long,
+        @Value("\${orders.kafka.dlt-retry.max-interval-ms:30000}") maxIntervalMs: Long,
     ): ConcurrentKafkaListenerContainerFactory<String, String> {
         val props = properties.buildConsumerProperties().toMutableMap()
         props[ConsumerConfig.GROUP_ID_CONFIG] = "orders-dlt"
         val factory = ConcurrentKafkaListenerContainerFactory<String, String>()
         factory.setConsumerFactory(DefaultKafkaConsumerFactory(props, StringDeserializer(), StringDeserializer()))
-        factory.setCommonErrorHandler(DefaultErrorHandler(FixedBackOff(1_000L, 2L)))
+        registerDeadLetterRecordFailedSeries(meterRegistry)
+        factory.setCommonErrorHandler(
+            deadLetterErrorHandler(dltRetryBackOff(initialIntervalMs, maxIntervalMs), meterRegistry),
+        )
         factory.containerProperties.isObservationEnabled = true
         return factory
     }
