@@ -20,6 +20,8 @@ This folder contains the assignment requirements and the project-owned documents
 - [operations/slo-observability.md](operations/slo-observability.md): checkout SLOs, SLIs, dashboards, alerts, and tracing expectations.
 - [operations/chaos-experiments.md](operations/chaos-experiments.md): required hypothesis-driven chaos experiments.
 - [operations/local-dev-setup.md](operations/local-dev-setup.md): documentation and scripts for running the local development environment.
+- [operations/orders-shutdown-and-replay.md](operations/orders-shutdown-and-replay.md): Orders' failure domain, stop sequence, shutdown budgets, and offset/replay semantics.
+- [operations/reports/](operations/reports/): drill reports — Orders shutdown and the Notifications outage on compose.
 
 ## Agent Governance
 
