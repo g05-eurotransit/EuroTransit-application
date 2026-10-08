@@ -66,6 +66,22 @@ appears already at 1. The checkout outcomes the canary also gates on are registe
 `orders_checkout_completed_total` for `result="confirmed"` and `"failed"`, and
 `orders_checkout_failed_total` for every `reason` a failed checkout can carry.
 
+**A dead letter is never dropped on its way to becoming an incident.** The dead-letter consumers
+retry recording the `DELIVERY_EXHAUSTED` incident with an unbounded exponential back-off (1s
+doubling to 30s), and treat every exception as retryable: a failure that ends — a database outage —
+delays the incident instead of losing it. Until 2026-10-08 they gave up after three attempts in
+about two seconds, logged, and committed the record — the incident was lost and the order stuck with
+no signal. The price is that a *permanent* failure (a bug, or data that cannot be stored) now stalls
+that DLT stream on the pod: each listener's single consumer thread owns all of its topic's
+partitions there, so every later dead letter on that topic waits behind the failing one. Each failed
+attempt counts as `orders_events_dlt_total{result="record_failed"}`, registered at zero per DLT
+topic, and that is the signal. Suggested alert for the configuration repository, sized to ignore a
+single transient blip:
+
+| Alert | Expression sketch | Why it matters |
+| --- | --- | --- |
+| DeadLetterNotRecorded | `increase(orders_events_dlt_total{result="record_failed"}[10m]) > 3`, ticket | A dead letter keeps failing to become an incident, and the other dead letters on that topic wait behind it until someone acts. |
+
 **Not yet for the alerts.** Five alerts above still read counters created by their first event, so
 the first such event on a pod is invisible to `increase()`: PaymentReversalFailure and
 InvariantViolation (`orders_reconciliation_required_total`), InventorySeatConflict
