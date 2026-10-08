@@ -14,6 +14,7 @@ import it.polito.cpo.client.ResolvedOffer
 import it.polito.cpo.client.ReversalOutcome
 import it.polito.cpo.client.RouteOutcome
 import it.polito.cpo.client.RouteSchedule
+import it.polito.cpo.config.DEAD_LETTER_TOPICS
 import it.polito.cpo.config.EXHAUSTABLE_TOPICS
 import it.polito.cpo.contracts.catalog.RefundPolicy
 import it.polito.cpo.contracts.events.OrderPlacedEvent
@@ -102,6 +103,9 @@ import kotlin.test.assertTrue
         // context otherwise disables (which left every outbox traceparent null), and this keeps the
         // OTLP exporter from reaching for a collector that is not there.
         "management.tracing.export.otlp.enabled=false",
+        // The dead-letter consumer retries without limit; short intervals keep that test fast.
+        "orders.kafka.dlt-retry.initial-interval-ms=50",
+        "orders.kafka.dlt-retry.max-interval-ms=200",
     ],
 )
 @AutoConfigureTracing
@@ -542,6 +546,54 @@ class CheckoutPipelineIntegrationTest {
     }
 
     @Test
+    fun `a dead letter whose incident cannot be written is retried until it is, never dropped`() = runBlocking {
+        val key = "it-dlt-retry-${UUID.randomUUID()}"
+        val response = orchestrator.checkout(request(), key, "user-1", "user-1@example.com")
+        seedState(response.orderId, OrderStatus.CONFIRMING_INVENTORY, "res-${response.orderId}")
+        val failedBefore = deadLetterRecordFailed()
+
+        // Four failed writes: one more than the bounded back-off this consumer used to have tried
+        // before logging the dead letter, committing it, and losing the incident.
+        armIncidentWriteFailures(response.orderId, failures = 4)
+        try {
+            sendDeadLetter(response.orderId, "java.util.concurrent.TimeoutException", "simulated")
+            withTimeout(30_000) { while (openRecords(response.orderId).isEmpty()) delay(100) }
+        } finally {
+            disarmIncidentWriteFailures()
+        }
+
+        assertEquals(ReconciliationKind.DELIVERY_EXHAUSTED.name, openRecords(response.orderId).single().kind)
+        // Every failed attempt is visible, so an incident that cannot be written can alert.
+        val failedAfter = deadLetterRecordFailed()
+        assertTrue(failedAfter >= failedBefore + 4, "record_failed rose from $failedBefore only to $failedAfter")
+    }
+
+    @Test
+    fun `an oversized client correlation id cannot stall the dead-letter consumer`() = runBlocking {
+        // X-Correlation-Id is accepted at any length; the incident column holds 255. Untruncated, the
+        // write would fail forever and, with unbounded retry, hold up the whole DLT stream.
+        val key = "it-dlt-longcorr-${UUID.randomUUID()}"
+        val response = orchestrator.checkout(request(), key, "user-1", "user-1@example.com")
+        seedState(response.orderId, OrderStatus.CONFIRMING_INVENTORY, "res-${response.orderId}")
+        val oversized = "c".repeat(300)
+
+        sendDeadLetter(response.orderId, "java.util.concurrent.TimeoutException", "simulated", correlationId = oversized)
+        withTimeout(30_000) { while (openRecords(response.orderId).isEmpty()) delay(100) }
+
+        assertEquals(oversized.take(255), openRecords(response.orderId).single().correlationId)
+    }
+
+    @Test
+    fun `the dead-letter record_failed series are registered at startup`() {
+        DEAD_LETTER_TOPICS.forEach {
+            assertNotNull(
+                meterRegistry.find("orders.events.dlt").tags("topic", it, "result", "record_failed").counter(),
+                it,
+            )
+        }
+    }
+
+    @Test
     fun `an exhausted delivery opens a DELIVERY_EXHAUSTED incident without moving the order`() = runBlocking {
         val response = orchestrator.checkout(request(), "it-dlt-${UUID.randomUUID()}", "user-1", "user-1@example.com")
         seedState(response.orderId, OrderStatus.CONFIRMING_INVENTORY, "res-${response.orderId}")
@@ -880,8 +932,13 @@ class CheckoutPipelineIntegrationTest {
      * container's wrapper as the exception, and what the listener threw as the cause
      * (`DeadLetterHeadersTest` pins that shape against the real recoverer).
      */
-    private fun sendDeadLetter(orderId: UUID, causeFqcn: String, message: String) {
-        val event = OrderPlacedEvent(correlationId = "corr-dlt", orderId = orderId, principalId = "user-1")
+    private fun sendDeadLetter(
+        orderId: UUID,
+        causeFqcn: String,
+        message: String,
+        correlationId: String = "corr-dlt",
+    ) {
+        val event = OrderPlacedEvent(correlationId = correlationId, orderId = orderId, principalId = "user-1")
         val record = ProducerRecord<String, String>(
             "order-placed-dlt",
             orderId.toString(),
@@ -962,6 +1019,43 @@ class CheckoutPipelineIntegrationTest {
     }
 
     private suspend fun disarmCommitCrash() = exec("DROP TRIGGER IF EXISTS test_crash_confirm ON orders")
+
+    /**
+     * Fails the first [failures] attempts to write a reconciliation record for [orderId], standing in
+     * for a database outage while the dead-letter consumer records the incident. Same sequence trick as
+     * [armCommitCrash]: `nextval()` survives the aborted transaction, so the count advances.
+     */
+    private suspend fun armIncidentWriteFailures(orderId: UUID, failures: Int) {
+        exec("CREATE SEQUENCE IF NOT EXISTS test_incident_write_seq")
+        exec("SELECT setval('test_incident_write_seq', 1, false)")
+        exec(
+            """
+            CREATE OR REPLACE FUNCTION test_fail_incident_write() RETURNS trigger AS ${'$'}${'$'}
+            BEGIN
+                -- Nested, not AND: PostgreSQL does not promise left-to-right evaluation, and only this
+                -- order may consume the sequence.
+                IF NEW.order_id = '$orderId'::uuid THEN
+                    IF nextval('test_incident_write_seq') <= $failures THEN
+                        RAISE EXCEPTION 'simulated database outage while recording an incident';
+                    END IF;
+                END IF;
+                RETURN NEW;
+            END; ${'$'}${'$'} LANGUAGE plpgsql
+            """.trimIndent(),
+        )
+        exec("DROP TRIGGER IF EXISTS test_fail_incident_write ON reconciliation_records")
+        exec(
+            "CREATE TRIGGER test_fail_incident_write BEFORE INSERT ON reconciliation_records " +
+                "FOR EACH ROW EXECUTE FUNCTION test_fail_incident_write()",
+        )
+    }
+
+    private suspend fun disarmIncidentWriteFailures() =
+        exec("DROP TRIGGER IF EXISTS test_fail_incident_write ON reconciliation_records")
+
+    private fun deadLetterRecordFailed(): Double =
+        meterRegistry.find("orders.events.dlt").tags("topic", "order-placed-dlt", "result", "record_failed")
+            .counter()?.count() ?: 0.0
 
     private suspend fun exec(sql: String) {
         databaseClient.sql(sql).then().awaitSingleOrNull()
