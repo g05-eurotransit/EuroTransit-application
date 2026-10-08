@@ -301,7 +301,7 @@ class OrderController(
         }
 
         // Cancellable only while unpaid; the orchestrator throws ApiException(409) otherwise.
-        return toView(checkoutOrchestrator.cancel(orderId))
+        return toView(checkoutOrchestrator.cancel(orderId, userId))
     }
 
     /**

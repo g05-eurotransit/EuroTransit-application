@@ -141,10 +141,29 @@ class CheckoutOrchestrator(
         // Reuse the correlation id resolved by the inbound WebFilter (falls back to a fresh one
         // when the call is not driven through the filter, e.g. unit tests) so the trace stays
         // consistent across the sync accept, the emitted event, and the async pipeline.
-        val correlationId = currentCoroutineContext()[ReactorContext]?.context
-            ?.getOrEmpty<String>(CorrelationId.CONTEXT_KEY)?.orElse(null)
-            ?: CorrelationId.generate()
+        val correlationId = currentCorrelationId()
 
+        // Every refusal below is an ApiException, so one catch audits all of them — the guards, the
+        // idempotency conflict and each way the offer can fail to resolve — without an order id,
+        // since none exists yet.
+        try {
+            return accept(request, idempotencyKey, userId, recipientEmail, correlationId)
+        } catch (e: ApiException) {
+            MoneyPathAudit.record(
+                MoneyPathAudit.Action.CHECKOUT, MoneyPathAudit.Outcome.REJECTED, userId,
+                orderId = null, correlationId = correlationId, reason = e.code,
+            )
+            throw e
+        }
+    }
+
+    private suspend fun accept(
+        request: CheckoutRequest,
+        idempotencyKey: String,
+        userId: String,
+        recipientEmail: String?,
+        correlationId: String,
+    ): CheckoutResponse {
         // Syntactic guard only, and deliberately so. Which dates actually have seats is Inventory's
         // to know (ADR-001), and a date with none becomes a definitive hold rejection the pipeline
         // already handles. Orders checks just this much because, unlike routeId — picked from a list —
@@ -189,7 +208,12 @@ class CheckoutOrchestrator(
             }
             meterRegistry.counter("orders.checkout.idempotent_replay").increment()
             logger.info("Found existing request for idempotency key: {}", idempotencyKey)
-            return objectMapper.readValue(existing.responseBody, CheckoutResponse::class.java)
+            val replayed = objectMapper.readValue(existing.responseBody, CheckoutResponse::class.java)
+            MoneyPathAudit.record(
+                MoneyPathAudit.Action.CHECKOUT, MoneyPathAudit.Outcome.REPLAYED, userId,
+                replayed.orderId, correlationId,
+            )
+            return replayed
         }
 
         // 2. Resolve the offer against Catalog, which is what makes the amount below trustworthy
@@ -241,6 +265,9 @@ class CheckoutOrchestrator(
             )
         }
 
+        MoneyPathAudit.record(
+            MoneyPathAudit.Action.CHECKOUT, MoneyPathAudit.Outcome.ACCEPTED, userId, orderId, correlationId,
+        )
         return response
     }
 
@@ -644,6 +671,10 @@ class CheckoutOrchestrator(
         if (committed == true) {
             meterRegistry.counter("orders.checkout.completed", "result", "confirmed").increment()
             recordEndToEnd(ctx, "confirmed")
+            MoneyPathAudit.record(
+                MoneyPathAudit.Action.CHECKOUT_PIPELINE, MoneyPathAudit.Outcome.CONFIRMED,
+                ctx.order.userId, ctx.orderId, ctx.correlationId,
+            )
             logger.info("Successfully confirmed order {}", ctx.orderId)
             return Step.Advance(OrderStatus.CONFIRMED)
         }
@@ -825,9 +856,11 @@ class CheckoutOrchestrator(
     /**
      * Cancels an order. Accepted only while no payment authorization has started, i.e. ACCEPTED or
      * RESERVING (doc:147-149); from PAYMENT_PENDING onward this is a 409, which is what closes the
-     * cancellation race before the money moves. Ownership is enforced by the controller.
+     * cancellation race before the money moves. Ownership is enforced by the controller; [actorId] is
+     * who asked — the owner or `operations` staff — and is recorded on the audit line.
      */
-    suspend fun cancel(orderId: UUID): Order {
+    suspend fun cancel(orderId: UUID, actorId: String): Order {
+        val correlationId = currentCorrelationId()
         val cancelled = txOperator.executeAndAwait {
             if (orderService.cancelIfUnpaid(orderId) == 0L) {
                 false
@@ -839,6 +872,10 @@ class CheckoutOrchestrator(
         if (cancelled != true) {
             val current = orderService.getOrderById(orderId)
                 ?: throw ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "Order not found")
+            MoneyPathAudit.record(
+                MoneyPathAudit.Action.CANCEL, MoneyPathAudit.Outcome.REJECTED, actorId, orderId, correlationId,
+                reason = "ORDER_NOT_CANCELLABLE", ownerId = current.userId,
+            )
             throw ApiException(
                 HttpStatus.CONFLICT,
                 "ORDER_NOT_CANCELLABLE",
@@ -860,11 +897,24 @@ class CheckoutOrchestrator(
         }
 
         meterRegistry.counter("orders.cancel", "result", "cancelled").increment()
+        MoneyPathAudit.record(
+            MoneyPathAudit.Action.CANCEL, MoneyPathAudit.Outcome.CANCELLED, actorId, orderId, correlationId,
+            ownerId = order.userId,
+        )
         logger.info("Order {} cancelled", orderId)
         return order
     }
 
     // --- helpers ----------------------------------------------------------------------------------
+
+    /**
+     * The correlation id the inbound WebFilter put in the Reactor context, or a fresh one when the call
+     * is not driven through the filter (e.g. unit tests).
+     */
+    private suspend fun currentCorrelationId(): String =
+        currentCoroutineContext()[ReactorContext]?.context
+            ?.getOrEmpty<String>(CorrelationId.CONTEXT_KEY)?.orElse(null)
+            ?: CorrelationId.generate()
 
     /**
      * The customer-facing failure notification.
@@ -915,10 +965,15 @@ class CheckoutOrchestrator(
     private fun countConfirm(result: String, code: String) =
         meterRegistry.counter("orders.inventory.confirm", "result", result, "code", code).increment()
 
+    /** Both FAILED endings come through here, so it is also where the failure is audited. */
     private fun countFailed(ctx: PipelineContext, reason: String) {
         meterRegistry.counter("orders.checkout.completed", "result", "failed").increment()
         meterRegistry.counter("orders.checkout.failed", "reason", reason).increment()
         recordEndToEnd(ctx, "failed")
+        MoneyPathAudit.record(
+            MoneyPathAudit.Action.CHECKOUT_PIPELINE, MoneyPathAudit.Outcome.FAILED,
+            ctx.order.userId, ctx.orderId, ctx.correlationId, reason = reason,
+        )
     }
 
     /**

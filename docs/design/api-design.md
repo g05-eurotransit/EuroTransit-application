@@ -17,7 +17,7 @@ EuroTransit is designed as an enterprise-grade system. Public APIs must assume a
 - Inventory and Payments APIs are internal service-to-service APIs and are not exposed directly to public clients.
 - Service-to-service requests must propagate correlation IDs, the authenticated principal where required, and a trusted service identity. The production target should use mTLS or an equivalent workload-identity control.
 - Gateway authentication is not a substitute for service-level authorization. Each service must enforce local ownership, role, and scope decisions for resources it owns.
-- Money-path actions must emit audit-ready logs with correlation ID, principal ID, order ID, and outcome. Logs must not contain bearer tokens, secrets, raw payment data, or card details.
+- Money-path actions must emit audit-ready logs with correlation ID, principal ID, order ID, and outcome. Logs must not contain bearer tokens, secrets, raw payment data, or card details. Orders' implementation: [observability-conventions.md, Money-Path Audit Log](observability-conventions.md#money-path-audit-log).
 - Secrets such as database credentials, signing keys, and payment-provider credentials belong in the configuration repository as SealedSecrets, not in application source.
 
 ### Endpoint Security Summary

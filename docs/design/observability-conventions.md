@@ -82,9 +82,38 @@ Boot-native ECS JSON on stdout. Example line (abridged):
 {"@timestamp":"2026-07-06T15:40:12.345Z","log.level":"INFO","message":"Request rejected: ROUTE_NOT_FOUND Route nope does not exist","correlationId":"demo-123","trace.id":"6f9a…","span.id":"12ab…","service.name":"catalog","log.logger":"it.polito.cpo.observability.GlobalErrorHandler"}
 ```
 
-Must NOT be logged, ever: bearer tokens, `Authorization` header values, secrets, passwords, payment card data, provider API keys, full personal data. Money-path audit logging (correlation id, principal id, order id, outcome) is a separate deliverable and must respect the same exclusions.
+Must NOT be logged, ever: bearer tokens, `Authorization` header values, secrets, passwords, payment card data, provider API keys, full personal data. Money-path audit logging (correlation id, principal id, order id, outcome) respects the same exclusions; see [Money-Path Audit Log](#money-path-audit-log).
 
 If JSON logs bother you during local development, disable them in your personal run configuration (`SPRING_APPLICATION_JSON` or a local profile) — do not remove the setting from `application.yaml`.
+
+## Money-Path Audit Log
+
+Orders, the money path's coordinator, writes one line per decision that moves or refuses money or a seat, to the logger named **`audit`** (`MoneyPathAudit`). Every other Orders log line is unchanged; the audit lines are added beside them, so the trail is one filter away: `log.logger = "audit"`.
+
+```json
+{"@timestamp":"2026-10-08T13:15:46.11Z","log":{"level":"INFO","logger":"audit"},"service":{"name":"orders"},"message":"audit checkout.pipeline confirmed","correlationId":"c2-proof-ok","action":"checkout.pipeline","outcome":"confirmed","principalId":"adf3224b-…","orderId":"f8477815-…"}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `correlationId` | The request's correlation id (MDC). The pipeline lines carry the id the accept put on the event, so one id joins a checkout from the HTTP accept to the consumer's outcome. |
+| `principalId` | Who the decision is attributed to: the caller (JWT `sub`) on an HTTP action, the order's owner on the asynchronous pipelines that act for them, the operator on a reconciliation action. |
+| `orderId` | The order. `null` only for a checkout refused before an order existed. |
+| `action`, `outcome` | Closed vocabulary, below. |
+| `reason` | Only on `rejected`/`failed`: the API error code or the failure label (`FailureClassifier`), never free text. |
+| `ownerId` | Only when the principal is not the owner: a staff cancel or refund, an operator redrive or resolve. |
+
+| `action` | `outcome` |
+| --- | --- |
+| `checkout` | `accepted`, `replayed`, `rejected` |
+| `checkout.pipeline` | `confirmed`, `failed` |
+| `cancel` | `cancelled`, `rejected` |
+| `refund` | `accepted`, `replayed`, `rejected` |
+| `refund.pipeline` | `refunded`, `failed` (the order stays `REFUNDING`; an incident is open) |
+| `reconciliation.redrive` | `accepted`, `replayed`, `rejected` |
+| `reconciliation.resolve` | `resolved`, `replayed`, `rejected` |
+
+What is deliberately **not** a line: a redelivery of an order already terminal (its outcome was written the first time), and a pipeline that finds the order cancelled under it (the `cancel` line already says so). `MoneyPathAudit.record` takes identifiers and closed-vocabulary values only — never an order, a request or an event — so a payment token, an email or an amount cannot reach the line by accident. `MoneyPathAuditTest` pins the shape, and `CheckoutOrchestratorTest` asserts that neither the payment token nor the email of an accepted checkout appears in its line.
 
 ## Metrics (RED)
 

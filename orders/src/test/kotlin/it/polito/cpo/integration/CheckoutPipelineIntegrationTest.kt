@@ -31,6 +31,7 @@ import it.polito.cpo.repository.OutboxEventRepository
 import it.polito.cpo.repository.ReconciliationRecordRepository
 import it.polito.cpo.controller.dtos.ResolveReconciliationRequest
 import it.polito.cpo.observability.ApiException
+import it.polito.cpo.service.AuditLogCapture
 import it.polito.cpo.service.CheckoutOrchestrator
 import it.polito.cpo.service.FailureClassifier
 import it.polito.cpo.service.ReconciliationOperationsService
@@ -201,6 +202,36 @@ class CheckoutPipelineIntegrationTest {
     }
 
     @Test
+    fun `a checkout leaves one audit trail from the accept to the consumer's outcome, under one correlation id`() = runBlocking {
+        AuditLogCapture().use { audit ->
+            val response = orchestrator.checkout(request(), "it-audit-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+            relayOrderPlaced(response.orderId)
+            assertEquals(OrderStatus.CONFIRMED, awaitTerminal(response.orderId).status)
+
+            // The consumer writes its line after the commit awaitTerminal observes.
+            val lines = awaitAuditLines(audit, response.orderId, 2)
+            assertEquals(listOf("checkout" to "accepted", "checkout.pipeline" to "confirmed"), lines.map { it.action to it.outcome })
+            lines.forEach { assertEquals("user-1", it.fields["principalId"]) }
+            // The pipeline's line carries the id the accept put on the event, not the consumer's own.
+            assertNotNull(lines[0].correlationId)
+            assertEquals(lines[0].correlationId, lines[1].correlationId)
+        }
+    }
+
+    @Test
+    fun `a declined checkout is audited as failed by the consumer`() = runBlocking {
+        AuditLogCapture().use { audit ->
+            val response = orchestrator.checkout(request(token = DECLINE_TOKEN), "it-audit-decline-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+            relayOrderPlaced(response.orderId)
+            assertEquals(OrderStatus.FAILED, awaitTerminal(response.orderId).status)
+
+            val failed = awaitAuditLines(audit, response.orderId, 2)[1]
+            assertEquals("checkout.pipeline" to "failed", failed.action to failed.outcome)
+            assertEquals(FailureClassifier.PAYMENT_DECLINED, failed.fields["reason"])
+        }
+    }
+
+    @Test
     fun `an offer checkout authorizes the resolved price and freezes its terms on the row`() = runBlocking {
         // Issue #93 end to end, through the real schema: the amount Payments is asked to authorize
         // has to be the one Catalog priced, not the one the browser sent, and the refund terms have
@@ -327,7 +358,7 @@ class CheckoutPipelineIntegrationTest {
         val response = orchestrator.checkout(request(), "it-cancel-${UUID.randomUUID()}", "user-1", "user-1@example.com")
 
         // Cancel while still ACCEPTED (before relaying order-placed).
-        val cancelled = orchestrator.cancel(response.orderId)
+        val cancelled = orchestrator.cancel(response.orderId, "user-1")
         assertEquals(OrderStatus.CANCELLED, cancelled.status)
 
         // The durable trigger still fires; the pipeline must skip a terminal (cancelled) order.
@@ -698,6 +729,31 @@ class CheckoutPipelineIntegrationTest {
     }
 
     @Test
+    fun `an operator's redrive is audited under the operator, naming the owner, and so is its refusal`() = runBlocking {
+        val pending = orchestrator.checkout(request(), "it-audit-redrive-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        seedState(pending.orderId, OrderStatus.CONFIRMING_INVENTORY, "res-${pending.orderId}")
+        openIncident(pending.orderId, ReconciliationKind.DELIVERY_EXHAUSTED)
+        val confirmed = orchestrator.checkout(request(), "it-audit-redrive2-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        relayOrderPlaced(confirmed.orderId)
+        assertEquals(OrderStatus.CONFIRMED, awaitTerminal(confirmed.orderId).status)
+
+        AuditLogCapture().use { audit ->
+            operations.redrive(pending.orderId, "redrive-audit-${pending.orderId}", "ops-1")
+            assertFailsWith<ApiException> {
+                operations.redrive(confirmed.orderId, "redrive-audit-${confirmed.orderId}", "ops-1")
+            }
+
+            val accepted = audit.forOrder(pending.orderId).single { it.action == "reconciliation.redrive" }
+            assertEquals("accepted", accepted.outcome)
+            assertEquals("ops-1", accepted.fields["principalId"])
+            assertEquals("user-1", accepted.fields["ownerId"])
+            val refused = audit.forOrder(confirmed.orderId).single { it.action == "reconciliation.redrive" }
+            assertEquals("rejected", refused.outcome)
+            assertEquals("ORDER_ALREADY_TERMINAL", refused.fields["reason"])
+        }
+    }
+
+    @Test
     fun `a redrive on a terminal order is refused and closes the stale incident`() = runBlocking {
         val response = orchestrator.checkout(request(), "it-redrive3-${UUID.randomUUID()}", "user-1", "user-1@example.com")
         val orderId = response.orderId
@@ -896,6 +952,16 @@ class CheckoutPipelineIntegrationTest {
             failureDetail = "seeded by test",
         )
     }
+
+    private suspend fun awaitAuditLines(audit: AuditLogCapture, orderId: UUID, count: Int): List<AuditLogCapture.Line> =
+        withTimeout(10_000) {
+            var lines = audit.forOrder(orderId)
+            while (lines.size < count) {
+                delay(100)
+                lines = audit.forOrder(orderId)
+            }
+            lines
+        }
 
     private suspend fun awaitTerminal(id: UUID): Order = withTimeout(30_000) {
         var order = orderRepository.findById(id)
