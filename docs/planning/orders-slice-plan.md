@@ -1260,7 +1260,12 @@ up only publishes the record; whichever pod owns that DLT partition in the other
 stable pod's dead letter can abort a healthy canary, and a canary's dead letter can be counted on a
 stable pod and pass unseen. The attributable signal has to be emitted where the delivery is given up:
 a counter incremented by the recoverer in `KafkaConfiguration.kafkaErrorHandler` (an Orders change),
-with the gate switched to it (a configuration change).
+with the gate switched to it (a configuration change). **Orders half done (C5):**
+`orders_events_exhausted_total{topic,failure_class}` is counted by the pod that gave up, after the
+dead letter is published, and every series is registered at zero at startup — otherwise the first dead
+letter on a fresh canary pod creates the series at 1 and `increase()` reports 0, so the gate would pass
+on exactly the failure it exists for. The gate switch is configuration's. The same zero-at-start
+problem applies to the lazily created `orders_checkout_failed_total{reason}` that F1's gate uses.
 
 **None of the four is a reason to delay enabling the canary.** F1 and F2 make it abort too eagerly
 and refuse too late respectively; neither lets a bad build through silently, which was the failure
@@ -1269,15 +1274,17 @@ on noise cannot be used to demonstrate anything.
 
 ### Which metrics are attributable, and which are not
 
-Kept from the previous version, corrected on 2026-10-07. The first three are per-pod counters,
-incremented in the process that did the work, so they describe what *that replica* did. The DLT
-counter is not, and that is F4 below:
+Kept from the previous version, corrected on 2026-10-07. All but `orders_events_dlt_total` are per-pod
+counters incremented in the process that did the work, so they describe what *that replica* did. That
+one is counted by whichever pod consumes the dead letter — F4 above — and
+`orders_events_exhausted_total` is the attributable replacement for gating:
 
 | Metric | Tags | What it means |
 | --- | --- | --- |
 | `orders_checkout_completed_total` | `result=confirmed\|failed` | A checkout this pod drove to a terminal state |
 | `orders_checkout_failed_total` | `reason` | The failure classes, separated |
 | `orders_events_dlt_total` | `topic`, `result` | Dead letters this pod **consumed** — not the ones it gave up on (F4) |
+| `orders_events_exhausted_total` | `topic`, `failure_class` | Deliveries this pod **gave up on** and dead-lettered — the attributable one (F4) |
 | `orders_postsale_refund_completed_total` | `result` | Refunds this pod completed |
 
 Verified against `orders/src/main` on 2026-09-22: `countFailed` increments
@@ -1316,8 +1323,9 @@ number. They are correctly absent from the gates.
   F1 to F3 are reported, not pushed: configuration #50, assigned to `matteogastaldello` on
   2026-10-07, linked to configuration #46 and application #123, which are rebuilding the load
   generator — where F1 and F2, both sample-size problems, are cheapest to fix.
-- **F4 is half an Orders change.** The attributable counter is emitted by Orders' recoverer; only
-  the gate switch is configuration. F4 is added to configuration #50 once the counter exists.
+- **F4 is half an Orders change.** The attributable counter is emitted by Orders' recoverer
+  (`orders_events_exhausted_total`, C5); only the gate switch is configuration. F4 goes to
+  configuration #50 once the counter is merged.
 - **Turning `progressiveDelivery.enabled` on.** Platform-level, and not during the AKS maintenance
   window.
 

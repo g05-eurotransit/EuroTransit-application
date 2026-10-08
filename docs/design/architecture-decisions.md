@@ -536,6 +536,14 @@ withdrawn. The real fix is in Payments: a provider-declined refund should not be
 result under a key the caller is expected to retry. That is another slice's decision and is left as
 one.
 
+> **Resolved 2026-10-07 by #122 (closes #111).** Payments now writes an idempotency record only for a
+> successful refund, and sends the provider `<key>` on the first attempt and `<key>_<n>` after `n`
+> recorded declines, so neither its own cache nor the provider's 24-hour idempotency cache replays the
+> decline. A redrive of a refund stuck on a definitive decline is therefore a real attempt; the same
+> holds for checkout compensation under `refund-{orderId}`. The paragraphs above are kept as the
+> record of why the change was needed. A decline cached *before* #122 is still replayed: V4 does not
+> remove those idempotency records.
+
 Separately, `refund-requested-dlt` initially had no consumer. The shared error handler exhausts in
 about three seconds, so a dependency blip ordinary enough to be routine (an Inventory pod roll) could
 strand an order in `REFUNDING` with no reconciliation record at all — `recordSeatReturnFailure` only

@@ -14,6 +14,7 @@ import it.polito.cpo.client.ResolvedOffer
 import it.polito.cpo.client.ReversalOutcome
 import it.polito.cpo.client.RouteOutcome
 import it.polito.cpo.client.RouteSchedule
+import it.polito.cpo.config.EXHAUSTABLE_TOPICS
 import it.polito.cpo.contracts.catalog.RefundPolicy
 import it.polito.cpo.contracts.events.OrderPlacedEvent
 import it.polito.cpo.contracts.payments.PaymentRequest
@@ -496,6 +497,7 @@ class CheckoutPipelineIntegrationTest {
     @Test
     fun `an unparseable order-placed payload reaches the dead-letter topic`() = runBlocking {
         val before = dltCount("poison")
+        val exhaustedBefore = exhaustedCount("order-placed", FailureClassifier.POISON_PAYLOAD)
         // Scoped to the delta, not to an absolute count: sibling tests in this shared context create
         // records of their own.
         val recordsBefore = reconciliationRepository.findAll().toList().size
@@ -507,6 +509,25 @@ class CheckoutPipelineIntegrationTest {
         awaitDltCount("poison", before + 1)
         // No order id means no incident can be attached to anything.
         assertEquals(recordsBefore, reconciliationRepository.findAll().toList().size)
+        // F4: the real error handler counted it where the delivery was abandoned, not where the DLT
+        // was read. Awaited, not asserted: the count lands after the broker acknowledges the dead
+        // letter, which can be after the DLT listener has already counted it.
+        withTimeout(30_000) {
+            while (exhaustedCount("order-placed", FailureClassifier.POISON_PAYLOAD) < exhaustedBefore + 1) delay(100)
+        }
+    }
+
+    @Test
+    fun `the dead-letter series are registered at startup, before any dead letter`() {
+        // Only presence: siblings in this shared context may already have counted into some of them.
+        EXHAUSTABLE_TOPICS.forEach { topic ->
+            FailureClassifier.DEAD_LETTER_LABELS.forEach { label ->
+                assertNotNull(
+                    meterRegistry.find("orders.events.exhausted").tags("topic", topic, "failure_class", label).counter(),
+                    "$topic/$label",
+                )
+            }
+        }
     }
 
     @Test
@@ -864,6 +885,10 @@ class CheckoutPipelineIntegrationTest {
 
     private fun dltCount(result: String): Double =
         meterRegistry.find("orders.events.dlt").tag("result", result).counter()?.count() ?: 0.0
+
+    private fun exhaustedCount(topic: String, failureClass: String): Double =
+        meterRegistry.find("orders.events.exhausted").tags("topic", topic, "failure_class", failureClass)
+            .counter()?.count() ?: 0.0
 
     private suspend fun awaitDltCount(result: String, target: Double) = withTimeout(30_000) {
         while (dltCount(result) < target) delay(100)
