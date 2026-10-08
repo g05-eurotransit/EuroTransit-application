@@ -41,11 +41,11 @@ notifications before the outage (the per-customer cap) and only the 20 new ones 
 ADR-004 holds — nothing was lost from Kafka and no checkout was affected — but `api-design.md`
 §Notifications describes `GET /api/notifications` as the customer's "stored notification history",
 which every restart, deploy or reschedule empties. Not an Orders defect; reported to the
-Notifications owner as an issue (link below once filed).
+Notifications owner as #131.
 
 ## Conclusions
 
 - Checkout is isolated from Notifications by construction: the notification is an outbox row
   committed with the order's terminal state, relayed by Debezium, consumed asynchronously.
 - Kafka retains the events and Notifications catches up from its committed offset on restart.
-- Its read model starts empty at each restart — a contract question for Notifications, filed.
+- Its read model starts empty at each restart — a contract question for Notifications, #131.
