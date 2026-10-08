@@ -84,6 +84,26 @@ class RefundOrchestrator(
      */
     suspend fun refund(orderId: UUID, idempotencyKey: String, userId: String, isStaff: Boolean): OrderView {
         val correlationId = correlationId()
+        // Every refusal is an ApiException — the 404, the idempotency conflict, each eligibility code
+        // and the cutoff — so one catch audits all of them under their own code.
+        try {
+            return accept(orderId, idempotencyKey, userId, isStaff, correlationId)
+        } catch (e: ApiException) {
+            MoneyPathAudit.record(
+                MoneyPathAudit.Action.REFUND, MoneyPathAudit.Outcome.REJECTED, userId, orderId, correlationId,
+                reason = e.code,
+            )
+            throw e
+        }
+    }
+
+    private suspend fun accept(
+        orderId: UUID,
+        idempotencyKey: String,
+        userId: String,
+        isStaff: Boolean,
+        correlationId: String,
+    ): OrderView {
         val order = orderService.getOrderById(orderId)
         if (order == null || (order.userId != userId && !isStaff)) {
             // Same rule as getOrder/cancel: a non-owner gets 404, never 403, so the API never reveals
@@ -92,7 +112,13 @@ class RefundOrchestrator(
         }
 
         val fingerprint = fingerprint(orderId)
-        replayed(idempotencyKey, fingerprint)?.let { return it }
+        replayed(idempotencyKey, fingerprint)?.let {
+            MoneyPathAudit.record(
+                MoneyPathAudit.Action.REFUND, MoneyPathAudit.Outcome.REPLAYED, userId, orderId, correlationId,
+                ownerId = order.userId,
+            )
+            return it
+        }
 
         requireEligible(order)
 
@@ -128,6 +154,10 @@ class RefundOrchestrator(
 
         if (committed != null) {
             meterRegistry.counter("orders.postsale_refund.requested").increment()
+            MoneyPathAudit.record(
+                MoneyPathAudit.Action.REFUND, MoneyPathAudit.Outcome.ACCEPTED, userId, orderId, correlationId,
+                ownerId = order.userId,
+            )
             logger.info("Refund accepted for order {} (correlationId={})", orderId, correlationId)
             return committed
         }
@@ -235,6 +265,10 @@ class RefundOrchestrator(
                 // REFUNDING. Acknowledge the delivery rather than throw — a definitive refusal will
                 // not resolve itself on redelivery, and dead-lettering it every time only adds noise
                 // to the same alert (the same reasoning stageCompensate uses for this same outcome).
+                MoneyPathAudit.record(
+                    MoneyPathAudit.Action.REFUND_PIPELINE, MoneyPathAudit.Outcome.FAILED, order.userId, orderId,
+                    correlationId, reason = FailureClassifier.PAYMENT_REVERSAL_FAILED,
+                )
                 logger.warn("Order {} refund reversal definitively failed: {}", orderId, reversal.code)
                 return
             }
@@ -267,6 +301,10 @@ class RefundOrchestrator(
                 // The customer already has their money (step 1 above); one resaleable seat is
                 // withheld until an operator looks. The order stays REFUNDING, never a terminal
                 // failure (ADR-015).
+                MoneyPathAudit.record(
+                    MoneyPathAudit.Action.REFUND_PIPELINE, MoneyPathAudit.Outcome.FAILED, order.userId, orderId,
+                    correlationId, reason = FailureClassifier.forInventoryRefusal(seatReturn.code),
+                )
                 logger.warn(
                     "Order {} seat return definitively failed for reservation {}: {}",
                     orderId, reservationId, seatReturn.code,
@@ -295,6 +333,10 @@ class RefundOrchestrator(
 
         if (committed == true) {
             meterRegistry.counter("orders.postsale_refund.completed", "result", "refunded").increment()
+            MoneyPathAudit.record(
+                MoneyPathAudit.Action.REFUND_PIPELINE, MoneyPathAudit.Outcome.REFUNDED, order.userId, orderId,
+                correlationId,
+            )
             logger.info("Order {} refunded", orderId)
             return
         }

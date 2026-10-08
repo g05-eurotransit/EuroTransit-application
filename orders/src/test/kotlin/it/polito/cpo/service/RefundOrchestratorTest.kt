@@ -44,6 +44,7 @@ import java.time.OffsetDateTime
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -541,5 +542,108 @@ class RefundOrchestratorTest {
 
         assertEquals(1, payment.refundCalls.size)
         assertEquals(1, inventory.refundCalls.size)
+    }
+
+    // --- money-path audit (DoD §5.9) --------------------------------------------------------------
+
+    @Test
+    fun `an accepted refund is audited under the caller`() = runTest {
+        val orderId = UUID.randomUUID()
+        val service = FakeOrderService().apply { ordersById[orderId] = refundableOrder(orderId) }
+
+        AuditLogCapture().use { audit ->
+            orchestratorFor(service).refund(orderId, "idem-audit", "user-1", isStaff = false)
+
+            val line = audit.lines.single()
+            assertEquals("refund", line.action)
+            assertEquals("accepted", line.outcome)
+            assertEquals("user-1", line.fields["principalId"])
+            assertEquals(orderId.toString(), line.fields["orderId"])
+            assertFalse("ownerId" in line.fields)
+        }
+    }
+
+    @Test
+    fun `a staff refund is audited under the staff member, naming the owner`() = runTest {
+        val orderId = UUID.randomUUID()
+        val service = FakeOrderService().apply { ordersById[orderId] = refundableOrder(orderId, userId = "user-1") }
+
+        AuditLogCapture().use { audit ->
+            orchestratorFor(service).refund(orderId, "idem-audit", "ops-1", isStaff = true)
+
+            val line = audit.lines.single()
+            assertEquals("ops-1", line.fields["principalId"])
+            assertEquals("user-1", line.fields["ownerId"])
+        }
+    }
+
+    @Test
+    fun `a refused refund is audited with its code`() = runTest {
+        val orderId = UUID.randomUUID()
+        val service = FakeOrderService().apply {
+            ordersById[orderId] = refundableOrder(orderId, status = OrderStatus.FAILED)
+        }
+
+        AuditLogCapture().use { audit ->
+            assertThrows<ApiException> { orchestratorFor(service).refund(orderId, "idem-audit", "user-1", isStaff = false) }
+
+            val line = audit.lines.single()
+            assertEquals("rejected", line.outcome)
+            assertEquals("ORDER_NOT_CONFIRMED", line.fields["reason"])
+        }
+    }
+
+    @Test
+    fun `a completed refund is audited by the pipeline under the owner and the event's correlation id`() = runTest {
+        val orderId = UUID.randomUUID()
+        val service = FakeOrderService().apply {
+            ordersById[orderId] = refundableOrder(orderId, status = OrderStatus.REFUNDING)
+        }
+
+        AuditLogCapture().use { audit ->
+            orchestratorFor(service).processRefundRequested(event(orderId))
+
+            val line = audit.lines.single()
+            assertEquals("refund.pipeline", line.action)
+            assertEquals("refunded", line.outcome)
+            assertEquals("user-1", line.fields["principalId"])
+            assertEquals("corr-1", line.correlationId)
+        }
+    }
+
+    @Test
+    fun `a refund that cannot reverse the money is audited as failed`() = runTest {
+        val orderId = UUID.randomUUID()
+        val service = FakeOrderService().apply {
+            ordersById[orderId] = refundableOrder(orderId, status = OrderStatus.REFUNDING)
+        }
+        val payment = StubPaymentClient(reversal = { ReversalOutcome.Failed("FAILED", "provider refused") })
+
+        AuditLogCapture().use { audit ->
+            orchestratorFor(service, payment = payment).processRefundRequested(event(orderId))
+
+            val line = audit.lines.single()
+            assertEquals("failed", line.outcome)
+            assertEquals(FailureClassifier.PAYMENT_REVERSAL_FAILED, line.fields["reason"])
+        }
+    }
+
+    @Test
+    fun `a refund whose seat cannot be returned is audited as failed`() = runTest {
+        val orderId = UUID.randomUUID()
+        val service = FakeOrderService().apply {
+            ordersById[orderId] = refundableOrder(orderId, status = OrderStatus.REFUNDING)
+        }
+        val inventory = StubInventoryClient(
+            refund = { RefundReservationOutcome.Refused(InventoryRefusalCode.RESERVATION_SEAT_CONFLICT, "forced by test") },
+        )
+
+        AuditLogCapture().use { audit ->
+            orchestratorFor(service, inventory).processRefundRequested(event(orderId))
+
+            val line = audit.lines.single()
+            assertEquals("failed", line.outcome)
+            assertEquals("reservation_seat_conflict", line.fields["reason"])
+        }
     }
 }

@@ -1390,7 +1390,7 @@ class CheckoutOrchestratorTest {
         val orderId = UUID.randomUUID()
         service.ordersById[orderId] = order(orderId, status = OrderStatus.RESERVING, reservationId = "res-held")
 
-        val cancelled = orchestratorFor(service, inventory).cancel(orderId)
+        val cancelled = orchestratorFor(service, inventory).cancel(orderId, "user-1")
 
         assertEquals(OrderStatus.CANCELLED, cancelled.status)
         assertEquals(listOf("res-held"), inventory.releasedReservationIds.toList())
@@ -1404,7 +1404,7 @@ class CheckoutOrchestratorTest {
         val orderId = UUID.randomUUID()
         service.ordersById[orderId] = order(orderId, status = OrderStatus.PAYMENT_PENDING, reservationId = "res-held")
 
-        val ex = assertThrows<ApiException> { orchestratorFor(service, inventory).cancel(orderId) }
+        val ex = assertThrows<ApiException> { orchestratorFor(service, inventory).cancel(orderId, "user-1") }
 
         assertEquals(HttpStatus.CONFLICT, ex.status)
         assertEquals("ORDER_NOT_CANCELLABLE", ex.code)
@@ -1419,7 +1419,7 @@ class CheckoutOrchestratorTest {
         val orderId = UUID.randomUUID()
         service.ordersById[orderId] = order(orderId, status = OrderStatus.CONFIRMED)
 
-        val ex = assertThrows<ApiException> { orchestratorFor(service).cancel(orderId) }
+        val ex = assertThrows<ApiException> { orchestratorFor(service).cancel(orderId, "user-1") }
 
         assertEquals(HttpStatus.CONFLICT, ex.status)
         assertEquals("ORDER_NOT_CANCELLABLE", ex.code)
@@ -1433,7 +1433,7 @@ class CheckoutOrchestratorTest {
         val orderId = UUID.randomUUID()
         service.ordersById[orderId] = order(orderId)
 
-        val cancelled = orchestratorFor(service, inventory).cancel(orderId)
+        val cancelled = orchestratorFor(service, inventory).cancel(orderId, "user-1")
 
         assertEquals(OrderStatus.CANCELLED, cancelled.status)
         assertFalse(inventory.releasedReservationIds.any())
@@ -1453,5 +1453,149 @@ class CheckoutOrchestratorTest {
 
         assertEquals(listOf("refund-$orderId"), payment.refundKeys.toList())
         assertEquals(listOf("rel-$orderId"), inventory.releaseKeys.toList())
+    }
+
+    // --- money-path audit (DoD §5.9) --------------------------------------------------------------
+
+    private fun auditedCheckout(paymentMethodToken: String = "tok-secret-4242") = CheckoutRequest(
+        routeId = "R1", seats = listOf("1A", "1B"), travelDate = TRAVEL_DATE, totalAmount = BigDecimal("200.00"),
+        paymentMethodToken = paymentMethodToken, offerId = "of-001",
+    )
+
+    @Test
+    fun `an accepted checkout is audited with its principal and order, and never with the token or the email`() = runTest {
+        AuditLogCapture().use { audit ->
+            val response = orchestratorFor(FakeOrderService()).checkout(
+                auditedCheckout(), "key-audit", "user-1", "alice@example.com",
+            )
+
+            val line = audit.lines.single()
+            assertEquals("checkout", line.action)
+            assertEquals("accepted", line.outcome)
+            assertEquals("user-1", line.fields["principalId"])
+            assertEquals(response.orderId.toString(), line.fields["orderId"])
+            assertTrue(line.correlationId != null, "the correlation id is on the line")
+            val everything = line.fields.values.joinToString() + line.message
+            assertFalse("tok-secret-4242" in everything)
+            assertFalse("alice@example.com" in everything)
+        }
+    }
+
+    @Test
+    fun `a replayed checkout is audited as replayed, with the stored order`() = runTest {
+        val service = FakeOrderService()
+        val storedOrderId = UUID.randomUUID()
+        service.seeded = IdempotentRequest(
+            "key-replay", mapper.writeValueAsString(CheckoutResponse(storedOrderId, OrderStatus.ACCEPTED)),
+            LocalDateTime.now(),
+        )
+
+        AuditLogCapture().use { audit ->
+            orchestratorFor(service).checkout(auditedCheckout(), "key-replay", "user-1", null)
+
+            val line = audit.lines.single()
+            assertEquals("replayed", line.outcome)
+            assertEquals(storedOrderId.toString(), line.fields["orderId"])
+        }
+    }
+
+    @Test
+    fun `a refused checkout is audited with its code and no order`() = runTest {
+        AuditLogCapture().use { audit ->
+            assertThrows<ApiException> {
+                orchestratorFor(FakeOrderService()).checkout(
+                    auditedCheckout().copy(travelDate = LocalDate.now().minusDays(1)), "key-past-audit", "user-1", null,
+                )
+            }
+
+            val line = audit.lines.single()
+            assertEquals("checkout", line.action)
+            assertEquals("rejected", line.outcome)
+            assertEquals("TRAVEL_DATE_IN_THE_PAST", line.fields["reason"])
+            assertEquals("user-1", line.fields["principalId"])
+            assertNull(line.fields["orderId"])
+        }
+    }
+
+    @Test
+    fun `a confirmed checkout is audited by the pipeline under the owner and the event's correlation id`() = runTest {
+        val service = FakeOrderService()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = order(orderId)
+
+        AuditLogCapture().use { audit ->
+            orchestratorFor(service).processOrderPlaced(event(orderId))
+
+            val line = audit.forOrder(orderId).single()
+            assertEquals("checkout.pipeline", line.action)
+            assertEquals("confirmed", line.outcome)
+            assertEquals("user-1", line.fields["principalId"])
+            assertEquals("corr-1", line.correlationId)
+        }
+    }
+
+    @Test
+    fun `a failed checkout is audited by the pipeline with its failure label`() = runTest {
+        val service = FakeOrderService()
+        val payment = StubPaymentClient(authorize = { AuthorizationOutcome.Declined("CARD_DECLINED") })
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = order(orderId)
+
+        AuditLogCapture().use { audit ->
+            orchestratorFor(service, StubInventoryClient(), payment).processOrderPlaced(event(orderId))
+
+            val line = audit.forOrder(orderId).single()
+            assertEquals("failed", line.outcome)
+            assertEquals(FailureClassifier.PAYMENT_DECLINED, line.fields["reason"])
+        }
+    }
+
+    @Test
+    fun `a compensated checkout is audited once, as failed`() = runTest {
+        val service = FakeOrderService()
+        val inventory = StubInventoryClient(confirm = refused(InventoryRefusalCode.RESERVATION_EXPIRED))
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = order(orderId)
+
+        AuditLogCapture().use { audit ->
+            orchestratorFor(service, inventory).processOrderPlaced(event(orderId))
+
+            val line = audit.forOrder(orderId).single()
+            assertEquals("failed", line.outcome)
+            assertEquals("reservation_expired", line.fields["reason"])
+        }
+    }
+
+    @Test
+    fun `a cancellation by staff is audited under the staff member, naming the owner`() = runTest {
+        val service = FakeOrderService()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = order(orderId)
+
+        AuditLogCapture().use { audit ->
+            orchestratorFor(service).cancel(orderId, "staff-7")
+
+            val line = audit.lines.single()
+            assertEquals("cancel", line.action)
+            assertEquals("cancelled", line.outcome)
+            assertEquals("staff-7", line.fields["principalId"])
+            assertEquals("user-1", line.fields["ownerId"])
+        }
+    }
+
+    @Test
+    fun `a refused cancellation is audited with its code`() = runTest {
+        val service = FakeOrderService()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = order(orderId, status = OrderStatus.CONFIRMED)
+
+        AuditLogCapture().use { audit ->
+            assertThrows<ApiException> { orchestratorFor(service).cancel(orderId, "user-1") }
+
+            val line = audit.lines.single()
+            assertEquals("rejected", line.outcome)
+            assertEquals("ORDER_NOT_CANCELLABLE", line.fields["reason"])
+            assertFalse("ownerId" in line.fields)
+        }
     }
 }

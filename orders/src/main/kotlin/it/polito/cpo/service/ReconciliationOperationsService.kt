@@ -61,12 +61,27 @@ class ReconciliationOperationsService(
      */
     suspend fun redrive(orderId: UUID, idempotencyKey: String, operatorId: String): RedriveResponse {
         val correlationId = correlationId()
+        return auditRejection(MoneyPathAudit.Action.RECONCILIATION_REDRIVE, operatorId, orderId, correlationId) {
+            doRedrive(orderId, idempotencyKey, operatorId, correlationId)
+        }
+    }
+
+    private suspend fun doRedrive(
+        orderId: UUID,
+        idempotencyKey: String,
+        operatorId: String,
+        correlationId: String,
+    ): RedriveResponse {
         val order = orderService.getOrderById(orderId)
             ?: throw ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "Order not found")
 
         val fingerprint = fingerprint(orderId.toString(), OPERATION_REDRIVE)
         replayed<RedriveResponse>(idempotencyKey, fingerprint)?.let {
             meterRegistry.counter("orders.reconciliation.redrive", "result", "replayed").increment()
+            MoneyPathAudit.record(
+                MoneyPathAudit.Action.RECONCILIATION_REDRIVE, MoneyPathAudit.Outcome.REPLAYED, operatorId, orderId,
+                correlationId, ownerId = order.userId,
+            )
             return it
         }
 
@@ -160,6 +175,10 @@ class ReconciliationOperationsService(
         }
 
         meterRegistry.counter("orders.reconciliation.redrive", "result", "accepted").increment()
+        MoneyPathAudit.record(
+            MoneyPathAudit.Action.RECONCILIATION_REDRIVE, MoneyPathAudit.Outcome.ACCEPTED, operatorId, orderId,
+            correlationId, ownerId = order.userId,
+        )
         logger.info(
             "Redrive accepted for order {} in {} by {} (correlationId={})",
             orderId, order.status, operatorId, correlationId,
@@ -178,6 +197,20 @@ class ReconciliationOperationsService(
         request: ResolveReconciliationRequest,
         operatorId: String,
     ): ResolveReconciliationResponse {
+        val correlationId = correlationId()
+        return auditRejection(MoneyPathAudit.Action.RECONCILIATION_RESOLVE, operatorId, orderId, correlationId) {
+            doResolve(orderId, recordId, idempotencyKey, request, operatorId, correlationId)
+        }
+    }
+
+    private suspend fun doResolve(
+        orderId: UUID,
+        recordId: UUID,
+        idempotencyKey: String,
+        request: ResolveReconciliationRequest,
+        operatorId: String,
+        correlationId: String,
+    ): ResolveReconciliationResponse {
         val order = orderService.getOrderById(orderId)
             ?: throw ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "Order not found")
 
@@ -191,7 +224,13 @@ class ReconciliationOperationsService(
         }
 
         val fingerprint = fingerprint(orderId.toString(), recordId.toString(), evidence)
-        replayed<ResolveReconciliationResponse>(idempotencyKey, fingerprint)?.let { return it }
+        replayed<ResolveReconciliationResponse>(idempotencyKey, fingerprint)?.let {
+            MoneyPathAudit.record(
+                MoneyPathAudit.Action.RECONCILIATION_RESOLVE, MoneyPathAudit.Outcome.REPLAYED, operatorId, orderId,
+                correlationId, ownerId = order.userId,
+            )
+            return it
+        }
 
         // `isTerminal` answers a narrower question than this gate needs: "may the CHECKOUT consumer
         // acknowledge a redelivery without a remote call?" — not "is the money question settled?".
@@ -266,8 +305,26 @@ class ReconciliationOperationsService(
             "kind", ReconciliationKind.INVARIANT_VIOLATION.name,
             "resolution", "operator",
         ).increment()
+        MoneyPathAudit.record(
+            MoneyPathAudit.Action.RECONCILIATION_RESOLVE, MoneyPathAudit.Outcome.RESOLVED, operatorId, orderId,
+            correlationId, ownerId = order.userId,
+        )
         logger.info("Incident {} on order {} resolved by {} with evidence {}", recordId, orderId, operatorId, evidence)
         return resolved
+    }
+
+    /** Audits every refusal of an operator action under its own code, then lets it propagate. */
+    private suspend fun <T> auditRejection(
+        action: MoneyPathAudit.Action,
+        operatorId: String,
+        orderId: UUID,
+        correlationId: String,
+        block: suspend () -> T,
+    ): T = try {
+        block()
+    } catch (e: ApiException) {
+        MoneyPathAudit.record(action, MoneyPathAudit.Outcome.REJECTED, operatorId, orderId, correlationId, reason = e.code)
+        throw e
     }
 
     // --- helpers ----------------------------------------------------------------------------------
