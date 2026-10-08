@@ -282,6 +282,7 @@ class CheckoutOrchestrator(
             replay = {
                 orderService.findIdempotentRequest(idempotencyKey)?.let { stored ->
                     if (stored.requestFingerprint != null && stored.requestFingerprint != fingerprint) {
+                        meterRegistry.counter("orders.checkout.idempotency_conflict").increment()
                         throw ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT", "Idempotency key was reused with a different request")
                     }
                     meterRegistry.counter("orders.checkout.idempotent_replay").increment()

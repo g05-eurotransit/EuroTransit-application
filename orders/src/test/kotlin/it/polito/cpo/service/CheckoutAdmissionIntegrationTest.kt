@@ -88,6 +88,24 @@ class CheckoutAdmissionIntegrationTest {
         assertEquals(0,count("orders"));assertEquals(0,count("admission_events"))
         assertEquals("after",g.admit({null},{persist("after")}))
     }
+    @Test fun `slow SQL returns unavailable and rolls back writes before releasing capacity`() = runBlocking {
+        val g = gate(1)
+        try {
+            g.admit({ null }, {
+                persist("slow")
+                db.sql("SELECT pg_sleep(10)").fetch().all().then().awaitSingleOrNull()
+                "slow"
+            })
+            error("expected database timeout")
+        } catch (failure: ApiException) {
+            assertEquals(503, failure.status.value())
+            assertEquals("CHECKOUT_UNAVAILABLE", failure.code)
+        }
+        assertEquals(0, count("orders"))
+        assertEquals(0, count("admission_events"))
+        assertEquals("after", g.admit({ null }, { persist("after") }))
+    }
+
     @Test fun `disabled backlog cap still provides atomic same key handling`() = runBlocking {
         val g=gate(0)
         repeat(4){n->g.admit({null},{persist("$n")})}

@@ -38,6 +38,9 @@ class CheckoutAdmission(
             return transaction.executeAndAwait {
                 // All new admissions use the same stable key, including replicas running with cap=0.
                 // This also makes the second idempotency check safe for simultaneous first requests.
+                // Enforce the query bound in PostgreSQL as well as the transaction manager;
+                // statement_timeout covers slow backlog scans and writes, not only lock waits.
+                database.sql("SET LOCAL statement_timeout = '2000ms'").then().awaitSingleOrNullUnit()
                 database.sql("SET LOCAL lock_timeout = '${lockTimeout}ms'").then().awaitSingleOrNullUnit()
                 database.sql("SELECT pg_advisory_xact_lock(697430123)").fetch().all().then().awaitSingleOrNullUnit()
                 replay()?.let { return@executeAndAwait it }
@@ -56,7 +59,7 @@ class CheckoutAdmission(
             val unavailable = generateSequence(failure as Throwable) { it.cause }.any {
                 it is java.util.concurrent.TimeoutException || it.javaClass.simpleName == "PoolAcquireTimeoutException"
             }
-            if (sql?.sqlState?.startsWith("08") == true || unavailable) {
+            if (sql?.sqlState?.startsWith("08") == true || sql?.sqlState == "57014" || unavailable) {
                 throw ApiException(HttpStatus.SERVICE_UNAVAILABLE, "CHECKOUT_UNAVAILABLE", "Checkout is temporarily unavailable", cause = failure)
             }
             throw failure
