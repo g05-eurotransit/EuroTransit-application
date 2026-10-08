@@ -2,6 +2,7 @@ package it.polito.cpo.service
 
 import io.github.resilience4j.bulkhead.BulkheadFullException
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException
+import it.polito.cpo.client.InventoryRefusalCode
 import it.polito.cpo.event.PoisonEventException
 import java.util.concurrent.TimeoutException
 import kotlin.test.assertEquals
@@ -85,6 +86,19 @@ class FailureClassifierTest {
         ).map { FailureClassifier.forDeadLetter(it) }.toSet()
 
         assertEquals(returned, FailureClassifier.DEAD_LETTER_LABELS.toSet())
+    }
+
+    @Test
+    fun `CHECKOUT_FAILURE_REASONS holds the payment labels, unknown, and every Inventory refusal`() {
+        val reasons = FailureClassifier.CHECKOUT_FAILURE_REASONS
+        val expected = setOf(
+            FailureClassifier.PAYMENT_DECLINED,
+            FailureClassifier.PAYMENT_TOKEN_MISSING,
+            FailureClassifier.UNKNOWN,
+        ) + InventoryRefusalCode.entries.map { it.name.lowercase() }
+
+        assertEquals(expected, reasons.toSet())
+        assertEquals(reasons.size, reasons.toSet().size, "no duplicates")
     }
 
     @Test

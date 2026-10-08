@@ -28,6 +28,7 @@ import it.polito.cpo.repository.IdempotentRequestRepository
 import it.polito.cpo.repository.OrderRepository
 import it.polito.cpo.repository.OutboxEventRepository
 import it.polito.cpo.repository.ReconciliationRecordRepository
+import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import it.polito.cpo.observability.ApiException
 import kotlinx.coroutines.test.runTest
@@ -371,6 +372,7 @@ class CheckoutOrchestratorTest {
         payment: StubPaymentClient = StubPaymentClient(),
         reconciliation: FakeReconciliationService = FakeReconciliationService(),
         catalog: StubCatalogClient = StubCatalogClient(),
+        meterRegistry: MeterRegistry = SimpleMeterRegistry(),
     ) = CheckoutOrchestrator(
         orderService = service,
         inventoryClient = inventory,
@@ -379,7 +381,7 @@ class CheckoutOrchestratorTest {
         outboxEventRepository = mock(OutboxEventRepository::class.java),
         reconciliationService = reconciliation,
         objectMapper = mapper,
-        meterRegistry = SimpleMeterRegistry(),
+        meterRegistry = meterRegistry,
         txOperator = inlineTx,
         // NOOP: no tracing in these tests, so rows carry no traceparent (OrderOutboxTest covers it).
         orderOutbox = OrderOutbox(mapper, ObservationRegistry.NOOP),
@@ -1104,6 +1106,98 @@ class CheckoutOrchestratorTest {
         assertEquals(listOf("res-1"), inventory.releasedReservationIds.toList())
         // Losing a race against the deadline is ordinary, not an invariant breach.
         assertTrue(reconciliation.kindsOpened().isEmpty())
+    }
+
+    @Test
+    fun `every checkout-outcome series exists at zero before the first checkout`() {
+        // The canary gates take increase() of these by pod; a series born at 1 hides the first event.
+        val registry = SimpleMeterRegistry()
+        orchestratorFor(FakeOrderService(), meterRegistry = registry)
+
+        listOf("confirmed", "failed").forEach {
+            assertEquals(0.0, registry.find("orders.checkout.completed").tag("result", it).counter()?.count(), it)
+        }
+        FailureClassifier.CHECKOUT_FAILURE_REASONS.forEach {
+            assertEquals(0.0, registry.find("orders.checkout.failed").tag("reason", it).counter()?.count(), it)
+        }
+    }
+
+    /** Runs one failing checkout and returns the failed-series count before and after, and the reason's count. */
+    private suspend fun failedSeriesAround(
+        reason: String,
+        inventory: StubInventoryClient = StubInventoryClient(),
+        payment: StubPaymentClient = StubPaymentClient(),
+        seed: (UUID) -> Order = { order(it) },
+    ): Triple<Int, Int, Double?> {
+        val registry = SimpleMeterRegistry()
+        val service = FakeOrderService()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = seed(orderId)
+        val orchestrator = orchestratorFor(service, inventory, payment, meterRegistry = registry)
+        val before = registry.find("orders.checkout.failed").counters().size
+
+        orchestrator.processOrderPlaced(event(orderId))
+
+        assertEquals(OrderStatus.FAILED, service.ordersById[orderId]!!.status)
+        val after = registry.find("orders.checkout.failed").counters().size
+        return Triple(before, after, registry.find("orders.checkout.failed").tag("reason", reason).counter()?.count())
+    }
+
+    @Test
+    fun `a refused hold counts into its pre-registered reason series`() = runTest {
+        val (before, after, count) = failedSeriesAround(
+            "seats_unavailable",
+            inventory = StubInventoryClient(
+                hold = { HoldOutcome.Rejected(InventoryRefusalCode.SEATS_UNAVAILABLE, "sold out") },
+            ),
+        )
+        assertEquals(before, after)
+        assertEquals(1.0, count)
+    }
+
+    @Test
+    fun `a payment decline counts into its pre-registered reason series`() = runTest {
+        val (before, after, count) = failedSeriesAround(
+            FailureClassifier.PAYMENT_DECLINED,
+            payment = StubPaymentClient(authorize = { AuthorizationOutcome.Declined("CARD_DECLINED") }),
+        )
+        assertEquals(before, after)
+        assertEquals(1.0, count)
+    }
+
+    @Test
+    fun `a stored compensation reason that is no longer a code is counted as unknown, not a new series`() = runTest {
+        // A COMPENSATING row written under a code that has since been renamed.
+        val (before, after, count) = failedSeriesAround(FailureClassifier.UNKNOWN) {
+            order(
+                it,
+                status = OrderStatus.COMPENSATING,
+                reservationId = "res-1",
+                compensationReason = "SOME_RETIRED_CODE",
+            )
+        }
+        assertEquals(before, after)
+        assertEquals(1.0, count)
+    }
+
+    @Test
+    fun `a compensated failure counts into its pre-registered reason series, not a new one`() = runTest {
+        // Proves the name compensation produces (compensationReason.lowercase()) is the one registered.
+        val registry = SimpleMeterRegistry()
+        val service = FakeOrderService()
+        val inventory = StubInventoryClient(confirm = refused(InventoryRefusalCode.RESERVATION_EXPIRED))
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = order(orderId)
+        val orchestrator = orchestratorFor(service, inventory, meterRegistry = registry)
+        val seriesBefore = registry.find("orders.checkout.failed").counters().size
+
+        orchestrator.processOrderPlaced(event(orderId))
+
+        assertEquals(OrderStatus.FAILED, service.ordersById[orderId]!!.status)
+        val expired = registry.find("orders.checkout.failed").tag("reason", "reservation_expired").counter()
+        assertEquals(1.0, expired?.count())
+        assertEquals(seriesBefore, registry.find("orders.checkout.failed").counters().size)
+        assertEquals(1.0, registry.find("orders.checkout.completed").tag("result", "failed").counter()?.count())
     }
 
     @Test

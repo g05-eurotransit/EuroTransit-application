@@ -79,6 +79,23 @@ class CheckoutOrchestrator(
 ) {
     private val logger = LoggerFactory.getLogger(CheckoutOrchestrator::class.java)
 
+    /**
+     * Registers every checkout-outcome series at zero before the first checkout.
+     *
+     * The canary's checkout gates take `increase()` of `orders.checkout.completed{result}` and
+     * `orders.checkout.failed{reason}`, filtered by pod. A series created by its first increment is
+     * first scraped at 1, and `increase()` — which needs an earlier sample — reports 0, so on a fresh
+     * canary pod the first checkout of each kind would vanish: the first failure from the failure-rate
+     * gate, one sample from the sample-count gate. Same fix as the dead-letter counter
+     * (`registerExhaustedSeries`), for the same reason.
+     */
+    init {
+        listOf("confirmed", "failed").forEach { meterRegistry.counter("orders.checkout.completed", "result", it) }
+        FailureClassifier.CHECKOUT_FAILURE_REASONS.forEach {
+            meterRegistry.counter("orders.checkout.failed", "reason", it)
+        }
+    }
+
     private companion object {
         /**
          * ACCEPTED -> RESERVING -> PAYMENT_PENDING -> CONFIRMING_INVENTORY -> COMPENSATING -> FAILED
@@ -731,7 +748,11 @@ class CheckoutOrchestrator(
             )
         }
 
-        countFailed(ctx, reason.lowercase())
+        // Normalised through the enum, like the reversal path below: the reason is read back from the
+        // row, and one written under a code since renamed must not add a series nobody registered.
+        val label = InventoryRefusalCode.entries.find { it.name == reason }
+            ?.let(FailureClassifier::forInventoryRefusal) ?: FailureClassifier.UNKNOWN
+        countFailed(ctx, label)
         return Step.Advance(OrderStatus.FAILED)
     }
 

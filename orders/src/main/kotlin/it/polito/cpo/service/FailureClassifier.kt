@@ -55,6 +55,17 @@ object FailureClassifier {
      */
     val DEAD_LETTER_LABELS = listOf(POISON_PAYLOAD, DEPENDENCY_ERROR, UNKNOWN)
 
+    /**
+     * Every `reason` a failed checkout can be counted under (`orders.checkout.failed`), for the same
+     * reason as [DEAD_LETTER_LABELS]: the series are pre-registered at zero, so the canary's
+     * failure-rate gate sees the first failure on a new pod. `failUnpaid` records an Inventory refusal
+     * or one of the two payment labels; the end of compensation records the refusal that triggered it,
+     * or [UNKNOWN]. Derived from [InventoryRefusalCode] so a new code joins without an edit here.
+     */
+    val CHECKOUT_FAILURE_REASONS: List<String> =
+        listOf(PAYMENT_DECLINED, PAYMENT_TOKEN_MISSING, UNKNOWN) +
+            InventoryRefusalCode.entries.map { forInventoryRefusal(it) }
+
     private fun classifyDeadLetterClass(exceptionFqcn: String?): String = when {
         exceptionFqcn == null -> UNKNOWN
         exceptionFqcn.endsWith("PoisonEventException") -> POISON_PAYLOAD
