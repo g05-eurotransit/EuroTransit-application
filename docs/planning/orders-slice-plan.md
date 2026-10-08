@@ -1262,7 +1262,10 @@ stable pod and pass unseen. The attributable signal has to be emitted where the 
 a counter incremented by the recoverer in `KafkaConfiguration.kafkaErrorHandler` (an Orders change),
 with the gate switched to it (a configuration change). **Orders half done (C5):**
 `orders_events_exhausted_total{topic,failure_class}` is counted by the pod that gave up, after the
-dead letter is published; the gate switch is configuration's.
+dead letter is published, and every series is registered at zero at startup — otherwise the first dead
+letter on a fresh canary pod creates the series at 1 and `increase()` reports 0, so the gate would pass
+on exactly the failure it exists for. The gate switch is configuration's. The same zero-at-start
+problem applies to the lazily created `orders_checkout_failed_total{reason}` that F1's gate uses.
 
 **None of the four is a reason to delay enabling the canary.** F1 and F2 make it abort too eagerly
 and refuse too late respectively; neither lets a bad build through silently, which was the failure

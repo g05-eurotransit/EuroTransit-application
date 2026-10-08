@@ -57,14 +57,17 @@ These cover the money-path states introduced by the synchronous Inventory confir
 incremented by the dead-letter *consumers*, which run in their own group (`orders-dlt`), so it lands on
 whichever pod reads the dead letter: right for the two alerts above, which do not care which pod.
 `orders_events_exhausted_total{topic,failure_class}` is incremented by the pod that **gave up** on the
-delivery, once the dead letter is published, with the same `failure_class` the incident gets. That is
+delivery, once the dead letter is published, labelled with the `failure_class` an incident gets when
+one is opened (a poison payload, an unknown order or an already-terminal order opens none). That is
 the one to filter by pod — the canary gate `canary-dead-letter-events` belongs on it, not on
-`orders_events_dlt_total` (step 5, F4).
+`orders_events_dlt_total` (step 5, F4). Every `topic` × `failure_class` series is registered at zero
+when Orders starts, so `increase()` sees the first dead letter on a new pod rather than a series that
+appears already at 1.
 
-**Blocker:** none of these can fire yet. The Orders security chain authorizes only the
-health endpoints and the order APIs, then denies everything else, so
-`/actuator/prometheus` is not scrapable. Opening it is a Gateway/Security decision and
-is tracked separately.
+`/actuator/prometheus` is scrapable: the shared security baseline
+(`EuroTransitSecurity.UNAUTHENTICATED_ACTUATOR_ENDPOINTS`) permits it, and no Traefik route exposes
+it outside the service network. *(Until that change these alerts could not fire; the note saying so
+is removed.)*
 
 ## Tracing
 

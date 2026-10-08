@@ -308,7 +308,7 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     checkout pipeline, `refund-requested` for a `refunding` order (ADR-015).
   - **What a redrive does and does not retry on a stuck refund.** It resumes the refund pipeline from
     the durable `refunding` row, so it does retry a seat return that failed and a delivery that
-    exhausted its retries — and, since #122, a payment reversal Payments refused definitively: the
+    exhausted its retries — and a payment reversal Payments refused definitively after #122 was deployed: the
     reversal is re-sent under the same deterministic `pay-refund-{orderId}` key, but Payments no longer
     stores a declined refund as a settled result and sends the provider a key suffixed with the number
     of recorded declines, so the redrive reaches the provider again. If the provider declines again

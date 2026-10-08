@@ -541,7 +541,8 @@ one.
 > recorded declines, so neither its own cache nor the provider's 24-hour idempotency cache replays the
 > decline. A redrive of a refund stuck on a definitive decline is therefore a real attempt; the same
 > holds for checkout compensation under `refund-{orderId}`. The paragraphs above are kept as the
-> record of why the change was needed.
+> record of why the change was needed. A decline cached *before* #122 is still replayed: V4 does not
+> remove those idempotency records.
 
 Separately, `refund-requested-dlt` initially had no consumer. The shared error handler exhausts in
 about three seconds, so a dependency blip ordinary enough to be routine (an Inventory pod roll) could
