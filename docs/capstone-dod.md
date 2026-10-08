@@ -64,7 +64,8 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
 - [ ] Final cluster/demo proof does not depend on mocked services or fake in-memory substitutes for core infrastructure.
 - [ ] TLS is terminated at Traefik in the cluster environment.
 - [ ] Secrets are stored through SealedSecrets or an equivalent GitOps-safe mechanism.
-- [ ] Money-path audit logs include correlation ID, principal ID, order ID, and outcome, while excluding secrets and payment details.
+- [x] Money-path audit logs include correlation ID, principal ID, order ID, and outcome, while excluding secrets and payment details.
+      *Orders, 2026-10-08:* Orders coordinates the money path and writes one `audit` line per decision — checkout accepted/replayed/rejected, confirmed/failed, cancel, refund requested and settled, operator redrive and resolve — with `correlationId`, `principalId`, `orderId`, `outcome` (`MoneyPathAudit`; fields and vocabulary in [observability-conventions.md](design/observability-conventions.md#money-path-audit-log)). Only identifiers and closed-vocabulary values reach the line; a test asserts the payment token and email never do. Covered by `MoneyPathAuditTest`, `CheckoutOrchestratorTest`, `RefundOrchestratorTest`, and `CheckoutPipelineIntegrationTest` (one correlation id from the HTTP accept to the consumer's outcome). Compose proof: a checkout, a price-mismatch refusal and a refund produced five lines, every one with all four fields — the HTTP lines under the caller's `sub`, the pipeline lines under the owner and the client's `X-Correlation-Id` — and no token or email. Inventory and Payments act on Orders' calls under service credentials; their own logs are not audit lines.
 - [ ] No real card data or live charges are handled; Payments integrates with a provider sandbox/test API such as Stripe test mode or PayPal Sandbox.
 
 ## 6. Chaos Experiments
