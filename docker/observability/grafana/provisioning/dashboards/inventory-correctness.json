@@ -1,0 +1,88 @@
+{
+  "title": "EuroTransit / Inventory Correctness",
+  "uid": "eurotransit-inventory-correctness",
+  "tags": ["eurotransit", "inventory", "correctness"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "title": "Hold Operations (Success vs Failed vs Expired)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(inventory_holds_successful_total[5m]))",
+          "legendFormat": "Successful Holds/s"
+        },
+        {
+          "expr": "sum(rate(inventory_holds_failed_total[5m]))",
+          "legendFormat": "Failed Holds/s"
+        },
+        {
+          "expr": "sum(rate(inventory_holds_expired_total[5m]))",
+          "legendFormat": "Expired Holds/s"
+        }
+      ]
+    },
+    {
+      "title": "Post-Hold Transitions (Confirmed vs Refunded)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(inventory_holds_confirmed_total[5m]))",
+          "legendFormat": "Confirmed Sales/s"
+        },
+        {
+          "expr": "sum(rate(inventory_holds_refunded_total[5m]))",
+          "legendFormat": "Refunded Seats/s"
+        }
+      ]
+    },
+    {
+      "title": "Idempotency Hits (Duplicate Request Protection)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(inventory_idempotency_hits_total[5m]))",
+          "legendFormat": "Idempotency Hits/s"
+        }
+      ]
+    },
+    {
+      "title": "Oversell & Invariant Violations",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(increase(orders_reconciliation_required_total{kind=\"INVARIANT_VIOLATION\"}[5m]))",
+          "legendFormat": "Invariant Violations"
+        },
+        {
+          "expr": "sum(increase(orders_inventory_confirm_total{code=\"RESERVATION_SEAT_CONFLICT\"}[5m]))",
+          "legendFormat": "Seat Conflicts"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 20, "lineWidth": 2 }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Invariant Violations" },
+            "properties": [ { "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } } ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Seat Conflicts" },
+            "properties": [ { "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } } ]
+          }
+        ]
+      }
+    }
+  ]
+}
