@@ -90,6 +90,7 @@ management:
       percentiles-histogram:
         http.server.requests: true
         orders.checkout.duration: true
+        orders.checkout.e2e.duration: true
   tracing:
     sampling:
       probability: 1.0

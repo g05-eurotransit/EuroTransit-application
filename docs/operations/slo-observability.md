@@ -1,5 +1,12 @@
 # SLOs, SLIs, Dashboards, and Alerts
 
+The operational load harness, scenarios, fixtures, correctness verifier, runner
+and execution reports are owned by the
+[configuration repository](https://github.com/g05-eurotransit/EuroTransit-configuration/tree/feat/resilience-verification/load-tests).
+Application changes for that harness expose the missing end-to-end histogram and
+metrics for the actual circuit-breaker, bulkhead and retry registries. They do not
+change admission, pools, timeouts or retry behavior.
+
 The critical user journey is checkout: client request through gateway, Orders, Inventory, Payments, Kafka event publication, and final order confirmation.
 
 ## Checkout SLOs
