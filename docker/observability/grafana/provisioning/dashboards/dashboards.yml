@@ -1,3 +1,9 @@
+# Note on Scrape Labels:
+# Dashboards in this folder query Prometheus using {namespace="eurotransit", app="..."} selectors.
+# In local development, they rely on docker/observability/prometheus.yml statically attaching those
+# labels to each target to mirror the Kubernetes cluster ServiceMonitor scheme.
+# Modifying or stripping those labels in prometheus.yml will silently empty these panels (No Data).
+
 apiVersion: 1
 providers:
   - name: 'EuroTransit Dashboards'
