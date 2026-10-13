@@ -3,9 +3,10 @@
 The operational load harness, scenarios, fixtures, correctness verifier, runner
 and execution reports are owned by the
 [configuration repository](https://github.com/g05-eurotransit/EuroTransit-configuration/tree/feat/resilience-verification/load-tests).
-Application changes for that harness expose the missing end-to-end histogram and
-metrics for the actual circuit-breaker, bulkhead and retry registries. They do not
-change admission, pools, timeouts or retry behavior.
+Application changes for that harness (#135) expose the missing end-to-end histogram and
+metrics for the actual circuit-breaker, bulkhead and retry registries. Those changes do not
+change admission, pools, timeouts or retry behavior; the retry budget before a dead letter is
+described under Recovery Objectives below.
 
 The critical user journey is checkout: client request through gateway, Orders, Inventory, Payments, Kafka event publication, and final order confirmation.
 
@@ -23,6 +24,23 @@ The critical user journey is checkout: client request through gateway, Orders, I
 - Checkout success-rate error budget: 1.0% failed valid checkout attempts per 30 days.
 - Burn-rate alerts must page on user-visible symptoms, not CPU usage alone.
 - A release is paused or rolled back if the Orders canary consumes more than 10% of the daily error budget during the canary window.
+
+## Recovery Objectives
+
+Proposed by the Orders owner on 2026-10-13, after the AKS experiments (configuration #55); to be
+confirmed by the team. The policy and the operator steps are in
+[orders-recovery-runbook.md](orders-recovery-runbook.md).
+
+| Objective | Target | Measured by |
+| --- | --- | --- |
+| Automatic convergence | An accepted order caught by a dependency outage of up to about a minute reaches a terminal state without an operator, within about a minute of the dependency returning. | `orders_pipeline_oldest_age_seconds`; no `orders_events_exhausted_total{failure_class="dependency_error"}` increase. |
+| Checkout recovery SLO (the `CheckoutStuckNonTerminal` threshold below) | 3 minutes: the retry budget (1.5 to about 2.3 minutes in real time) plus the pipeline itself, with margin. | `max(orders_pipeline_oldest_age_seconds) > 180` |
+| Incident response SLO (the `ReconciliationAgeHigh` threshold below) | An open incident is redriven or resolved within 5 minutes, and a `PAYMENT_PENDING` one always before its order's `reservationExpiresAt` (the ten-minute seat hold); past it, that redrive is refused. | `max(orders_reconciliation_oldest_age_seconds) > 300` |
+
+An outage longer than the budget opens its incident 1.5 to about 2.3 minutes after the hold was taken,
+so the operator has about 7.5 to 8.5 minutes, of which `ReconciliationRecordOpen`'s `for: 5m` currently
+spends five.
+A shorter `for` is proposed to the configuration repository.
 
 ## Dashboards
 
@@ -54,9 +72,9 @@ These cover the money-path states introduced by the synchronous Inventory confir
 | ReconciliationRecordOpen | `max(orders_reconciliation_open) > 0` for 5m | An incident automatic recovery could not resolve is waiting for an operator. A counter cannot express this: a record open for a week must keep alerting. |
 | PaymentReversalFailure | `increase(orders_reconciliation_required_total{kind="PAYMENT_REVERSAL_FAILURE"}[10m]) > 0` | Money was taken and a reversal definitively failed; the order is deliberately non-terminal. |
 | InvariantViolation | `increase(orders_reconciliation_required_total{kind="INVARIANT_VIOLATION"}[10m]) > 0` | Inventory reported a state the model says cannot occur. |
-| CheckoutStuckNonTerminal | `max(orders_pipeline_oldest_age_seconds) > checkout recovery SLO` | An order is stranded in `PAYMENT_PENDING`, `CONFIRMING_INVENTORY` or `COMPENSATING`. |
+| CheckoutStuckNonTerminal | `max(orders_pipeline_oldest_age_seconds) > 180` (checkout recovery SLO, above) | An order is stranded in `PAYMENT_PENDING`, `CONFIRMING_INVENTORY` or `COMPENSATING`. |
 | InventorySeatConflict | `increase(orders_inventory_confirm_total{code="RESERVATION_SEAT_CONFLICT"}[10m]) > 0` | Seat ownership disagreement between the two services. |
-| ReconciliationAgeHigh | `max(orders_reconciliation_oldest_age_seconds) > incident response SLO` | An incident has been waiting too long, whatever its kind. |
+| ReconciliationAgeHigh | `max(orders_reconciliation_oldest_age_seconds) > 300` (incident response SLO, above) | An incident has been waiting too long, whatever its kind. |
 | PoisonOrderEvent | `increase(orders_events_dlt_total{result="poison"}[10m]) > 0` | A record reached `order-placed-dlt` with a payload that cannot be parsed, so no incident could be attached to an order. |
 | DeadLetterUnknownOrder | `increase(orders_events_dlt_total{result="unknown_order"}[10m]) > 0` | A dead letter referenced an order id that does not exist: producer or data-retention problem. |
 

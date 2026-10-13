@@ -263,6 +263,7 @@ The module is shared: changes go through a PR reviewed by the owner of any affec
 - The payment method token (a sandbox reference, not card data) is persisted on the order so the async pipeline can rebuild the payment request, and is cleared once the order reaches a terminal state. It is **not** placed on any Kafka event.
 - Synchronous calls to Inventory and Payments are wrapped with Resilience4j (timeout, bounded retry with backoff/jitter on transient faults only, circuit breaker, bulkhead) — see `ResilienceConfiguration`. A payment decline is a normal HTTP 200 result, so it never trips the breaker.
 - `order-placed` is persisted through the Orders transactional outbox and relayed by Debezium, closing the order-commit/event-publish gap. Exhausted consumer retries publish to `order-placed.DLT`; reconciliation preserves and redrives the durable Orders phase.
+- Retries before the dead letter depend on why the delivery failed (2026-10-13): six jittered redeliveries, about a minute of waits, when waiting can fix it (a dependency not available), so a short outage or a failover converges without an operator; three a second apart for anything else, including a deployment or data bug labelled as a dependency failure. Not longer, because the retry blocks the checkouts behind the record on that pod and delays the incident towards the ten-minute seat hold. See [orders-recovery-runbook.md](../operations/orders-recovery-runbook.md).
 
 ### Alternatives Considered
 

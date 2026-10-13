@@ -6,6 +6,7 @@ import it.polito.cpo.contracts.events.RefundRequestedEvent
 import it.polito.cpo.controller.dtos.RedriveResponse
 import it.polito.cpo.controller.dtos.ResolveReconciliationRequest
 import it.polito.cpo.controller.dtos.ResolveReconciliationResponse
+import it.polito.cpo.model.OpenReconciliationIncident
 import it.polito.cpo.model.OrderStatus
 import it.polito.cpo.model.ReconciliationKind
 import it.polito.cpo.model.ReconciliationStatus
@@ -15,6 +16,7 @@ import it.polito.cpo.repository.OutboxEventRepository
 import it.polito.cpo.repository.ReconciliationRecordRepository
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.reactor.ReactorContext
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatus
@@ -27,9 +29,9 @@ import java.time.Instant
 import java.util.UUID
 
 /**
- * The two operator commands over reconciliation incidents.
+ * The two operator commands over reconciliation incidents, and the list an operator chooses from.
  *
- * Neither touches business state. A redrive only re-triggers a durable pipeline by writing a fresh
+ * Neither command touches business state. A redrive only re-triggers a durable pipeline by writing a fresh
  * outbox row — `order-placed` for the checkout pipeline, `refund-requested` for ADR-015's refund,
  * chosen by which durable process the order is currently in; the stored `orders.status` is what
  * selects the resume action within that process, so this service contains no knowledge of *which*
@@ -185,6 +187,13 @@ class ReconciliationOperationsService(
         )
         return response
     }
+
+    /**
+     * The open incidents, most urgent first (see the repository query), at most [limit] of them (clamped to 1..[MAX_LIST_LIMIT]). Read
+     * only, so neither idempotency nor an audit line: it decides nothing.
+     */
+    suspend fun listOpen(limit: Int): List<OpenReconciliationIncident> =
+        records.findOpenIncidents(limit.coerceIn(1, MAX_LIST_LIMIT)).toList()
 
     /**
      * Closes an investigated invariant violation. Requires an order whose money question is already
@@ -358,5 +367,6 @@ class ReconciliationOperationsService(
     private companion object {
         const val OPERATION_REDRIVE = "reconciliation-redrive"
         const val OPERATION_RESOLVE = "reconciliation-resolve"
+        const val MAX_LIST_LIMIT = 500
     }
 }

@@ -65,3 +65,32 @@ enum class ReconciliationKind {
 }
 
 enum class ReconciliationStatus { OPEN, RESOLVED }
+
+/**
+ * An open incident as an operator lists it (`GET /api/orders/reconciliation`): enough to choose and
+ * time a redrive, and nothing a caller should not see.
+ *
+ * Two states, on purpose: [orderState] is the order's phase when the incident was opened or last
+ * recurred, which is what failed; [orderStatus] is where the order is now, which is what a redrive
+ * resumes from. They differ for an invariant violation (opened in `COMPENSATING`, the order then
+ * `FAILED`) and for any order that moved after its incident. `failureDetail` is left out because it is free
+ * text from a dependency's error; the order's own data stays behind `GET /api/orders/{orderId}`.
+ *
+ * [reservationExpiresAt] is the order's seat-hold deadline, when it has one: past it, a
+ * `PAYMENT_PENDING` order can no longer be redriven (`RESERVATION_HOLD_EXPIRED`), so it is the clock
+ * an operator works against.
+ *
+ * A read projection joined from `reconciliation_records` and `orders`, not an entity.
+ */
+data class OpenReconciliationIncident(
+    val id: UUID,
+    val orderId: UUID,
+    val kind: String,
+    val orderState: String,
+    val orderStatus: String?,
+    val failureClass: String,
+    val attemptCount: Int,
+    val createdAt: OffsetDateTime,
+    val updatedAt: OffsetDateTime,
+    val reservationExpiresAt: OffsetDateTime?,
+)
