@@ -272,6 +272,38 @@ class OrdersSecurityConfigTests @Autowired constructor(
     }
 
     @Test
+    fun `abandoning an expired checkout accepts only the operations role`() {
+        webTestClient.post()
+            .uri("/api/orders/order-123/reconciliation/abandon")
+            .headers { it.setBearerAuth("operations-token") }
+            .exchange()
+            .expectStatus().isOk
+        listOf("customer-token", "service-token").forEach { token ->
+            webTestClient.post()
+                .uri("/api/orders/order-123/reconciliation/abandon")
+                .headers { it.setBearerAuth(token) }
+                .exchange()
+                .expectStatus().isForbidden
+        }
+    }
+
+    @Test
+    fun `settling an unknown payment outcome accepts only the operations role`() {
+        webTestClient.post()
+            .uri("/api/orders/order-123/reconciliation/rec-1/settle")
+            .headers { it.setBearerAuth("operations-token") }
+            .exchange()
+            .expectStatus().isOk
+        listOf("customer-token", "service-token").forEach { token ->
+            webTestClient.post()
+                .uri("/api/orders/order-123/reconciliation/rec-1/settle")
+                .headers { it.setBearerAuth(token) }
+                .exchange()
+                .expectStatus().isForbidden
+        }
+    }
+
+    @Test
     fun `reconciliation endpoints reject anonymous requests`() {
         webTestClient.post()
             .uri("/api/orders/order-123/reconciliation/redrive")
@@ -356,6 +388,15 @@ class OrdersSecurityConfigTests @Autowired constructor(
 
         @PostMapping("/api/orders/{orderId}/reconciliation/redrive")
         fun redrive(@PathVariable orderId: String): Map<String, String> = mapOf("orderId" to orderId)
+
+        @PostMapping("/api/orders/{orderId}/reconciliation/{recordId}/settle")
+        fun settle(
+            @PathVariable orderId: String,
+            @PathVariable recordId: String,
+        ): Map<String, String> = mapOf("orderId" to orderId, "recordId" to recordId)
+
+        @PostMapping("/api/orders/{orderId}/reconciliation/abandon")
+        fun abandon(@PathVariable orderId: String): Map<String, String> = mapOf("orderId" to orderId)
 
         @PostMapping("/api/orders/{orderId}/reconciliation/{recordId}/resolve")
         fun resolve(

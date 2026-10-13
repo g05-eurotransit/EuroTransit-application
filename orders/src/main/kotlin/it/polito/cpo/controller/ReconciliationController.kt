@@ -1,8 +1,10 @@
 package it.polito.cpo.controller
 
+import it.polito.cpo.controller.dtos.AbandonResponse
 import it.polito.cpo.controller.dtos.RedriveResponse
 import it.polito.cpo.controller.dtos.ResolveReconciliationRequest
 import it.polito.cpo.controller.dtos.ResolveReconciliationResponse
+import it.polito.cpo.controller.dtos.SettleResponse
 import it.polito.cpo.model.OpenReconciliationIncident
 import it.polito.cpo.service.ReconciliationOperationsService
 import org.springframework.http.HttpStatus
@@ -52,6 +54,26 @@ class ReconciliationController(
         @RequestHeader("Idempotency-Key") idempotencyKey: String,
         @AuthenticationPrincipal jwt: Jwt,
     ): RedriveResponse = operations.redrive(orderId, idempotencyKey, operatorId(jwt))
+
+    /** Gives up a `PAYMENT_PENDING` order past its seat hold; compensation settles it (#140). */
+    @PostMapping("/{orderId}/reconciliation/abandon")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    suspend fun abandon(
+        @PathVariable orderId: UUID,
+        @RequestHeader("Idempotency-Key") idempotencyKey: String,
+        @AuthenticationPrincipal jwt: Jwt,
+    ): AbandonResponse = operations.abandon(orderId, idempotencyKey, operatorId(jwt))
+
+    /** Settles an abandoned checkout's unknown payment outcome with provider evidence (#140). */
+    @PostMapping("/{orderId}/reconciliation/{recordId}/settle")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    suspend fun settle(
+        @PathVariable orderId: UUID,
+        @PathVariable recordId: UUID,
+        @RequestHeader("Idempotency-Key") idempotencyKey: String,
+        @RequestBody request: ResolveReconciliationRequest,
+        @AuthenticationPrincipal jwt: Jwt,
+    ): SettleResponse = operations.settle(orderId, recordId, idempotencyKey, request, operatorId(jwt))
 
     @PostMapping("/{orderId}/reconciliation/{recordId}/resolve")
     suspend fun resolve(

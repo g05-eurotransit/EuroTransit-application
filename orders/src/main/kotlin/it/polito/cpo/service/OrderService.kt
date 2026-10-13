@@ -43,6 +43,8 @@ class OrderService(
     suspend fun markCompensating(id: UUID, reason: String): Long =
         orderRepository.markCompensating(id, reason)
 
+    suspend fun markAbandoned(id: UUID): Long = orderRepository.markAbandoned(id, ABANDONED_COMPENSATION_REASON)
+
     suspend fun markConfirmed(id: UUID): Long = orderRepository.markConfirmed(id)
 
     suspend fun markFailedUnpaid(id: UUID, failureCode: CustomerFailureCode): Long =
@@ -108,3 +110,11 @@ class OrderService(
     suspend fun purgeExpiredIdempotency(cutoff: LocalDateTime): Long =
         idempotencyRepository.deleteExpired(cutoff)
 }
+
+/**
+ * The compensation reason of a checkout an operator abandoned past its seat hold, with its payment
+ * outcome unknown (#140). Deliberately not an `InventoryRefusalCode`: Inventory refused nothing. The
+ * compensation reads it to know that Payments holding no AUTHORIZED row is a question for an operator
+ * (PAYMENT_OUTCOME_UNKNOWN), not a reversal failure — and not proof that no money was taken.
+ */
+const val ABANDONED_COMPENSATION_REASON = "HOLD_EXPIRED_PAYMENT_UNKNOWN"

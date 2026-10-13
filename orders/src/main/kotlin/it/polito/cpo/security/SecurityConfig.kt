@@ -37,6 +37,10 @@ class SecurityConfig {
                     .hasAuthority(EuroTransitAuthorities.OPERATIONS)
                 it.pathMatchers(HttpMethod.POST, "/api/orders/*/reconciliation/*/resolve")
                     .hasAuthority(EuroTransitAuthorities.OPERATIONS)
+                it.pathMatchers(HttpMethod.POST, "/api/orders/*/reconciliation/abandon")
+                    .hasAuthority(EuroTransitAuthorities.OPERATIONS)
+                it.pathMatchers(HttpMethod.POST, "/api/orders/*/reconciliation/*/settle")
+                    .hasAuthority(EuroTransitAuthorities.OPERATIONS)
                 // The operator list of open incidents. Ahead of the order-read rule, which would
                 // otherwise let any customer read every customer's stuck orders. The double wildcard
                 // also matches the bare path, and keeps a trailing-slash variant on this rule should

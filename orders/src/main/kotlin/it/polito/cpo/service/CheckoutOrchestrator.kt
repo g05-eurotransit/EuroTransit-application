@@ -737,6 +737,33 @@ class CheckoutOrchestrator(
         // 1. Reverse the money first (doc:143). An unknown reversal throws, keeping COMPENSATING.
         meterRegistry.counter("orders.refund.attempt").increment()
         when (val reversal = paymentClient.refund(ctx.orderId, "refund-${ctx.orderId}")) {
+            is ReversalOutcome.Failed if ctx.compensationReason == ABANDONED_COMPENSATION_REASON &&
+                (reversal.isNoAuthorization() || reversal.isUnsettledAuthorization()) -> {
+                // #140: an abandoned checkout never learned whether its payment was authorized, and
+                // Payments holds no AUTHORIZED row to reverse. That does NOT mean no money was taken:
+                // Payments calls the provider before writing its row, so a charge whose answer was lost
+                // leaves none. Only an operator, from the provider, can say. Until one has settled it
+                // with evidence, the order waits here under an incident that names the question.
+                // Elsewhere compensation follows a definitive AUTHORIZED, and these answers stay a
+                // reversal failure (below).
+                if (!reconciliationService.isPaymentOutcomeSettled(ctx.orderId)) {
+                    meterRegistry.counter("orders.refund", "result", "outcome_unknown", "code", reversal.code).increment()
+                    // The incident first: if Inventory is down, the release below throws and the delivery
+                    // is retried, but the money question is already visible to the operator.
+                    reconciliationService.recordPaymentOutcomeUnknown(
+                        orderId = ctx.orderId,
+                        correlationId = ctx.correlationId,
+                        failureClass = FailureClassifier.PAYMENT_OUTCOME_UNKNOWN,
+                        detail = "Payments holds no settled authorization: ${reversal.code}" +
+                            (reversal.detail?.let { " $it" } ?: "") +
+                            ". Check the provider before settling.",
+                    )
+                    // The sale is lost whatever the money: the hold expired before the abandonment.
+                    releaseHoldIfSafe(ctx)
+                    return Step.Park(OrderStatus.COMPENSATING, "payment outcome unknown after abandonment")
+                }
+                meterRegistry.counter("orders.refund", "result", "settled_by_operator", "code", reversal.code).increment()
+            }
             is ReversalOutcome.Failed -> {
                 meterRegistry.counter("orders.refund", "result", "failed", "code", reversal.code).increment()
                 reconciliationService.recordPaymentReversalFailure(
@@ -782,8 +809,12 @@ class CheckoutOrchestrator(
 
         // Normalised through the enum, like the reversal path below: the reason is read back from the
         // row, and one written under a code since renamed must not add a series nobody registered.
-        val label = InventoryRefusalCode.entries.find { it.name == reason }
-            ?.let(FailureClassifier::forInventoryRefusal) ?: FailureClassifier.UNKNOWN
+        val label = if (reason == ABANDONED_COMPENSATION_REASON) {
+            FailureClassifier.CHECKOUT_ABANDONED
+        } else {
+            InventoryRefusalCode.entries.find { it.name == reason }
+                ?.let(FailureClassifier::forInventoryRefusal) ?: FailureClassifier.UNKNOWN
+        }
         countFailed(ctx, label)
         return Step.Advance(OrderStatus.FAILED)
     }

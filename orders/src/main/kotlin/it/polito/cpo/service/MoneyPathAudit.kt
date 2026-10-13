@@ -32,6 +32,8 @@ object MoneyPathAudit {
         REFUND_PIPELINE("refund.pipeline"),
         RECONCILIATION_REDRIVE("reconciliation.redrive"),
         RECONCILIATION_RESOLVE("reconciliation.resolve"),
+        RECONCILIATION_ABANDON("reconciliation.abandon"),
+        RECONCILIATION_SETTLE("reconciliation.settle"),
     }
 
     enum class Outcome(val value: String) {
