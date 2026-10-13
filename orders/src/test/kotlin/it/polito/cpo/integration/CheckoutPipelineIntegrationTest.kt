@@ -1,5 +1,7 @@
 package it.polito.cpo.integration
 
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException
+import io.github.resilience4j.circuitbreaker.CircuitBreaker
 import io.micrometer.core.instrument.MeterRegistry
 import it.polito.cpo.client.AuthorizationOutcome
 import it.polito.cpo.client.CatalogClient
@@ -108,6 +110,10 @@ import kotlin.test.assertTrue
         // The dead-letter consumer retries without limit; short intervals keep that test fast.
         "orders.kafka.dlt-retry.initial-interval-ms=50",
         "orders.kafka.dlt-retry.max-interval-ms=200",
+        // The same for the checkout listener's dependency budget: minutes in production, seconds here.
+        "orders.kafka.retry.dependency.initial-interval-ms=50",
+        "orders.kafka.retry.dependency.max-interval-ms=200",
+        "orders.kafka.retry.dependency.max-retries=10",
     ],
 )
 @AutoConfigureTracing
@@ -399,6 +405,22 @@ class CheckoutPipelineIntegrationTest {
         // Invariant 8: an unknown outcome never became a compensation.
         assertFalse(payment.refundedOrderIds.contains(response.orderId))
         assertFalse(inventory.releasedReservationIds.contains(reservationId))
+    }
+
+    @Test
+    fun `a Payments outage longer than the default retry budget converges without an incident`() = runBlocking {
+        val response = orchestrator.checkout(request(), "it-outage-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        val exhaustedBefore = exhaustedCount("order-placed", FailureClassifier.DEPENDENCY_ERROR)
+        // Six refusals: the default budget (four deliveries) would have dead-lettered this order on
+        // AKS, where an open breaker makes every attempt fail at once (configuration #55).
+        payment.unavailableFor[response.orderId] = AtomicInteger(6)
+
+        relayOrderPlaced(response.orderId)
+
+        assertEquals(OrderStatus.CONFIRMED, awaitTerminal(response.orderId).status)
+        assertEquals(1, payment.authorizedOrderIds.count { it == response.orderId })
+        assertTrue(openRecords(response.orderId).isEmpty())
+        assertEquals(exhaustedBefore, exhaustedCount("order-placed", FailureClassifier.DEPENDENCY_ERROR))
     }
 
     @Test
@@ -1241,6 +1263,9 @@ class CheckoutPipelineIntegrationTest {
         /** orderId -> answer the reversal with a definitive failure instead of success. */
         val failReversalFor = ConcurrentHashMap.newKeySet<UUID>()
 
+        /** orderId -> how many authorizations to refuse as an open Payments breaker would, before answering. */
+        val unavailableFor = ConcurrentHashMap<UUID, AtomicInteger>()
+
         override suspend fun authorizePayment(
             request: PaymentRequest,
             idempotencyKey: String,
@@ -1248,6 +1273,9 @@ class CheckoutPipelineIntegrationTest {
         ): AuthorizationOutcome {
             if (request.paymentMethodToken == DECLINE_TOKEN) {
                 return AuthorizationOutcome.Declined("DECLINED")
+            }
+            if ((unavailableFor[request.orderId]?.getAndDecrement() ?: 0) > 0) {
+                throw CallNotPermittedException.createCallNotPermittedException(CircuitBreaker.ofDefaults("payments"))
             }
             authorizedOrderIds.add(request.orderId)
             authorizeRequests.add(request)
