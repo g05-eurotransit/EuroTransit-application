@@ -1,5 +1,6 @@
 {
   "title": "EuroTransit / USE — Infrastructure",
+  "description": "KEEP IN SYNC with EuroTransit-configuration platform/kube-prometheus-stack/dashboards/infra-use.configmap.yaml. A local dashboard that measures infrastructure differently from production creates blind spots.",
   "uid": "eurotransit-infra-use",
   "tags": ["eurotransit", "use", "infra"],
   "timezone": "browser",

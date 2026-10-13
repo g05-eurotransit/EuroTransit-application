@@ -1,5 +1,6 @@
 {
   "title": "EuroTransit / Inventory Correctness",
+  "description": "KEEP IN SYNC with EuroTransit-configuration platform/kube-prometheus-stack/dashboards/inventory-correctness.configmap.yaml. A local dashboard that measures inventory correctness differently from production creates blind spots.",
   "uid": "eurotransit-inventory-correctness",
   "tags": ["eurotransit", "inventory", "correctness"],
   "timezone": "browser",

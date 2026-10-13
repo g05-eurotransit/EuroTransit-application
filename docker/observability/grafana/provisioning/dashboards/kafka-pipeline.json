@@ -1,5 +1,6 @@
 {
   "title": "EuroTransit / Kafka Pipeline",
+  "description": "KEEP IN SYNC with EuroTransit-configuration platform/kube-prometheus-stack/dashboards/kafka-pipeline.configmap.yaml. A local dashboard that measures kafka pipeline differently from production creates blind spots.",
   "uid": "eurotransit-kafka-pipeline",
   "tags": ["eurotransit", "kafka", "pipeline", "async"],
   "timezone": "browser",

@@ -1,5 +1,6 @@
 {
   "title": "EuroTransit / RED — Services",
+  "description": "KEEP IN SYNC with EuroTransit-configuration platform/kube-prometheus-stack/dashboards/red-services.configmap.yaml. A local dashboard that measures service health differently from production creates blind spots.",
   "uid": "eurotransit-red-services",
   "tags": ["eurotransit", "red", "services"],
   "timezone": "browser",

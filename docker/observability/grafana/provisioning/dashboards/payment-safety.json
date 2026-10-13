@@ -1,5 +1,6 @@
 {
   "title": "EuroTransit / Payment Safety",
+  "description": "KEEP IN SYNC with EuroTransit-configuration platform/kube-prometheus-stack/dashboards/payment-safety.configmap.yaml. A local dashboard that measures payment safety differently from production creates blind spots.",
   "uid": "eurotransit-payment-safety",
   "tags": ["eurotransit", "payments", "safety"],
   "timezone": "browser",

@@ -1,5 +1,6 @@
 {
   "title": "EuroTransit / Checkout SLO — Money Path",
+  "description": "KEEP IN SYNC with EuroTransit-configuration platform/kube-prometheus-stack/dashboards/checkout-slo.configmap.yaml. A local dashboard that measures checkout differently from production is not an accurate rehearsal for production.",
   "uid": "eurotransit-checkout-slo",
   "tags": ["eurotransit", "slo", "checkout"],
   "timezone": "browser",
