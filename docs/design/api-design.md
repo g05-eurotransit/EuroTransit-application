@@ -30,6 +30,7 @@ EuroTransit is designed as an enterprise-grade system. Public APIs must assume a
 | `GET /api/orders/seat-availability` | External | Required | Customer scope; no owned resource, so no ownership check — it is a checkout step, not public browsing |
 | `GET /api/orders/{orderId}` | External | Required | Order owner or privileged operations scope |
 | `POST /api/orders/{orderId}/refund` | External | Required | Order owner or privileged operations scope, same ownership rule as `cancel` (404, never 403, for anyone else) |
+| `GET /api/orders/reconciliation` | Internal operations | Required operations credential | Operations role only; lists the open reconciliation incidents an operator chooses a redrive from |
 | `POST /api/orders/{orderId}/reconciliation/redrive` | Internal operations | Required operations credential | Operations role only; redrives an open reconciliation record through the Orders outbox |
 | `POST /api/orders/{orderId}/reconciliation/{recordId}/resolve` | Internal operations | Required operations credential | Operations role only; records evidence-backed resolution of a terminal invariant incident |
 | `GET /api/inventory/availability` | Internal | Required service credential | Orders service only; read behind the Orders façade, no propagated user context required |
@@ -298,6 +299,17 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     seat return fails definitively after the money is already reversed, the order stays `refunding`
     with an open reconciliation incident — there is no `refund_failed` terminal state.
 - Orders persists order state in `orders_db`.
+- `GET /api/orders/reconciliation?limit=100`
+  - Requires an operations credential; a customer or a service credential is refused with `403`. Its
+    own rule precedes the order-read rule, which would otherwise admit any customer.
+  - Lists the **open** incidents, most urgent first — a live seat hold, nearest deadline first; then no
+    hold deadline, oldest first; then past the hold — at most `limit` (default 100, clamped to 1–500): `id`,
+    `orderId`, `kind`, `orderState` (the phase the incident was recorded in), `orderStatus` (where the
+    order is now, what a redrive resumes from), `failureClass`, `attemptCount`, `createdAt`,
+    `updatedAt` and the order's `reservationExpiresAt`. The last is the operator's deadline: past it, a `payment_pending`
+    order can no longer be redriven (`409 RESERVATION_HOLD_EXPIRED` below).
+  - Read only: no idempotency key, no audit line. The free-text `failureDetail` is not returned.
+  - How the list is used: [orders-recovery-runbook.md](../operations/orders-recovery-runbook.md).
 - `POST /api/orders/{orderId}/reconciliation/redrive`
   - Requires an operations credential and an idempotency key. A service credential is refused with
     `403`: it drives automated internal calls and must not be able to redrive a customer's checkout.

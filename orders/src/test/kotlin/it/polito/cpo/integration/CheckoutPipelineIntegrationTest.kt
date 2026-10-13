@@ -424,6 +424,31 @@ class CheckoutPipelineIntegrationTest {
     }
 
     @Test
+    fun `the operator list puts a live seat hold ahead of an expired one, with its deadline and status`() = runBlocking {
+        // Opened first, so an oldest-first list would show it first: an expired PAYMENT_PENDING, the
+        // kind of incident nothing closes.
+        val expired = orchestrator.checkout(request(), "it-list-old-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        seedState(expired.orderId, OrderStatus.PAYMENT_PENDING, "res-${expired.orderId}")
+        seedHoldExpiry(expired.orderId, OffsetDateTime.now().minusMinutes(30))
+        openIncident(expired.orderId, ReconciliationKind.DELIVERY_EXHAUSTED)
+
+        val live = orchestrator.checkout(request(), "it-list-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        seedState(live.orderId, OrderStatus.PAYMENT_PENDING, "res-${live.orderId}")
+        val expiresAt = OffsetDateTime.now().plusMinutes(7).withNano(0)
+        seedHoldExpiry(live.orderId, expiresAt)
+        openIncident(live.orderId, ReconciliationKind.DELIVERY_EXHAUSTED)
+
+        val ids = operations.listOpen(limit = 500).map { it.orderId }
+        assertTrue(ids.indexOf(live.orderId) in 0 until ids.indexOf(expired.orderId), ids.toString())
+
+        val listed = operations.listOpen(limit = 500).single { it.orderId == live.orderId }
+        assertEquals(ReconciliationKind.DELIVERY_EXHAUSTED.name, listed.kind)
+        assertEquals(OrderStatus.PAYMENT_PENDING.name, listed.orderState)
+        assertEquals(OrderStatus.PAYMENT_PENDING.name, listed.orderStatus)
+        assertEquals(expiresAt.toInstant(), listed.reservationExpiresAt?.toInstant())
+    }
+
+    @Test
     fun `a crash between the Inventory sale and the Orders commit converges without duplicate events`() = runBlocking {
         val response = orchestrator.checkout(request(), "it-crash-${UUID.randomUUID()}", "user-1", "user-1@example.com")
         val reservationId = "res-${response.orderId}"

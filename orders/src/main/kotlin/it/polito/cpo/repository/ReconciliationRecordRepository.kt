@@ -1,5 +1,6 @@
 package it.polito.cpo.repository
 
+import it.polito.cpo.model.OpenReconciliationIncident
 import it.polito.cpo.model.ReconciliationRecord
 import kotlinx.coroutines.flow.Flow
 import org.springframework.data.r2dbc.repository.Modifying
@@ -111,6 +112,34 @@ interface ReconciliationRecordRepository : CoroutineCrudRepository<Reconciliatio
     suspend fun touchRedrive(orderId: UUID, correlationId: String): Long
 
     fun findAllByOrderIdAndStatus(orderId: UUID, status: String): Flow<ReconciliationRecord>
+
+    /**
+     * The open incidents for the operator list, most urgent first: those whose order still has a live
+     * seat hold, the nearest deadline first; then those with no hold deadline, oldest first; then those
+     * past their hold, which include the ones nothing will close (an expired `PAYMENT_PENDING`, an
+     * invariant violation). Sorting only by age would let those pile up at the top and push a fresh,
+     * still redrivable incident off the page.
+     *
+     * A left join: an incident is only opened for a known order, but a list that silently dropped one
+     * would hide exactly the incident nobody can explain.
+     */
+    @Query(
+        """
+        SELECT r.id, r.order_id, r.kind, r.order_state, o.status AS order_status, r.failure_class,
+               r.attempt_count, r.created_at, r.updated_at, o.reservation_expires_at
+          FROM reconciliation_records r
+          LEFT JOIN orders o ON o.id = r.order_id
+         WHERE r.status = 'OPEN'
+         ORDER BY CASE
+                      WHEN o.reservation_expires_at > CURRENT_TIMESTAMP THEN 0
+                      WHEN o.reservation_expires_at IS NULL THEN 1
+                      ELSE 2
+                  END,
+                  o.reservation_expires_at, r.created_at, r.id
+         LIMIT :limit
+        """,
+    )
+    fun findOpenIncidents(limit: Int): Flow<OpenReconciliationIncident>
 
     @Query("SELECT COUNT(*) FROM reconciliation_records WHERE status = 'OPEN' AND kind = :kind")
     suspend fun countOpenByKind(kind: String): Long

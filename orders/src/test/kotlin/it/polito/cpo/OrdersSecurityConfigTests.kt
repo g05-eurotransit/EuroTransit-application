@@ -241,6 +241,37 @@ class OrdersSecurityConfigTests @Autowired constructor(
     }
 
     @Test
+    fun `the open-incident list accepts only the operations role`() {
+        webTestClient.get()
+            .uri("/api/orders/reconciliation")
+            .headers { it.setBearerAuth("operations-token") }
+            .exchange()
+            .expectStatus().isOk
+        // The order-read rule admits customers to GET under the same prefix; this rule must win, or
+        // any customer could read every customer's stuck orders.
+        webTestClient.get()
+            .uri("/api/orders/reconciliation")
+            .headers { it.setBearerAuth("customer-token") }
+            .exchange()
+            .expectStatus().isForbidden
+        webTestClient.get()
+            .uri("/api/orders/reconciliation")
+            .headers { it.setBearerAuth("service-token") }
+            .exchange()
+            .expectStatus().isForbidden
+        webTestClient.get()
+            .uri("/api/orders/reconciliation")
+            .exchange()
+            .expectStatus().isUnauthorized
+        // A trailing slash stays on the operator rule, not on the customer read rule.
+        webTestClient.get()
+            .uri("/api/orders/reconciliation/")
+            .headers { it.setBearerAuth("customer-token") }
+            .exchange()
+            .expectStatus().isForbidden
+    }
+
+    @Test
     fun `reconciliation endpoints reject anonymous requests`() {
         webTestClient.post()
             .uri("/api/orders/order-123/reconciliation/redrive")
@@ -307,6 +338,9 @@ class OrdersSecurityConfigTests @Autowired constructor(
 
         @GetMapping("/api/orders")
         fun listOrders(): Map<String, String> = mapOf("orders" to "[]")
+
+        @GetMapping("/api/orders/reconciliation")
+        fun openIncidents(): Map<String, String> = mapOf("incidents" to "[]")
 
         @GetMapping("/api/orders/seat-availability")
         fun seatAvailability(): Map<String, String> = mapOf("seats" to "[]")

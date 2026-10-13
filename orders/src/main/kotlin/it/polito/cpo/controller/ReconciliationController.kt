@@ -3,15 +3,18 @@ package it.polito.cpo.controller
 import it.polito.cpo.controller.dtos.RedriveResponse
 import it.polito.cpo.controller.dtos.ResolveReconciliationRequest
 import it.polito.cpo.controller.dtos.ResolveReconciliationResponse
+import it.polito.cpo.model.OpenReconciliationIncident
 import it.polito.cpo.service.ReconciliationOperationsService
 import org.springframework.http.HttpStatus
 import org.springframework.security.core.annotation.AuthenticationPrincipal
 import org.springframework.security.oauth2.jwt.Jwt
+import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestHeader
 import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.ResponseStatus
 import org.springframework.web.bind.annotation.RestController
 import org.springframework.web.server.ResponseStatusException
@@ -28,12 +31,21 @@ import java.util.UUID
  * it into the Reactor context, and the service reads it from there.
  */
 @RestController
-@RequestMapping("/api/orders/{orderId}/reconciliation")
+@RequestMapping("/api/orders")
 class ReconciliationController(
     private val operations: ReconciliationOperationsService,
 ) {
 
-    @PostMapping("/redrive")
+    /**
+     * The open incidents, most urgent first. A literal segment, so it wins over `GET /api/orders/{orderId}`;
+     * the security chain gives it its own operations-only rule ahead of the order-read one.
+     */
+    @GetMapping("/reconciliation")
+    suspend fun listOpen(
+        @RequestParam(defaultValue = "100") limit: Int,
+    ): List<OpenReconciliationIncident> = operations.listOpen(limit)
+
+    @PostMapping("/{orderId}/reconciliation/redrive")
     @ResponseStatus(HttpStatus.ACCEPTED)
     suspend fun redrive(
         @PathVariable orderId: UUID,
@@ -41,7 +53,7 @@ class ReconciliationController(
         @AuthenticationPrincipal jwt: Jwt,
     ): RedriveResponse = operations.redrive(orderId, idempotencyKey, operatorId(jwt))
 
-    @PostMapping("/{recordId}/resolve")
+    @PostMapping("/{orderId}/reconciliation/{recordId}/resolve")
     suspend fun resolve(
         @PathVariable orderId: UUID,
         @PathVariable recordId: UUID,
