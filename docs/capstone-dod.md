@@ -84,9 +84,33 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
 
 ## 7. Agentic Coding and Governance
 
-- [ ] `governance/agent-governance.md` documents credentials, permissions, blast radius, review gates, and worst-case failure.
-- [ ] `agent-log.md` contains at least three concrete agent mistakes and how the team detected and corrected them.
+- [x] `governance/agent-governance.md` documents credentials, permissions, blast radius, review gates, and worst-case failure.
+      *Observability, 2026-10-13:* all five are now sections of their own. **Credentials** states what an
+      agent may hold and why — the operator's own Git and GitHub identity so every commit and comment is
+      attributable to a person, no cluster credentials, no secret material, and confirmation before every
+      write — including the uncomfortable detail that the GitHub token carries write scope because the
+      classic scopes have no read-only tier for private repositories, which makes the limit procedural
+      rather than technical. **Worst-case failure** names the shortest path from a generated artifact to
+      production (CI writes an image tag here, ArgoCD applies it with `prune` and `selfHeal`) and states
+      the control. Allowed work, decisions agents must not own, permissions and the review checks were
+      already there; three checks were added from cases 15-17.
+- [x] `agent-log.md` contains at least three concrete agent mistakes and how the team detected and corrected them.
+      *All slices, 2026-10-13:* seventeen cases, each with the agent output, why it was wrong, how it was
+      caught and the correction. They are not all of one kind, which is the point: wrong framework APIs
+      (5, 13), test harnesses that passed for the wrong reason (7, 14), design faults that would have
+      reached production (1, 2, 3, 11, 12), an over-permissive ServiceAccount (4), and — added for this
+      slice — an agent asserting a shared branch was broken from its own stale environment (15), one
+      bypassing the project's task runner and then diagnosing the application for it (16), and one
+      describing a checkout as "read-only" in the summary a human was asked to approve (17).
 - [ ] Agent-generated delivery artifacts require human review or policy-as-code before merge to the configuration repository.
+      *Observability, 2026-10-13:* **deliberately left unticked.** The rule is written — in
+      `governance/agent-governance.md` and, for payments and inventory consistency, in
+      `planning/team-agentic-implementation-plan.md` — and it is not practised. Of the last ten merged
+      pull requests in this repository, nine had zero reviews and zero approvals; #126, which added a
+      column and a migration to the Orders outbox, merged with none. Ticking this on the strength of the
+      documentation would be the one claim in this file that the repository itself contradicts. A branch
+      protection rule requiring one approving review on `dev` and `main` would make it true; until then
+      the honest statement is that the gate is documented, not enforced.
 
 ## 8. Final Deliverables
 
