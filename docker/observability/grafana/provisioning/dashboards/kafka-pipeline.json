@@ -11,11 +11,12 @@
   "panels": [
     {
       "title": "Consumer Lag by Group",
+      "description": "Uses kafka_consumergroup_lag (cluster exporter). Falls back to Spring Kafka client fetch-position lag (kafka_consumer_fetch_manager_records_lag) in local compose. Note: client fetch lag cannot detect a completely stopped/dead consumer group.",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "targets": [
         {
-          "expr": "sum by (consumergroup) (kafka_consumergroup_lag{consumergroup=~\"orders|notifications|orders-dlt\"})",
+          "expr": "sum by (consumergroup) (kafka_consumergroup_lag{consumergroup=~\"orders|notifications|orders-dlt\"}) or sum by (consumergroup) (label_replace(kafka_consumer_fetch_manager_records_lag{application=~\"orders|notifications\"}, \"consumergroup\", \"$1\", \"application\", \"(.*)\"))",
           "legendFormat": "{{consumergroup}}"
         }
       ]
