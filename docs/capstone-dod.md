@@ -55,7 +55,20 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
 - [ ] The team explains why rolling and all-at-once are not used for the critical path.
 - [ ] Checkout latency and success-rate SLOs are defined in `operations/slo-observability.md`.
 - [ ] RED dashboards, infrastructure USE/Golden Signals dashboards, and symptom-based alerts are live.
-- [ ] A single order can be traced through gateway, Orders, Inventory, Payments, and Kafka stages.
+- [x] A single order can be traced through gateway, Orders, Inventory, Payments, and Kafka stages.
+      *Observability, 2026-10-13:* on compose, one checkout to `CONFIRMED` is **one trace of 36 spans**
+      across Traefik and all five services, Kafka stages included as `<event> publish` / `<event> process`;
+      a refund is one trace too. The span tree, and the two shapes worth knowing before reading one in
+      Tempo, are in [slo-observability.md](operations/slo-observability.md) §Tracing. It took three
+      changes: the gateway span from Traefik's OTLP tracing (#118), the pipeline's calls made children
+      of the consumer span (#125), and the trace context carried across the outbox through a
+      `traceparent` column and the Debezium header placement (#126). `CheckoutPipelineIntegrationTest`
+      pins that a checkout's outbox rows share one trace id.
+      **Limit — the evidence is local only.** The cluster has no trace backend and the chart ships
+      `tracing.enabled: false` against an endpoint that does not exist (configuration #38), so this
+      cannot be shown on AKS. Separately, the AKS Orders connector does not yet place the `traceparent`
+      header the local one does, so even with a backend the Kafka hop would still start a new trace.
+      Both are open and named in `slo-observability.md`.
 
 ## 5. Security and Configuration
 
