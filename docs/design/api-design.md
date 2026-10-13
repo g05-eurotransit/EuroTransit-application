@@ -32,6 +32,8 @@ EuroTransit is designed as an enterprise-grade system. Public APIs must assume a
 | `POST /api/orders/{orderId}/refund` | External | Required | Order owner or privileged operations scope, same ownership rule as `cancel` (404, never 403, for anyone else) |
 | `GET /api/orders/reconciliation` | Internal operations | Required operations credential | Operations role only; lists the open reconciliation incidents an operator chooses a redrive from |
 | `POST /api/orders/{orderId}/reconciliation/redrive` | Internal operations | Required operations credential | Operations role only; redrives an open reconciliation record through the Orders outbox |
+| `POST /api/orders/{orderId}/reconciliation/abandon` | Internal operations | Required operations credential | Operations role only; moves a `PAYMENT_PENDING` order past its seat hold into compensation (#140) |
+| `POST /api/orders/{orderId}/reconciliation/{recordId}/settle` | Internal operations | Required operations credential | Operations role only; settles an abandoned order's unknown payment outcome with provider evidence (#140) |
 | `POST /api/orders/{orderId}/reconciliation/{recordId}/resolve` | Internal operations | Required operations credential | Operations role only; records evidence-backed resolution of a terminal invariant incident |
 | `GET /api/inventory/availability` | Internal | Required service credential | Orders service only; read behind the Orders façade, no propagated user context required |
 | `POST /api/inventory/reservations` | Internal | Required service credential plus propagated user context | Orders service only; order owner context required |
@@ -333,13 +335,36 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     treated as terminal here: the money or the seat may still be unresolved, and closing its incident
     on redrive would be exactly the failure this endpoint exists to fix.
   - A `payment_pending` order whose seat hold has already expired returns
-    `409 RESERVATION_HOLD_EXPIRED` and leaves the incident open. That phase resumes by authorizing and
+    `409 RESERVATION_HOLD_EXPIRED` and leaves the incident open; its exit is `abandon` below. That phase resumes by authorizing and
     the hold is gone, so the redrive would buy nothing but a charge and its reversal. Only that phase
     is refused: the others either re-take the hold or drive the order to a resolution it needs. The
     same comparison is deliberately not made at authorization time, where the deadline is an Inventory
     instant seconds away and Inventory is the only authority on whether it has passed (invariant 4).
   - Never modifies Inventory, Payments, or terminal Orders state directly. The stored order status is
     what selects the resume action, so the endpoint holds no knowledge of which stage resumes.
+- `POST /api/orders/{orderId}/reconciliation/abandon`
+  - Requires an operations credential and an idempotency key; a service credential is refused with `403`.
+  - Accepts only a `payment_pending` order whose seat hold has expired and that has an open incident.
+    Moves it to `compensating` and writes a new `order-placed` outbox row. The pipeline then reverses
+    an `AUTHORIZED` payment under `refund-{orderId}`, releases the hold and fails the order
+    (`CHECKOUT_FAILED`). If Payments holds no authorization, or one that is not `AUTHORIZED`, the order
+    stays `compensating` under a `PAYMENT_OUTCOME_UNKNOWN` incident: Payments writes its row only
+    after the provider answers, so a missing row does not prove no charge. A reversal the provider
+    refuses leaves `PAYMENT_REVERSAL_FAILURE`, redrivable as usual. Nothing on this path authorizes.
+    `202 Accepted`, the same key replays the same response.
+  - Refusals: `409 RESERVATION_HOLD_NOT_EXPIRED` (the hold still runs, by either clock: redrive
+    instead), `409 ORDER_NOT_ABANDONABLE` (any other status), `409 NO_OPEN_RECONCILIATION_RECORD`.
+- `POST /api/orders/{orderId}/reconciliation/{recordId}/settle`
+  - Requires an operations credential, an idempotency key and an `evidenceReference` from the payment
+    provider: the operator attests that the provider holds no money for the order (never charged, or
+    refunded there). Accepts only an open `PAYMENT_OUTCOME_UNKNOWN` of that order, with the order
+    `compensating`.
+  - Closes the incident with the evidence and writes a new `order-placed` outbox row; the pipeline then
+    fails the order. It never moves the order itself and never calls Payments or Inventory.
+    `202 Accepted`, the same key replays the same response.
+  - Refusals: `400 EVIDENCE_REFERENCE_REQUIRED`, `404 RECONCILIATION_RECORD_NOT_FOUND` (also another
+    order's record), `409 RECONCILIATION_KIND_NOT_SETTLEABLE`, `409 RECONCILIATION_ALREADY_RESOLVED`,
+    `409 ORDER_NOT_SETTLEABLE`.
 - `POST /api/orders/{orderId}/reconciliation/{recordId}/resolve`
   - Requires an operations credential, an idempotency key, a terminal order, and an evidence reference.
   - Resolves only an investigated invariant-violation record; it cannot waive payment reversal or change order state.

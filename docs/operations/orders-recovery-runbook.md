@@ -50,7 +50,8 @@ Proposed by the Orders owner; the team confirms them in [slo-observability.md](s
 - **Operator response.** A `DELIVERY_EXHAUSTED` incident on a `PAYMENT_PENDING` order is redriven
   **before the order's `reservationExpiresAt`**. That is the hard limit: Inventory's hold lasts ten
   minutes from the reservation, and past it the redrive refuses (`RESERVATION_HOLD_EXPIRED`), because
-  authorizing a payment Inventory can no longer confirm buys only a charge and its reversal. Other
+  authorizing a payment Inventory can no longer confirm buys only a charge and its reversal. The sale
+  is then lost and the order can only be abandoned (step 5b). Other
   phases stay redrivable after the hold expires (they re-take the hold, or let Inventory refuse and the
   pipeline compensate), but should be handled within the same window.
 
@@ -88,9 +89,10 @@ Redriving into the same outage only exhausts the budget again.
 | `kind` | `orderStatus` | Action |
 | --- | --- | --- |
 | `DELIVERY_EXHAUSTED` | `ACCEPTED`, `RESERVING`, `CONFIRMING_INVENTORY`, `COMPENSATING` | Redrive. |
-| `DELIVERY_EXHAUSTED` | `PAYMENT_PENDING` | Redrive **before `reservationExpiresAt`**. After it the redrive is refused: see "Known gaps". |
+| `DELIVERY_EXHAUSTED` | `PAYMENT_PENDING` | Redrive **before `reservationExpiresAt`**. After it the redrive is refused: abandon instead (step 5b). |
 | `DELIVERY_EXHAUSTED`, `PAYMENT_REVERSAL_FAILURE`, `SEAT_RETURN_FAILURE` | `REFUNDING` | Redrive: it resumes the refund pipeline. |
 | `PAYMENT_REVERSAL_FAILURE` | `COMPENSATING` | Redrive: it retries the reversal. |
+| `PAYMENT_OUTCOME_UNKNOWN` | `COMPENSATING` | Check the provider, then settle (step 5c). |
 | `INVARIANT_VIOLATION` | `FAILED` | Do not redrive. Investigate, then resolve with an evidence reference (`POST /api/orders/{orderId}/reconciliation/{recordId}/resolve`, [api-design.md](../design/api-design.md)). |
 
 **5. Redrive** (operations role; a new idempotency key per attempt, the same key to repeat one):
@@ -107,11 +109,59 @@ Refusals:
 | Response | Meaning |
 | --- | --- |
 | `409 ORDER_ALREADY_TERMINAL` | The order converged meanwhile; the stale incident is closed. Nothing to do. |
-| `409 RESERVATION_HOLD_EXPIRED` | `PAYMENT_PENDING` past its hold. See "Known gaps". |
+| `409 RESERVATION_HOLD_EXPIRED` | `PAYMENT_PENDING` past its hold: abandon it (step 5b). |
 | `409 NO_OPEN_RECONCILIATION_RECORD` | Nothing to redrive for this order. |
 
+**5b. Abandon an expired `PAYMENT_PENDING` order** (operations role), the one the redrive refuses
+with `RESERVATION_HOLD_EXPIRED`. The sale is lost: the seat is already back on sale. The command
+settles the money and closes the order:
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $OPS_TOKEN" \
+  -H "Idempotency-Key: abandon-<orderId>-1" \
+  https://<gateway>/api/orders/<orderId>/reconciliation/abandon
+```
+
+`202` with `orderStatus: COMPENSATING`. Then, depending on what Payments holds:
+
+- **An `AUTHORIZED` payment**: it is reversed, the hold released and the order failed; the customer is
+  told `CHECKOUT_FAILED` and the incidents close. Nothing else to do.
+- **No authorization, or one that is not `AUTHORIZED`**: the order stays `COMPENSATING` under a new
+  `PAYMENT_OUTCOME_UNKNOWN` incident. That does **not** mean no money was taken: Payments calls the
+  provider before it writes its row, so a charge whose answer was lost leaves no row. Go to step 5c.
+- **A reversal the provider refuses**: `PAYMENT_REVERSAL_FAILURE`, redrive it as in step 5.
+
+Refusals: `409 RESERVATION_HOLD_NOT_EXPIRED` (the hold still runs, by the application's or the
+database's clock: redrive instead), `409 ORDER_NOT_ABANDONABLE` (not `PAYMENT_PENDING`),
+`409 NO_OPEN_RECONCILIATION_RECORD`.
+
+Before settling, a redrive re-asks Payments: if Payments has recorded the authorization meanwhile, the
+compensation reverses it and the incident closes by itself, with no settlement needed.
+
+**5c. Settle an unknown payment outcome** (operations role). Look the order up at the provider (on the
+Stripe sandbox, by the time window and amount; the configuration's
+`scripts/reliability/provider-audit.py` enumerates a window). Then:
+
+- **No charge, or a charge already refunded**: settle with the provider reference as evidence.
+- **A charge still held**: refund it at the provider first (Payments has no row, so Orders cannot
+  reverse it), then settle with the refund's reference.
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $OPS_TOKEN" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: settle-<orderId>-1" \
+  -d '{"evidenceReference":"<provider reference>"}' \
+  https://<gateway>/api/orders/<orderId>/reconciliation/<recordId>/settle
+```
+
+`202`: the incident closes with the evidence and the pipeline fails the order (`CHECKOUT_FAILED`). The
+pipeline still asks Payments for the reversal first, so an authorization recorded meanwhile is reversed
+rather than settled away. Refusals: `400 EVIDENCE_REFERENCE_REQUIRED`,
+`404 RECONCILIATION_RECORD_NOT_FOUND`, `409 RECONCILIATION_KIND_NOT_SETTLEABLE` (only
+`PAYMENT_OUTCOME_UNKNOWN`), `409 RECONCILIATION_ALREADY_RESOLVED`, `409 ORDER_NOT_SETTLEABLE`.
+
 **6. Verify.** `GET /api/orders/{orderId}` shows a terminal status, and the order is gone from the
-list: `DELIVERY_EXHAUSTED`, `PAYMENT_REVERSAL_FAILURE` and `SEAT_RETURN_FAILURE` close by themselves
+list: `DELIVERY_EXHAUSTED`, `PAYMENT_REVERSAL_FAILURE`, `SEAT_RETURN_FAILURE` and `PAYMENT_OUTCOME_UNKNOWN`
+close by themselves
 when the order reaches a terminal state. If the same incident comes back, its `attemptCount` grows:
 the cause is not gone.
 
@@ -123,9 +173,18 @@ is authorized and then reversed.
 
 ## Known gaps
 
-- **A `PAYMENT_PENDING` order whose hold has expired has no exit.** The redrive refuses it and
-  `resolve` accepts only `INVARIANT_VIOLATION`, so the order and its incident stay open. Example on
-  compose: an order of 2026-09-16 still open on 2026-10-13. Needs a design decision.
+- **Payments does not record an authorization until the provider has answered.** A charge whose
+  answer was lost leaves no row, which is why an abandoned order with no authorization needs the
+  provider check of step 5c instead of failing by itself. A Payments that recorded the attempt first
+  would make "no authorization" trustworthy.
+- **An authorization Payments records after the order has failed is not noticed.** If a provider call
+  still in flight at Payments completes after the settlement's reversal found nothing, Payments writes
+  an `AUTHORIZED` row for an order that is already `FAILED`, and nothing in Orders reads it. The window
+  is Payments' provider timeout and retries (seconds) against a ten-minute hold, so it is small; the
+  provider audit is what would find it.
+- **An abandonment counts as a failed checkout** (`orders_checkout_failed_total{reason="checkout_abandoned"}`).
+  If it is processed by an Orders canary pod during its analysis, the canary's zero-failure gate aborts
+  the rollout: avoid abandoning during a canary, or exclude that reason from the gate.
 - **Payments reports definitive provider refusals as `PROVIDER_UNAVAILABLE`** (above), so Orders
   retries them as outages.
 - **`ReconciliationRecordOpen` waits five minutes** before firing, which takes half of the operator's
