@@ -11,7 +11,7 @@ cluster half of #124 and are not covered here.
 | Work | Runs on | Bounded by |
 | --- | --- | --- |
 | HTTP: checkout accept, cancel, refund request, reconciliation operations | Reactor Netty, suspending controllers | Catalog 1s timeout on the accept; one DB transaction |
-| `order-placed` → checkout pipeline | the `orders` consumer thread, `runBlocking` (`OrderPlacedEventListener.kt:55`) | client timeouts (Inventory 2s, Payments 3s), 3 attempts each (`ResilienceConfiguration.kt:119`) |
+| `order-placed` → checkout pipeline | the `orders` consumer thread, `runBlocking` (`OrderPlacedEventListener.kt:55`) | client timeouts (Inventory 2s, Payments 3s), 3 attempts each (`ResilienceConfiguration.kt:119`); redeliveries for up to about a minute when a dependency is down |
 | `refund-requested` → refund pipeline | its own consumer thread, `runBlocking` (`RefundRequestedEventListener.kt:51`) | same |
 | `order-placed-dlt`, `refund-requested-dlt` → incidents | their own consumer threads, group `orders-dlt` | unbounded back-off until recorded (`KafkaConfiguration.kt:75`) |
 | `@Scheduled` jobs (gauges, reconciliation metrics, idempotency cleanup) | the scheduler thread, `runBlocking` | read-only or idempotent deletes |
@@ -65,8 +65,9 @@ container is gone, and then falls through to the frontend's catch-all (`405` on 
   (`pay-{orderId}`) and Payments replays its stored answer. `RefundOrchestrator.processRefundRequested`
   (`:216`) resumes only `REFUNDING`. Inventory refuses a second reservation for an order
   (`uk_reservations_order_id`).
-- **A failure retries, then dead-letters**: `DefaultErrorHandler(FixedBackOff(1000, 3))`
-  (`KafkaConfiguration.kt:173`), unparseable payloads straight to the DLT. **A stop interrupts the
+- **A failure retries, then dead-letters**: three times a second apart, or six times with jittered
+  waits of about a minute in all when a dependency is not available (`checkoutErrorHandler` in `KafkaConfiguration.kt`; the policy is in
+  [orders-recovery-runbook.md](orders-recovery-runbook.md)), unparseable payloads straight to the DLT. **A stop interrupts the
   back-off without recovering**: the sleep checks `isRunning` (`ListenerUtils.stoppableSleep`), the
   record is not dead-lettered and not committed ("Record in retry and not yet recovered"), and it is
   redelivered. Shutdown therefore never turns a transient failure into a dead letter. The in-memory

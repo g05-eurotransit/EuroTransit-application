@@ -9,6 +9,10 @@ Each experiment must be run as a hypothesis-driven test. Reports should keep the
 - **Injection:** Add latency to Payments traffic using Chaos Mesh or equivalent.
 - **Observe:** Orders circuit-breaker state, checkout latency/error rate, Catalog RED metrics, traces showing Payments delay.
 - **Success condition:** No unbounded hangs, no retry storm, Catalog remains inside SLO.
+- **Recovery:** once the slowdown ends, accepted orders reach a terminal state by themselves if it lasted
+  up to about a minute (the retry budget); a longer one leaves `DELIVERY_EXHAUSTED` incidents for the
+  operator. Both against the [recovery objectives](slo-observability.md#recovery-objectives); steps in
+  the [runbook](orders-recovery-runbook.md).
 
 ## Experiment 2: Inventory Pod Kill Mid-Hold
 
@@ -35,7 +39,7 @@ Each experiment must be run as a hypothesis-driven test. Reports should keep the
 - **Observe:** Producer errors, consumer lag, duplicate event handling, order terminal state convergence. Plus the machinery this actually exercises, none of which existed when this plan was first written:
   - **The outbox and its relay.** Orders does not publish to Kafka directly. `order-placed` and `refund-requested` are rows written to `outbox_events` in the same transaction as the state change, and Debezium relays them. So a Kafka outage must produce a *growing outbox table and rising relay lag*, not lost events — and the rows must drain after healing. Checking only producer errors would miss the whole mechanism, because there is no producer on this path.
   - **The dead-letter consumers.** Exhausted retries publish to `order-placed-dlt` and `refund-requested-dlt`, whose consumers open a reconciliation record without touching the durable phase. Count the records and read their `kind` and `failure_class`. If the database is part of the fault, watch `orders_events_dlt_total{result="record_failed"}`: the consumers keep retrying until the record is written, so once the fault ends the incident appears late rather than not at all. If `record_failed` keeps climbing after healing, the failure is permanent and the DLT stream is stalled — that is a finding to report, not a recovery.
-  - **Redrive.** After healing, an order left with an open incident must be redrivable to a terminal state through `POST /api/orders/{orderId}/reconciliation/redrive`. This is the operator path the outage is supposed to leave usable, and it is the half of recovery that automatic convergence does not cover.
+  - **Redrive.** After healing, an order left with an open incident must be redrivable to a terminal state through `POST /api/orders/{orderId}/reconciliation/redrive`, found through `GET /api/orders/reconciliation` ([runbook](orders-recovery-runbook.md)). This is the operator path the outage is supposed to leave usable, and it is the half of recovery that automatic convergence does not cover.
 - **Success condition:** After healing, accepted orders either reach a valid terminal state or are explicitly marked failed without duplicate reservation/payment effects. No outbox row is lost, and every incident opened during the outage is either closed by convergence or closed by a redrive.
 - **A definitively declined reversal is redrivable now.** Until #122 (closing #111) Payments cached a declined refund under the deterministic key, so its redrive replayed the failure and the order had no exit. Now a redrive reaches the provider again, under a key that moves after each recorded decline — for declines recorded after #122; one cached before it still replays. If the experiment produces one, redrive it after healing and record whether it converges to `REFUNDED`; it stays stuck only if the provider declines again, and the report should say which.
 
@@ -45,7 +49,7 @@ Each experiment must be run as a hypothesis-driven test. Reports should keep the
 - **Hypothesis:** During PostgreSQL primary failover, checkout write operations may fail temporarily, but the system recovers within the stated RTO and never oversells.
 - **Injection:** Trigger CloudNativePG primary failover.
 - **Observe:** Checkout errors, database failover time, RTO, hold invariant metrics, traces for failed writes.
-- **Success condition:** No oversell occurs, and checkout recovers within the documented RTO.
+- **Success condition:** No oversell occurs, and checkout recovers within the documented RTO: the [recovery objectives](slo-observability.md#recovery-objectives) — accepted orders converge by themselves when the failover is shorter than the retry budget (about a minute), and any incident left is redriven before its order's seat hold expires.
 
 ## Experiment 6: Seat Return Failure During a Post-Sale Refund
 
