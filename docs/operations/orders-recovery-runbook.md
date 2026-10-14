@@ -176,12 +176,12 @@ is authorized and then reversed.
 - **Payments does not record an authorization until the provider has answered.** A charge whose
   answer was lost leaves no row, which is why an abandoned order with no authorization needs the
   provider check of step 5c instead of failing by itself. A Payments that recorded the attempt first
-  would make "no authorization" trustworthy.
+  would make "no authorization" trustworthy (#142).
 - **An authorization Payments records after the order has failed is not noticed.** If a provider call
   still in flight at Payments completes after the settlement's reversal found nothing, Payments writes
   an `AUTHORIZED` row for an order that is already `FAILED`, and nothing in Orders reads it. The window
   is Payments' provider timeout and retries (seconds) against a ten-minute hold, so it is small; the
-  provider audit is what would find it.
+  provider audit is what would find it (#142).
 - **An abandonment counts as a failed checkout** (`orders_checkout_failed_total{reason="checkout_abandoned"}`).
   If it is processed by an Orders canary pod during its analysis, the canary's zero-failure gate aborts
   the rollout: avoid abandoning during a canary, or exclude that reason from the gate.
