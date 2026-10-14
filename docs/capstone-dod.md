@@ -123,7 +123,19 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
 ## 5. Security and Configuration
 
 - [ ] Traefik rejects unauthenticated requests to protected external APIs before they reach service pods.
-- [ ] Services validate the authenticated principal and enforce resource ownership or privileged scopes locally.
+- [x] Services validate the authenticated principal and enforce resource ownership or privileged scopes locally.
+      *Orders, Inventory, Payments, Catalog, Notifications, 2026-10-14:* each service is its own JWT resource
+      server against the Keycloak realm (signature, issuer, expiry), maps realm roles with the shared
+      converter (`security-support`, `EuroTransitSecurity`), and ends its rules with `denyAll()`. Ownership
+      where resources belong to a customer: **Orders** answers owner-or-`operations` on reads, cancel and
+      refund — `404`, not `403`, to anyone else (`OrderControllerOwnershipTest`) — with `customer` to check
+      out and `operations` alone on the operator API; **Notifications** scopes history and stream to the
+      caller's `sub` ("history returns only the caller's own notifications", "stream only delivers the
+      subscribing principal's events"). A privileged scope where the caller is a service: **Inventory** and
+      **Payments** accept only `service` tokens ("…require service role", "…reject customer tokens"), and
+      bind each idempotency key to the calling principal. **Catalog** owns nothing private: `GET` is public,
+      everything else denied ("catalog writes are denied by default"). **Limit:** no service checks the
+      token's audience; within the one realm, roles are the boundary.
 - [x] Order reads are authorized by owner identity or by an explicit operational/admin role.
       *Orders, 2026-09-18:* `OrderController` resolves the principal from the JWT `sub` and answers `404`, not `403`, to a non-owner, so the API never reveals that another customer's order exists. The explicit exception is the `operations` role, and it is deliberately **not** widened on the history endpoint — there the principal filter is applied in SQL (`OrderRepository.findHistoryFirstPage`) so a later controller edit cannot bypass it. Covered by `OrderControllerOwnershipTest`.
 - [ ] Inventory and Payments are internal service-to-service APIs, not public endpoints, and require service credentials plus propagated user context.
