@@ -24,7 +24,22 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
 - [ ] After payment authorization, Inventory atomically transitions the still-valid reservation `HELD -> CONFIRMED` and its seats `HELD -> SOLD` before Orders becomes `CONFIRMED`.
 - [ ] Holds expire after 10 minutes or are released when payment fails/cancels.
 - [ ] Concurrent confirmation, expiration, and release prove that exactly one transition wins and that confirmed/sold seats are never released by hold cleanup.
-- [ ] Orders, Inventory, and Payments persist idempotency keys and return stable outcomes for duplicate requests/events.
+- [x] Orders, Inventory, and Payments persist idempotency keys and return stable outcomes for duplicate requests/events.
+      *Orders, Inventory, Payments, 2026-10-14:* each service stores the key with the caller and a request
+      fingerprint: the same key and payload replays the stored response, the same key with a different
+      payload is a `409 IDEMPOTENCY_CONFLICT`. **Orders** — `idempotency_keys` (V1, V3) on checkout, refund
+      and the operator redrive/abandon/settle/resolve, purged after 24h (`IdempotencyCleanupJob`); a
+      redelivered `order-placed`/`refund-requested` is decided on the durable order state
+      (`CheckoutOrchestratorTest`, `CheckoutPipelineIntegrationTest` "a duplicate idempotency key replays the
+      same order…", `RefundOrchestratorTest`). **Inventory** — `idempotency_records` on the hold, kept 30 min;
+      past that `uk_reservations_order_id` answers `409 ORDER_ALREADY_RESERVED`, and confirm, refund and
+      release are idempotent on the reservation's state (`ReservationServiceIntegrationTest` "…same
+      idempotency key safely", "…409 when orderId already exists…", "refundReservation should be idempotent…").
+      **Payments** — `idempotency_records` on authorize (a decline replays too) and refund, with
+      `stripe_{key}` passed on to the provider (`PaymentServiceTest` "authorize - returns cached response…",
+      "…returns conflict on idempotency mismatch", "refund - a successful refund is still replayed…").
+      **Exception, by design (#122):** a declined refund is not stored, so a retry under the same key is a
+      real attempt — replaying a decline would block the refund for good.
 - [x] Duplicate `order-placed` events and retried payment authorizations cannot double-reserve or double-charge.
       *Orders, 2026-10-08:* Orders dispatches every redelivery on the durable order state and calls with one key per order (`inv-{orderId}`, `pay-{orderId}`): `CheckoutPipelineIntegrationTest` — "a redelivered order-placed is idempotent and does not reprocess a terminal order", "a crash between the Inventory sale and the Orders commit converges without duplicate events". Inventory cannot store a second reservation for an order even after its idempotency record expires (`uk_reservations_order_id`; "reserveSeats should return 409 when orderId already exists in DB…"), and Payments replays a stored authorization for a repeated key ("authorize - returns cached response on idempotency match"). On compose, a 40-record backlog redelivered across a stop and a stop while Payments was unreachable left exactly one authorization per order ([shutdown report](operations/reports/2026-10-orders-shutdown-local.md)). **Limit:** Payments keeps idempotency records for 24h and `payment_authorizations` has no per-order uniqueness, so an order left in `PAYMENT_PENDING` for more than a day and then redelivered would be authorized again; today that is prevented upstream — the hold expires after 10 minutes and a redrive of a `PAYMENT_PENDING` order whose hold expired is refused ("a redrive is refused when the hold behind a PAYMENT_PENDING order has already expired").
 - [ ] A delayed hold replay returns the reservation's current state and cannot return stale `HELD` or create a second reservation for the same order.
