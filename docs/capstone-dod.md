@@ -6,7 +6,14 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
 
 ## 1. Design and Async
 
-- [ ] Service boundaries and sync/async communication choices are documented in `design/api-design.md`.
+- [x] Service boundaries and sync/async communication choices are documented in `design/api-design.md`.
+      *Orders, 2026-10-14:* [Service Boundaries](design/api-design.md#service-boundaries) gives each service's
+      responsibility, interaction style and why the boundary exists; [Datastore Ownership](design/api-design.md#datastore-ownership)
+      separates the three databases; [Money Path](design/api-design.md#money-path) states which steps are
+      synchronous (the Inventory hold and confirmation, the Payments authorization: decisions the order
+      waits on) and which are asynchronous (the `order-placed` trigger, outbox facts, notifications);
+      [Kafka Events](design/api-design.md#kafka-events) lists producers and consumers, with the ADR-011 note
+      that the `inventory-*`/`payment-*` consumer column is the target contract, not wiring that exists today.
 - [ ] Architecture decisions are documented in `design/architecture-decisions.md`, including rejected alternatives and trade-offs.
 - [x] Orders implements an asynchronous pipeline with Kotlin coroutines/flows and Kafka-visible stages.
       *Orders, 2026-09-18:* `OrderPlacedEventListener` / `RefundRequestedEventListener` drive suspending stages in `CheckoutOrchestrator` and `RefundOrchestrator`. Every stage transition is a durable `OrderStatus`; the Kafka-visible ones — acceptance (`order-placed`), confirmation (`order-confirmed`, `notification-requested`), failure (`notification-requested`) and the refund trigger (`refund-requested`) — also write an `outbox_events` row in the same transaction, relayed by Debezium (ADR-011). The intermediate phases (`RESERVING`, `PAYMENT_PENDING`, `CONFIRMING_INVENTORY`, `COMPENSATING`) are durable in the database, not on Kafka; all but `RESERVING` are also in the pipeline gauges by age. `RESERVING` is left out by design (`reservation-confirmation.md`): no money has moved, and a hold that cannot complete is dead-lettered within seconds into a `DELIVERY_EXHAUSTED` incident, which is already gauged and alerted. *(Corrected 2026-10-07: the first version said every transition wrote an outbox row.)* Covered by `CheckoutPipelineIntegrationTest` and `RefundPipelineIntegrationTest`.
