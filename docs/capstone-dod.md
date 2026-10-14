@@ -105,12 +105,16 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
 - [ ] Agent-generated delivery artifacts require human review or policy-as-code before merge to the configuration repository.
       *Observability, 2026-10-13:* **deliberately left unticked.** The rule is written — in
       `governance/agent-governance.md` and, for payments and inventory consistency, in
-      `planning/team-agentic-implementation-plan.md` — and it is not practised. Of the last ten merged
-      pull requests in this repository, nine had zero reviews and zero approvals; #126, which added a
-      column and a migration to the Orders outbox, merged with none. Ticking this on the strength of the
-      documentation would be the one claim in this file that the repository itself contradicts. A branch
-      protection rule requiring one approving review on `dev` and `main` would make it true; until then
-      the honest statement is that the gate is documented, not enforced.
+      `planning/team-agentic-implementation-plan.md` — and it is not practised. In the configuration
+      repository, which this item is about, the last twelve merged pull requests (#36–#53) had zero
+      reviews, and CI runs no policy checks on manifests. The application repository is no different: of
+      the last ten merged pull requests, nine had none; #126, which added a column and a migration to the
+      Orders outbox, merged with none. Ticking this on the strength of the documentation would be the one
+      claim in this file that the repositories contradict. Branch protection cannot enforce it either: the
+      organisation is on GitHub's free plan and both repositories are private, so branch protection,
+      rulesets and required status checks are unavailable (the API answers 403). Until that changes, the
+      gate can only be procedural — a human review before every merge to the configuration repository —
+      and the honest statement is that it is documented, not enforced.
 
 ## 8. Final Deliverables
 

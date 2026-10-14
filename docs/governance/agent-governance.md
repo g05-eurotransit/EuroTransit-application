@@ -63,16 +63,20 @@ secrets, broad RBAC, unsafe probes and destructive manifests.
 
 **Measured on 2026-10-13, that control is not in force.** Of the last ten merged pull requests in
 the application repository, nine had zero reviews and zero approvals; only one had any review at
-all. `planning/team-agentic-implementation-plan.md` requires a second human reviewer for changes
+all. In the configuration repository, the one ArgoCD reads from, the last twelve merged pull requests
+(#36–#53) had none. `planning/team-agentic-implementation-plan.md` requires a second human reviewer for changes
 touching payments or inventory consistency, and #126 — which added a column and a migration to the
 Orders outbox — merged with none. The gap is not that the rule is wrong; it is that it is written
 and not practised, which is worse than not having it, because the DoD item it backs would otherwise
 be ticked on the strength of the text alone.
 
 **What would actually hold.** A branch protection rule requiring one approving review on `dev` and
-`main` in both repositories costs nothing and converts the written rule into an enforced one. Until
-that exists, the honest statement is the one in `capstone-dod.md`: the review gate is documented,
-not enforced.
+`main` would turn the written rule into an enforced one, but it is not available to us: the
+organisation is on GitHub's free plan and both repositories are private, so branch protection,
+rulesets and required status checks all return 403. The options are making the repositories public
+or moving to a paid plan; short of that, the gate is a team practice — a human review before every
+merge to the configuration repository — and the honest statement is the one in `capstone-dod.md`:
+documented, not enforced.
 
 ## Required Review Checks
 
