@@ -93,7 +93,17 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
 - [ ] Orders canary is demonstrated with metric-gated promote/abort.
 - [ ] Catalog blue/green is demonstrated with fast rollback.
 - [ ] The team explains why rolling and all-at-once are not used for the critical path.
-- [ ] Checkout latency and success-rate SLOs are defined in `operations/slo-observability.md`.
+- [x] Checkout latency and success-rate SLOs are defined in `operations/slo-observability.md`.
+      *Orders, 2026-10-14:* [Checkout SLOs](operations/slo-observability.md#checkout-slos) defines both, each
+      with a target, a 30-day window, an SLI and its measurement: success rate 99.0% of valid checkout
+      attempts reaching `CONFIRMED` (1.0% error budget), and latency — 95% of successful checkouts terminal
+      within 2 s of acceptance, plus 99% of `POST /api/orders` answered within 300 ms. Orders emits what
+      they are measured on: `orders_checkout_completed_total{result}` and `orders_checkout_failed_total{reason}`,
+      registered at zero at startup, and `orders_checkout_e2e_duration_seconds{outcome}`, a histogram with a
+      2 s SLO bucket from acceptance to the terminal state (`CheckoutMetrics`, #135); acceptance latency is
+      `http_server_requests_seconds`. **Limit:** "valid attempt" is not yet mapped to failure reasons — which
+      `reason` values (a declined card, a seat already taken) are business refusals outside the error budget
+      is left to the burn-rate alert expressions (DoD item on alerts, configuration #59).
 - [ ] RED dashboards, infrastructure USE/Golden Signals dashboards, and symptom-based alerts are live.
 - [x] A single order can be traced through gateway, Orders, Inventory, Payments, and Kafka stages.
       *Observability, 2026-10-13:* on compose, one checkout to `CONFIRMED` is **one trace of 36 spans**
