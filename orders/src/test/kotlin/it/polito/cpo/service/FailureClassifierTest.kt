@@ -89,11 +89,12 @@ class FailureClassifierTest {
     }
 
     @Test
-    fun `CHECKOUT_FAILURE_REASONS holds the payment labels, unknown, and every Inventory refusal`() {
+    fun `CHECKOUT_FAILURE_REASONS holds the payment labels, abandonment, unknown, and every Inventory refusal`() {
         val reasons = FailureClassifier.CHECKOUT_FAILURE_REASONS
         val expected = setOf(
             FailureClassifier.PAYMENT_DECLINED,
             FailureClassifier.PAYMENT_TOKEN_MISSING,
+            FailureClassifier.CHECKOUT_ABANDONED,
             FailureClassifier.UNKNOWN,
         ) + InventoryRefusalCode.entries.map { it.name.lowercase() }
 

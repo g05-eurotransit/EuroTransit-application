@@ -107,6 +107,25 @@ data class RedriveResponse(
     val attemptCount: Int,
 )
 
+/**
+ * Result of an operator abandoning an expired checkout (#140). [orderStatus] is `COMPENSATING`: the
+ * pipeline then reverses an authorized payment and fails the order, or waits on PAYMENT_OUTCOME_UNKNOWN.
+ */
+data class AbandonResponse(
+    val orderId: UUID,
+    val orderStatus: OrderStatus,
+)
+
+/**
+ * Result of an operator settling an unknown payment outcome (#140). [orderStatus] is still
+ * `COMPENSATING`: the re-triggered pipeline fails the order.
+ */
+data class SettleResponse(
+    val orderId: UUID,
+    val recordId: UUID,
+    val orderStatus: OrderStatus,
+)
+
 /** [evidenceReference] is the incident or audit reference; resolving without one is rejected. */
 data class ResolveReconciliationRequest(
     val evidenceReference: String,

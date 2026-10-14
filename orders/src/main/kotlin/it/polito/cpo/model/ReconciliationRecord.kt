@@ -62,6 +62,16 @@ enum class ReconciliationKind {
      * the checkout pipeline releases a hold, it never asks Inventory to un-sell one.
      */
     SEAT_RETURN_FAILURE,
+
+    /**
+     * An operator abandoned a `PAYMENT_PENDING` order past its seat hold (#140), and Payments holds no
+     * settled authorization to reverse: none at all, or one that is not `AUTHORIZED`. That does not
+     * prove no money was taken — Payments calls the provider before it writes its row, so a charge
+     * whose answer was lost leaves none. Stays open with the order in `COMPENSATING` until an operator
+     * checks the provider and settles it with evidence (`.../settle`); the pipeline then fails the
+     * order. Also closes by itself if a later redrive finds the authorization and reverses it.
+     */
+    PAYMENT_OUTCOME_UNKNOWN,
 }
 
 enum class ReconciliationStatus { OPEN, RESOLVED }

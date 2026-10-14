@@ -112,6 +112,8 @@ Orders, the money path's coordinator, writes one line per decision that moves or
 | `refund.pipeline` | `refunded`, `failed` (the order stays `REFUNDING`; an incident is open) |
 | `reconciliation.redrive` | `accepted`, `replayed`, `rejected` |
 | `reconciliation.resolve` | `resolved`, `replayed`, `rejected` |
+| `reconciliation.abandon` | `accepted`, `replayed`, `rejected` |
+| `reconciliation.settle` | `resolved`, `replayed`, `rejected` |
 
 What is deliberately **not** a line: a redelivery of an order already terminal (its outcome was written the first time), and a pipeline that finds the order cancelled under it (the `cancel` line already says so). `MoneyPathAudit.record` takes identifiers and closed-vocabulary values only — never an order, a request or an event — so a payment token, an email or an amount cannot reach the line by accident. `MoneyPathAuditTest` pins the shape, and `CheckoutOrchestratorTest` asserts that neither the payment token nor the email of an accepted checkout appears in its line.
 

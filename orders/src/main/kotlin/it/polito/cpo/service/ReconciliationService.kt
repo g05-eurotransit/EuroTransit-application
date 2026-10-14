@@ -107,6 +107,33 @@ class ReconciliationService(
     }
 
     /**
+     * Records that an abandoned checkout's payment outcome could not be settled from Payments (#140).
+     * Self-transacting, like [recordPaymentReversalFailure]: the order stays in COMPENSATING.
+     */
+    suspend fun recordPaymentOutcomeUnknown(
+        orderId: UUID,
+        correlationId: String,
+        failureClass: String,
+        detail: String?,
+    ): ReconciliationRecord {
+        val record = txOperator.executeAndAwait {
+            upsert(
+                orderId = orderId,
+                kind = ReconciliationKind.PAYMENT_OUTCOME_UNKNOWN,
+                orderState = "COMPENSATING",
+                correlationId = correlationId,
+                failureClass = failureClass,
+                detail = detail,
+            )
+        }!!
+        countRequired(record)
+        return record
+    }
+
+    /** Whether an operator has settled the order's unknown payment outcome with provider evidence. */
+    suspend fun isPaymentOutcomeSettled(orderId: UUID): Boolean = records.isPaymentOutcomeSettled(orderId)
+
+    /**
      * Records that automatic redelivery gave up on an event. Self-transacting, and it deliberately
      * leaves the durable checkout phase untouched: the phase is what tells a later redrive where to
      * resume from, so an incident report must not disturb it.

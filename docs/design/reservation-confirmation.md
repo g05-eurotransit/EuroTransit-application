@@ -131,6 +131,7 @@ ACCEPTED             -> CANCELLED
 RESERVING            -> FAILED
 PAYMENT_PENDING      -> FAILED
 CONFIRMING_INVENTORY -> COMPENSATING -> FAILED
+PAYMENT_PENDING      -> COMPENSATING            (operator abandonment only, hold expired)
 ```
 
 The state meanings and resume points are fixed:
@@ -140,7 +141,7 @@ The state meanings and resume points are fixed:
 | `ACCEPTED` / `RESERVING` | No payment authorization has started. | Repeat the idempotent hold command. |
 | `PAYMENT_PENDING` | The reservation ID is stored and payment authorization has started. | Repeat the idempotent authorization command. |
 | `CONFIRMING_INVENTORY` | Payment is authorized and Inventory confirmation is required or its result is unknown. | Repeat the idempotent confirmation command. |
-| `COMPENSATING` | Checkout cannot complete after authorization and payment reversal is required or unknown. | Repeat the idempotent refund command, then release any remaining hold. |
+| `COMPENSATING` | Checkout cannot complete after authorization and payment reversal is required or unknown, or an operator abandoned an expired `PAYMENT_PENDING` order whose payment outcome is unknown. | Repeat the idempotent refund command, then release any remaining hold. For an abandoned order, Payments holding no `AUTHORIZED` row opens `PAYMENT_OUTCOME_UNKNOWN` and waits for an operator's settlement. |
 | `CONFIRMED`, `FAILED`, `CANCELLED` | Checkout is terminal. | Acknowledge the duplicate event without remote calls. |
 
 Orders transitions to `PAYMENT_PENDING` with a compare-and-set update that also
@@ -150,6 +151,12 @@ stores `reservationId`. Customer cancellation is accepted only in `ACCEPTED` or
 authorization begins. Orders reaches `FAILED` after authorization only when the
 payment reversal has completed successfully; unresolved money remains in
 `COMPENSATING`.
+
+`PAYMENT_PENDING` enters `COMPENSATING` only through an operator: a delivery that
+exhausted its retries leaves the order there, and once its seat hold has expired
+the redrive refuses it, because resuming means authorizing against a hold that no
+longer exists. `POST /api/orders/{orderId}/reconciliation/abandon` (below) is that
+order's only exit (#140). Nothing on that path authorizes.
 
 ## Reservation Confirmation API
 
@@ -329,6 +336,7 @@ The successful sequence is:
 | Inventory confirmed but the Orders commit failed | Keep `CONFIRMING_INVENTORY`; redelivery receives `200 CONFIRMED` and retries the local transaction. |
 | Payment reversal outcome unknown | Keep `COMPENSATING`; repeat the refund with `refund-{orderId}`. |
 | Payment reversal definitively fails | Keep `COMPENSATING`, create or update a `PAYMENT_REVERSAL_FAILURE` reconciliation record, and alert. Do not mark the order `FAILED`. |
+| `PAYMENT_PENDING` exhausted and its hold expired | An operator abandons it: transition to `COMPENSATING`, reverse with `refund-{orderId}`, release the hold, then `FAILED`. If Payments holds no `AUTHORIZED` row, keep `COMPENSATING` under `PAYMENT_OUTCOME_UNKNOWN` until an operator settles it with provider evidence; then `FAILED`. Payments writes its row only after the provider answers, so no row does not prove no charge. |
 | Hold release outcome unknown before payment | Repeat release; expiration is the final safety net. |
 
 `POST /api/payments/refund` is the EuroTransit compensation command for an
@@ -372,6 +380,7 @@ Reconciliation record kinds are fixed:
 | `DELIVERY_EXHAUSTED` | A valid event reached `order-placed.DLT`. | Automatically resolved when redrive reaches a terminal Orders state. |
 | `INVARIANT_VIOLATION` | Missing reservation, order ownership conflict, or seat-count conflict. | Payment is reversed, Orders reaches `FAILED`, and an operator resolves the record after investigation. |
 | `PAYMENT_REVERSAL_FAILURE` | A provider reversal returned a definitive failure or repeatedly remained unknown. | Remains open with Orders in `COMPENSATING` until redrive completes the reversal; then it resolves automatically. |
+| `PAYMENT_OUTCOME_UNKNOWN` | An abandoned `PAYMENT_PENDING` order for which Payments holds no `AUTHORIZED` row (#140). | Remains open with Orders in `COMPENSATING` until an operator settles it with provider evidence, or a redrive finds and reverses the authorization; then Orders reaches `FAILED`. |
 
 An operator redrives reconciliation through this internal API:
 
@@ -392,8 +401,42 @@ record.
 The preserved order state selects the correct idempotent resume action from the
 state table above. A repeated DLT updates the existing `DELIVERY_EXHAUSTED`
 record's attempt count and latest failure instead of creating a duplicate. The
-Orders terminal-state transaction automatically closes `DELIVERY_EXHAUSTED` and
-successfully compensated `PAYMENT_REVERSAL_FAILURE` records.
+Orders terminal-state transaction automatically closes `DELIVERY_EXHAUSTED`,
+successfully compensated `PAYMENT_REVERSAL_FAILURE` and `PAYMENT_OUTCOME_UNKNOWN`
+records.
+
+An operator abandons a `PAYMENT_PENDING` order whose seat hold has expired, the
+one case the redrive refuses (#140):
+
+```http
+POST /api/orders/{orderId}/reconciliation/abandon
+Authorization: Bearer <operations-token>
+Idempotency-Key: <abandon-key>
+```
+
+In one Orders transaction it moves the order to `COMPENSATING` (the expiry
+re-checked against the database clock), stores the idempotency result and writes
+a new `order-placed` outbox row; the compensation above then reverses an
+authorized payment and fails the order, or opens `PAYMENT_OUTCOME_UNKNOWN` when
+Payments holds no `AUTHORIZED` row. `202 Accepted`. Refused with
+`409 RESERVATION_HOLD_NOT_EXPIRED` while the hold runs (redrive instead),
+`409 ORDER_NOT_ABANDONABLE` outside `PAYMENT_PENDING`, and
+`409 NO_OPEN_RECONCILIATION_RECORD` without an open incident.
+
+An operator settles a `PAYMENT_OUTCOME_UNKNOWN` once the provider shows no money
+held for the order (never charged, or refunded there):
+
+```http
+POST /api/orders/{orderId}/reconciliation/{recordId}/settle
+Authorization: Bearer <operations-token>
+Idempotency-Key: <settle-key>
+
+{"evidenceReference": "<provider reference>"}
+```
+
+In one transaction it closes the incident with the evidence and writes a new
+`order-placed` outbox row; the compensation, finding the outcome settled, fails the
+order. The command never moves the order itself.
 
 An operator resolves an investigated `INVARIANT_VIOLATION` through:
 

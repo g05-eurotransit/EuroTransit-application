@@ -37,6 +37,7 @@ import it.polito.cpo.service.AuditLogCapture
 import it.polito.cpo.service.CheckoutOrchestrator
 import it.polito.cpo.service.FailureClassifier
 import it.polito.cpo.service.ReconciliationOperationsService
+import it.polito.cpo.service.ReconciliationService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.reactor.awaitSingleOrNull
@@ -80,6 +81,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -184,6 +186,7 @@ class CheckoutPipelineIntegrationTest {
     @Autowired private lateinit var meterRegistry: MeterRegistry
     @Autowired private lateinit var objectMapper: ObjectMapper
     @Autowired private lateinit var operations: ReconciliationOperationsService
+    @Autowired private lateinit var reconciliationService: ReconciliationService
     @Autowired private lateinit var listenerRegistry: KafkaListenerEndpointRegistry
 
     @Test
@@ -882,6 +885,265 @@ class CheckoutPipelineIntegrationTest {
         assertEquals(2, outboxRows(orderId, "order-placed").size)
     }
 
+    // --- abandoning an expired checkout (#140) -----------------------------------------------------
+
+    /** A PAYMENT_PENDING order past its hold with an exhausted delivery: what only an abandonment can end. */
+    private suspend fun expiredPaymentPending(tag: String): UUID {
+        val response = orchestrator.checkout(request(), "it-$tag-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        val orderId = response.orderId
+        seedState(orderId, OrderStatus.PAYMENT_PENDING, "res-$orderId")
+        seedHoldExpiry(orderId, OffsetDateTime.now().minusHours(2))
+        openIncident(orderId, ReconciliationKind.DELIVERY_EXHAUSTED)
+        return orderId
+    }
+
+    private suspend fun awaitOpenIncident(orderId: UUID, kind: ReconciliationKind) = withTimeout(30_000) {
+        var record = openRecords(orderId).firstOrNull { it.kind == kind.name }
+        while (record == null) {
+            delay(100)
+            record = openRecords(orderId).firstOrNull { it.kind == kind.name }
+        }
+        record
+    }
+
+    @Test
+    fun `an abandoned checkout Payments has no authorization for waits on the operator, who settles it`() = runBlocking {
+        // No row at Payments does not prove no charge: Payments calls the provider before writing it.
+        val orderId = expiredPaymentPending("abandon")
+        payment.noAuthorizationFor.add(orderId)
+
+        val accepted = operations.abandon(orderId, "abandon-$orderId", "ops-1")
+        assertEquals(OrderStatus.COMPENSATING, accepted.orderStatus)
+        assertEquals(2, outboxRows(orderId, "order-placed").size)
+        relayLatestOrderPlaced(orderId)
+
+        val unknown = awaitOpenIncident(orderId, ReconciliationKind.PAYMENT_OUTCOME_UNKNOWN)
+        assertEquals(FailureClassifier.PAYMENT_OUTCOME_UNKNOWN, unknown.failureClass)
+        // Not failed on a guess: the order waits, never authorized, its lost hold already released.
+        assertEquals(OrderStatus.COMPENSATING, orderRepository.findById(orderId)!!.status)
+        assertEquals(0, payment.authorizedOrderIds.count { it == orderId })
+        assertTrue(inventory.releasedReservationIds.contains("res-$orderId"))
+        assertEquals(0, outboxRows(orderId, "notification-requested").size)
+
+        val settled = operations.settle(
+            orderId, unknown.id, "settle-$orderId", ResolveReconciliationRequest("stripe: no charge for $orderId"), "ops-1",
+        )
+        assertEquals(OrderStatus.COMPENSATING, settled.orderStatus)
+        relayLatestOrderPlaced(orderId)
+
+        val order = awaitTerminal(orderId)
+        assertEquals(OrderStatus.FAILED, order.status)
+        assertEquals("CHECKOUT_FAILED", order.failureCode)
+        assertEquals(0, payment.authorizedOrderIds.count { it == orderId })
+        assertFalse(payment.reversedOrderIds.contains(orderId))
+        assertEquals(1, outboxRows(orderId, "notification-requested").size)
+        assertTrue(openRecords(orderId).isEmpty())
+        val evidence = reconciliationRepository.findById(unknown.id)!!
+        assertEquals("stripe: no charge for $orderId", evidence.evidenceReference)
+        assertEquals("ops-1", evidence.resolvedBy)
+    }
+
+    @Test
+    fun `an abandoned checkout whose authorization is not AUTHORIZED waits on the operator too`() = runBlocking {
+        val orderId = expiredPaymentPending("abandon-declined")
+        payment.unsettledAuthorizationFor.add(orderId)
+
+        operations.abandon(orderId, "abandon-declined-$orderId", "ops-1")
+        relayLatestOrderPlaced(orderId)
+
+        awaitOpenIncident(orderId, ReconciliationKind.PAYMENT_OUTCOME_UNKNOWN)
+        assertEquals(OrderStatus.COMPENSATING, orderRepository.findById(orderId)!!.status)
+        // Not the reversal-failure incident, which a redrive could never clear here.
+        assertTrue(openRecords(orderId).none { it.kind == ReconciliationKind.PAYMENT_REVERSAL_FAILURE.name })
+    }
+
+    @Test
+    fun `abandoning an expired checkout whose payment was authorized reverses it, then fails it`() = runBlocking {
+        val orderId = expiredPaymentPending("abandon-paid")
+
+        operations.abandon(orderId, "abandon-paid-$orderId", "ops-1")
+        relayLatestOrderPlaced(orderId)
+
+        assertEquals(OrderStatus.FAILED, awaitTerminal(orderId).status)
+        // Reversed under the checkout compensation key, never authorized again, no operator needed.
+        assertTrue(payment.refundIdempotencyKeys.contains("refund-$orderId"))
+        assertTrue(payment.reversedOrderIds.contains(orderId))
+        assertEquals(0, payment.authorizedOrderIds.count { it == orderId })
+        assertTrue(reconciliationRepository.findAll().toList().none {
+            it.orderId == orderId && it.kind == ReconciliationKind.PAYMENT_OUTCOME_UNKNOWN.name
+        })
+        assertTrue(openRecords(orderId).isEmpty())
+    }
+
+    /** An abandoned order parked on PAYMENT_OUTCOME_UNKNOWN, as Payments first answers "no authorization". */
+    private suspend fun parkedOnUnknownOutcome(tag: String): Pair<UUID, UUID> {
+        val orderId = expiredPaymentPending(tag)
+        payment.noAuthorizationFor.add(orderId)
+        operations.abandon(orderId, "abandon-$tag-$orderId", "ops-1")
+        relayLatestOrderPlaced(orderId)
+        return orderId to awaitOpenIncident(orderId, ReconciliationKind.PAYMENT_OUTCOME_UNKNOWN).id
+    }
+
+    @Test
+    fun `a late authorization found by a redrive is reversed and closes the unknown outcome by itself`() = runBlocking {
+        val (orderId, recordId) = parkedOnUnknownOutcome("late-redrive")
+        // Payments records the authorization after all, before anyone settles.
+        payment.noAuthorizationFor.remove(orderId)
+
+        operations.redrive(orderId, "redrive-late-$orderId", "ops-1")
+        relayLatestOrderPlaced(orderId)
+
+        assertEquals(OrderStatus.FAILED, awaitTerminal(orderId).status)
+        assertTrue(payment.reversedOrderIds.contains(orderId))
+        val closed = reconciliationRepository.findById(recordId)!!
+        assertEquals(ReconciliationStatus.RESOLVED.name, closed.status)
+        assertEquals("system:terminal-state", closed.resolvedBy)
+        // Closed by the reversal, not by an operator's evidence.
+        assertFalse(reconciliationService.isPaymentOutcomeSettled(orderId))
+    }
+
+    @Test
+    fun `a settlement still reverses an authorization Payments recorded in the meantime`() = runBlocking {
+        val (orderId, recordId) = parkedOnUnknownOutcome("late-settle")
+        payment.noAuthorizationFor.remove(orderId)
+
+        operations.settle(orderId, recordId, "settle-late-$orderId", ResolveReconciliationRequest("ref"), "ops-1")
+        relayLatestOrderPlaced(orderId)
+
+        // The settlement does not skip the reversal: the pipeline asks Payments again first.
+        assertEquals(OrderStatus.FAILED, awaitTerminal(orderId).status)
+        assertTrue(payment.reversedOrderIds.contains(orderId))
+    }
+
+    @Test
+    fun `a settlement is refused on a resolved record or an order not waiting on it, and audited`() = runBlocking {
+        val (orderId, recordId) = parkedOnUnknownOutcome("settle-audit")
+        // An open PAYMENT_OUTCOME_UNKNOWN on an order that is not COMPENSATING.
+        val notWaiting = expiredPaymentPending("settle-notwaiting")
+        openIncident(notWaiting, ReconciliationKind.PAYMENT_OUTCOME_UNKNOWN)
+        val strayRecord = openRecords(notWaiting).single { it.kind == ReconciliationKind.PAYMENT_OUTCOME_UNKNOWN.name }
+
+        AuditLogCapture().use { audit ->
+            operations.settle(orderId, recordId, "settle-a1-$orderId", ResolveReconciliationRequest("ref"), "ops-1")
+            val again = assertFailsWith<ApiException> {
+                operations.settle(orderId, recordId, "settle-a2-$orderId", ResolveReconciliationRequest("ref"), "ops-1")
+            }
+            assertEquals("RECONCILIATION_ALREADY_RESOLVED", again.code)
+            val stray = assertFailsWith<ApiException> {
+                operations.settle(notWaiting, strayRecord.id, "settle-a3-$notWaiting", ResolveReconciliationRequest("ref"), "ops-1")
+            }
+            assertEquals("ORDER_NOT_SETTLEABLE", stray.code)
+
+            val lines = audit.forOrder(orderId).filter { it.action == "reconciliation.settle" }
+            assertEquals(listOf("resolved", "rejected"), lines.map { it.outcome })
+            assertEquals("ops-1", lines.first().fields["principalId"])
+            assertEquals("RECONCILIATION_ALREADY_RESOLVED", lines.last().fields["reason"])
+        }
+    }
+
+    @Test
+    fun `a settlement needs the order's own unknown outcome, open, and evidence`() = runBlocking {
+        val orderId = expiredPaymentPending("settle-refusals")
+        payment.noAuthorizationFor.add(orderId)
+        operations.abandon(orderId, "abandon-sr-$orderId", "ops-1")
+        relayLatestOrderPlaced(orderId)
+        val unknown = awaitOpenIncident(orderId, ReconciliationKind.PAYMENT_OUTCOME_UNKNOWN)
+        val exhausted = openRecords(orderId).single { it.kind == ReconciliationKind.DELIVERY_EXHAUSTED.name }
+        val other = expiredPaymentPending("settle-other")
+
+        fun settle(order: UUID, record: UUID, evidence: String, key: String) = runBlocking {
+            assertFailsWith<ApiException> {
+                operations.settle(order, record, key, ResolveReconciliationRequest(evidence), "ops-1")
+            }.code
+        }
+        assertEquals("EVIDENCE_REFERENCE_REQUIRED", settle(orderId, unknown.id, "  ", "settle-e-$orderId"))
+        assertEquals("RECONCILIATION_KIND_NOT_SETTLEABLE", settle(orderId, exhausted.id, "ref", "settle-k-$orderId"))
+        assertEquals("RECONCILIATION_RECORD_NOT_FOUND", settle(other, unknown.id, "ref", "settle-o-$orderId"))
+        // None of those wrote anything: the order still waits.
+        assertEquals(OrderStatus.COMPENSATING, orderRepository.findById(orderId)!!.status)
+
+        val first = operations.settle(orderId, unknown.id, "settle-dup-$orderId", ResolveReconciliationRequest("ref"), "ops-1")
+        val replay = operations.settle(orderId, unknown.id, "settle-dup-$orderId", ResolveReconciliationRequest("ref"), "ops-1")
+        assertEquals(first, replay)
+        assertEquals(3, outboxRows(orderId, "order-placed").size) // original, abandonment, one settlement
+    }
+
+    @Test
+    fun `an abandonment whose reversal is refused stays non-terminal with a reversal incident`() = runBlocking {
+        val orderId = expiredPaymentPending("abandon-refused")
+        payment.failReversalFor.add(orderId)
+
+        operations.abandon(orderId, "abandon-refused-$orderId", "ops-1")
+        relayLatestOrderPlaced(orderId)
+
+        assertEquals(OrderStatus.COMPENSATING, awaitStatus(orderId, OrderStatus.COMPENSATING).status)
+        withTimeout(30_000) {
+            while (openRecords(orderId).none { it.kind == ReconciliationKind.PAYMENT_REVERSAL_FAILURE.name }) delay(100)
+        }
+    }
+
+    @Test
+    fun `outside an abandonment a missing authorization still parks the compensation`() = runBlocking {
+        // Ordinary compensation follows a definitive AUTHORIZED: Payments then finding none is a
+        // cross-service inconsistency, never a reason to call the money settled.
+        val response = orchestrator.checkout(request(), "it-noauth-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        inventory.refuseConfirmWith[response.orderId] = InventoryRefusalCode.RESERVATION_EXPIRED
+        payment.noAuthorizationFor.add(response.orderId)
+
+        relayOrderPlaced(response.orderId)
+
+        assertEquals(OrderStatus.COMPENSATING, awaitStatus(response.orderId, OrderStatus.COMPENSATING).status)
+        withTimeout(30_000) {
+            while (openRecords(response.orderId).none { it.kind == ReconciliationKind.PAYMENT_REVERSAL_FAILURE.name }) delay(100)
+        }
+    }
+
+    @Test
+    fun `an abandonment is refused while the hold runs, outside PAYMENT_PENDING, and without an incident`() = runBlocking {
+        val live = orchestrator.checkout(request(), "it-abandon-live-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        seedState(live.orderId, OrderStatus.PAYMENT_PENDING, "res-${live.orderId}")
+        seedHoldExpiry(live.orderId, OffsetDateTime.now().plusMinutes(5))
+        openIncident(live.orderId, ReconciliationKind.DELIVERY_EXHAUSTED)
+        val confirming = orchestrator.checkout(request(), "it-abandon-conf-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        seedState(confirming.orderId, OrderStatus.CONFIRMING_INVENTORY, "res-${confirming.orderId}")
+        seedHoldExpiry(confirming.orderId, OffsetDateTime.now().minusHours(2))
+        openIncident(confirming.orderId, ReconciliationKind.DELIVERY_EXHAUSTED)
+        val noIncident = orchestrator.checkout(request(), "it-abandon-none-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        seedState(noIncident.orderId, OrderStatus.PAYMENT_PENDING, "res-${noIncident.orderId}")
+        seedHoldExpiry(noIncident.orderId, OffsetDateTime.now().minusHours(2))
+
+        val cases = mapOf(
+            live.orderId to "RESERVATION_HOLD_NOT_EXPIRED",
+            confirming.orderId to "ORDER_NOT_ABANDONABLE",
+            noIncident.orderId to "NO_OPEN_RECONCILIATION_RECORD",
+        )
+        cases.forEach { (orderId, code) ->
+            val ex = assertFailsWith<ApiException> { operations.abandon(orderId, "abandon-no-$orderId", "ops-1") }
+            assertEquals(code, ex.code)
+            // Nothing moved and nothing was written.
+            assertNotEquals(OrderStatus.COMPENSATING, orderRepository.findById(orderId)!!.status)
+            assertEquals(1, outboxRows(orderId, "order-placed").size)
+        }
+    }
+
+    @Test
+    fun `repeating an abandonment key replays the response, and the abandonment is audited`() = runBlocking {
+        val orderId = expiredPaymentPending("abandon-dup")
+        payment.noAuthorizationFor.add(orderId)
+
+        AuditLogCapture().use { audit ->
+            val first = operations.abandon(orderId, "abandon-dup-$orderId", "ops-1")
+            val replay = operations.abandon(orderId, "abandon-dup-$orderId", "ops-1")
+
+            assertEquals(first, replay)
+            assertEquals(2, outboxRows(orderId, "order-placed").size) // the original plus one abandonment
+            val lines = audit.forOrder(orderId).filter { it.action == "reconciliation.abandon" }
+            assertEquals(listOf("accepted", "replayed"), lines.map { it.outcome })
+            assertEquals("ops-1", lines.first().fields["principalId"])
+            assertEquals("user-1", lines.first().fields["ownerId"])
+        }
+    }
+
     @Test
     fun `a redrive without an open incident is refused`() = runBlocking {
         val response = orchestrator.checkout(request(), "it-redrive4-${UUID.randomUUID()}", "user-1", "user-1@example.com")
@@ -1281,12 +1543,20 @@ class CheckoutPipelineIntegrationTest {
         /** The full requests, so what actually reaches Payments — amount and currency — is assertable. */
         val authorizeRequests = CopyOnWriteArrayList<PaymentRequest>()
         val refundedOrderIds = CopyOnWriteArrayList<UUID>()
+        /** Only the reversals Payments answered as done, unlike [refundedOrderIds], every one asked for. */
+        val reversedOrderIds = CopyOnWriteArrayList<UUID>()
         /** The idempotency keys `refund` was called with, so a test can tell compensation from a
          * commercial refund apart (`refund-{orderId}` vs `pay-refund-{orderId}`). */
         val refundIdempotencyKeys = CopyOnWriteArrayList<String>()
 
         /** orderId -> answer the reversal with a definitive failure instead of success. */
         val failReversalFor = ConcurrentHashMap.newKeySet<UUID>()
+
+        /** orderId -> Payments holds no authorization for it: the reversal answers NOT_FOUND. */
+        val noAuthorizationFor = ConcurrentHashMap.newKeySet<UUID>()
+
+        /** orderId -> Payments holds an authorization that is not AUTHORIZED (e.g. declined). */
+        val unsettledAuthorizationFor = ConcurrentHashMap.newKeySet<UUID>()
 
         /** orderId -> how many authorizations to refuse as an open Payments breaker would, before answering. */
         val unavailableFor = ConcurrentHashMap<UUID, AtomicInteger>()
@@ -1310,9 +1580,12 @@ class CheckoutPipelineIntegrationTest {
         override suspend fun refund(orderId: UUID, idempotencyKey: String): ReversalOutcome {
             refundedOrderIds.add(orderId)
             refundIdempotencyKeys.add(idempotencyKey)
+            if (orderId in noAuthorizationFor) return ReversalOutcome.Failed("NOT_FOUND", "AUTHORIZATION_NOT_FOUND")
+            if (orderId in unsettledAuthorizationFor) return ReversalOutcome.Failed("FAILED", "INVALID_AUTHORIZATION_STATUS")
             return if (orderId in failReversalFor) {
                 ReversalOutcome.Failed("FAILED", "forced by test")
             } else {
+                reversedOrderIds.add(orderId)
                 ReversalOutcome.Reversed(providerReference = "test-refund-ref")
             }
         }

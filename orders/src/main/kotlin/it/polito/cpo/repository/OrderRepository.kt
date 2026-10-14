@@ -70,7 +70,8 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
     )
     suspend fun markConfirmingInventory(id: UUID): Long
 
-    // Reachable only from CONFIRMING_INVENTORY: compensation exists only after authorization.
+    // Reachable only from CONFIRMING_INVENTORY: compensation exists only after authorization. The one
+    // other way in is an operator abandoning an expired PAYMENT_PENDING order (markAbandoned).
     @Modifying
     @Query(
         """
@@ -79,6 +80,18 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
         """,
     )
     suspend fun markCompensating(id: UUID, reason: String): Long
+
+    // The only way into COMPENSATING from PAYMENT_PENDING: an operator abandoning a checkout whose seat
+    // hold has expired while its payment outcome is unknown (#140). The expiry is checked here and not
+    // only by the caller, so an order whose hold is still running can never be abandoned.
+    @Modifying
+    @Query(
+        """
+        UPDATE orders SET status = 'COMPENSATING', compensation_reason = :reason
+        WHERE id = :id AND status = 'PAYMENT_PENDING' AND reservation_expires_at < CURRENT_TIMESTAMP
+        """,
+    )
+    suspend fun markAbandoned(id: UUID, reason: String): Long
 
     @Modifying
     @Query(

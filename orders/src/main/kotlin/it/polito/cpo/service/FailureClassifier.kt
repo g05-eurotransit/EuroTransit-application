@@ -16,10 +16,19 @@ object FailureClassifier {
     const val PAYMENT_DECLINED = "payment_declined"
     const val PAYMENT_TOKEN_MISSING = "payment_token_missing"
 
+    /**
+     * An abandoned checkout for which Payments holds no settled authorization (#140): the money may or
+     * may not have been taken. The code Payments answered goes in the detail.
+     */
+    const val PAYMENT_OUTCOME_UNKNOWN = "payment_outcome_unknown"
+
     /** A reversal that Payments definitively refused. The refusing code goes in the detail. */
     const val PAYMENT_REVERSAL_FAILED = "payment_reversal_failed"
 
     const val CANCELLED = "cancelled"
+
+    /** A checkout an operator abandoned past its seat hold (#140), settled by compensation. */
+    const val CHECKOUT_ABANDONED = "checkout_abandoned"
     const val UNKNOWN = "unknown"
 
     const val POISON_PAYLOAD = "poison_payload"
@@ -63,7 +72,7 @@ object FailureClassifier {
      * or [UNKNOWN]. Derived from [InventoryRefusalCode] so a new code joins without an edit here.
      */
     val CHECKOUT_FAILURE_REASONS: List<String> =
-        listOf(PAYMENT_DECLINED, PAYMENT_TOKEN_MISSING, UNKNOWN) +
+        listOf(PAYMENT_DECLINED, PAYMENT_TOKEN_MISSING, CHECKOUT_ABANDONED, UNKNOWN) +
             InventoryRefusalCode.entries.map { forInventoryRefusal(it) }
 
     private fun classifyDeadLetterClass(exceptionFqcn: String?): String = when {
