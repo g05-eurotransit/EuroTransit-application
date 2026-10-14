@@ -35,7 +35,21 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
       *Orders, 2026-09-18:* `ResilienceConfiguration` declares four breakers (`inventory`, `payments`, `inventory-read`, `catalog-read`) with a 20s time-based window, `minimumNumberOfCalls=5`, 50% failure and slow-call thresholds, `waitDurationInOpenState=10s` and 3 half-open calls. Business refusals (`DefinitiveRefusal`, 400/404/409) are excluded so a decline storm cannot open a breaker. Fallback is an explicit unknown outcome that preserves the durable phase, never a speculative decision.
 - [x] Bulkheads isolate checkout resources from unrelated traffic.
       *Orders, 2026-09-18:* separate 20-permit bulkheads per dependency in `ResilienceConfiguration`. Seat-map browsing (`inventory-read`) and offer lookup (`catalog-read`) have their own pools, so saturating either sheds that traffic and leaves the money-path permits untouched.
-- [ ] Every remote call has timeout and bounded retry policy with backoff and jitter.
+- [x] Every remote call has timeout and bounded retry policy with backoff and jitter.
+      *Orders, Payments, Notifications, 2026-10-14:* every money-path call has all four. Orders → Inventory
+      (hold, confirm, release; 2 s) and Orders → Payments (authorize, refund; 3 s) put a reactive `timeout`
+      under a Resilience4j retry of 3 attempts with jittered exponential backoff (200 ms ×2, randomization
+      0.5), on transient faults only — never on a business refusal (`orders/.../config/ResilienceConfiguration.kt`,
+      `WebClientInventoryClient`, `WebClientPaymentClient`). Payments → Stripe has the same retry plus
+      5 s connect and 10 s response timeouts (`payments/.../config/ResilienceConfiguration.kt`,
+      `StripeSandboxProvider`). A pipeline delivery that fails because a dependency is down is redelivered
+      six times, 1 → 30 s with 250 ms jitter, before the DLT (`KafkaConfiguration.dependencyRetryBackOff`, #139).
+      Inventory and Catalog make no outbound calls. **Exception, by design:** three read-only calls have a
+      timeout (1 s) and fail fast without a retry — Orders' seat map (`inventory-read`) and offer/route
+      lookup (`catalog-read`), and Notifications' trip context from Catalog. Retrying a read against a
+      struggling dependency multiplies its load; the seat map and checkout entry answer `503` and the client
+      asks again, and Notifications delivers without the trip context and tries again on the next event
+      (`ResilienceConfiguration` retry KDoc, `CatalogRouteResolver` KDoc).
 - [x] Overload is handled with controlled refusal or load shedding rather than unbounded queues.
       *Orders, 2026-09-18, corrected 2026-10-07:* `maxWaitDuration = ZERO` on every bulkhead — a saturated pool refuses immediately instead of queueing. On the synchronous paths (offer lookup at checkout entry, the seat map) that refusal, like an open breaker, is answered `503`, which tells the caller to ask again rather than reporting a business failure. Inside the pipeline the customer already holds a `202`, so a refusal is an unknown outcome: the durable phase is kept and the delivery is retried, and if retries are exhausted the incident is labelled `dependency_error` by `FailureClassifier.forDeadLetter`, which classifies the recoverer's cause header rather than the container's wrapper (`DeadLetterHeadersTest` runs it through the real `DeadLetterPublishingRecoverer`).
 - [x] Unknown confirmation and payment outcomes preserve the durable Orders phase; exhausted Kafka retries create a reconciliation record and can be safely redriven.
