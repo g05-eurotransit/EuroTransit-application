@@ -72,7 +72,18 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
 - [x] Notifications can be killed while checkout still succeeds after reservation and payment.
       *Orders, 2026-10-08:* demonstrated on compose: with every Notifications instance stopped, 20/20 checkouts reached CONFIRMED and none failed because of Notifications. Orders makes no call to Notifications — `notification-requested` is an outbox row committed with the order's terminal state and relayed by Debezium — so stopped or killed makes no difference to checkout. On restart the consumer caught up the 20 retained events in ~4s. Evidence: [Notifications outage report](operations/reports/2026-10-notifications-outage-local.md).
 - [ ] Kubernetes startup/readiness/liveness probes and PodDisruptionBudgets are deliberately configured.
-- [ ] Liveness probes do not fail because of transient downstream dependency failures.
+- [x] Liveness probes do not fail because of transient downstream dependency failures.
+      *Orders, Inventory, Payments, Catalog, Notifications, 2026-10-14:* every service's liveness group holds
+      only `livenessState` — the process, never PostgreSQL, Kafka or another service. Orders and
+      Notifications state it explicitly (`management.endpoint.health.group.liveness.include: livenessState`
+      in their `application.yaml`; Notifications also keeps Kafka out of readiness, being best-effort);
+      Inventory, Payments and Catalog enable the probes and get the same group from Spring Boot's default.
+      No service changes `LivenessState` in code or adds a health indicator. In the configuration
+      repository every Deployment points liveness and startup at `/actuator/health/liveness` and readiness
+      at `/actuator/health/readiness` (`charts/eurotransit/values.yaml`, `global.deployment.probes`:
+      liveness every 10 s, 2 s timeout, 3 failures), with no per-environment override. The rule is
+      `design/conventions.md` §2. On the Orders shutdown drill liveness stayed `UP` while readiness turned
+      `OUT_OF_SERVICE` ([orders-shutdown-and-replay.md](operations/orders-shutdown-and-replay.md)).
 
 ## 4. Delivery, Observability, and Proof
 
