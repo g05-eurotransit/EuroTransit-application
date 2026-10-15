@@ -363,6 +363,12 @@ The complete protocol, failure matrix, API shape, and acceptance criteria are do
 
 This fulfills the business requirement of reselling refunded tickets without compromising the safety of the critical checkout money path. By creating a completely separate API and state transition for post-sale refunds, we guarantee that a delayed or erroneous checkout compensation (`release`) cannot accidentally un-sell a confirmed ticket.
 
+### Alternatives Considered
+
+- **Reusing the existing checkout `release` operation:** Allowing `DELETE /api/inventory/reservations/{reservationId}` to also transition `CONFIRMED -> CANCELLED` and return `SOLD` seats to `AVAILABLE`. This would avoid introducing a new endpoint and state transition, but it fatally weakens Invariant 5 ("Never release a confirmed reservation or a sold seat through checkout compensation"). A delayed, out-of-order, or replayed checkout compensation call — triggered by a transient network error or a race condition during payment authorization — could accidentally un-sell a confirmed ticket belonging to a completed sale. Keeping post-sale refunds on a dedicated endpoint and separate state transition ensures that checkout compensation can never mutate sold seats under any failure scenario.
+- **Treating `SOLD` as strictly terminal (never returning seats to available):** Preserving the original rule where a sold seat is never returned to `AVAILABLE`, handling order refunds purely as financial reversals without freeing seat capacity. While this protects Invariant 5 by construction, it directly contradicts the railway business requirement: passenger train capacity is strictly finite, and withholding refunded seats from resale causes permanent capacity loss and unrecoverable revenue loss for the operator.
+- **Blocking the refund transition at write-time for departed trains:** Refusing the `SOLD -> AVAILABLE` transition in Inventory if the train has already departed. This would require Inventory to know route departure times and station timezones, coupling the transactional consistency boundary to scheduling data. Returning the seat to `AVAILABLE` unconditionally in the database and filtering out departed runs at the read boundary (`GET /api/orders/seat-availability`) cleanly decouples datastore consistency from time-dependent customer visibility.
+
 ## ADR-015: Orders-Side Post-Sale Refund
 
 **Decision:** A refund of a confirmed order is a distinct business process owned by Orders, with its
