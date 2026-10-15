@@ -377,7 +377,7 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
 
 - `GET /api/inventory/availability`
   - Returns seats and their privacy-safe boolean availability (`isAvailable`) for a specific route and `travelDate`.
-  - Internal API; callers must be trusted services such as Catalog.
+  - Internal API; callers must be trusted services such as Orders (seat map façade).
   - Does not require a propagated user context (`X-User-Id`), as it only returns public seat state.
 - `POST /api/inventory/reservations`
   - Attempts to create a 10-minute hold for the requested seats.
