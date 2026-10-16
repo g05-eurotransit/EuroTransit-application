@@ -42,7 +42,12 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
       row, refuses one past its `expires_at` by the database clock, and moves the seats `HELD -> SOLD`
       (`confirmSeats`, `WHERE status = 'HELD'`) with the reservation `CONFIRMED`; Orders reaches
       `CONFIRMED` only after that call succeeds (`CONFIRMING_INVENTORY`, ADR-013).
-- [ ] Holds expire after 10 minutes or are released when payment fails/cancels.
+- [x] Holds expire after 10 minutes or are released when payment fails/cancels.
+      *Checked by the Orders owner, 2026-10-16 (Inventory: Carmelo):* `ReservationExpirationJob` sweeps expired `HELD` reservations every 30 s
+      (`FOR UPDATE SKIP LOCKED`, oldest first) and returns their seats; checkout compensation releases a
+      hold through `DELETE /api/inventory/reservations/{id}`, which only touches `HELD` seats. On AKS on
+      2026-10-16 the order abandoned after its hold expired ended with the reservation `EXPIRED` and its seat
+      `AVAILABLE` (configuration #60, Payments latency).
 - [ ] Concurrent confirmation, expiration, and release prove that exactly one transition wins and that confirmed/sold seats are never released by hold cleanup.
 - [x] Orders, Inventory, and Payments persist idempotency keys and return stable outcomes for duplicate requests/events.
       *Orders, Inventory, Payments, 2026-10-14:* each service stores the key with the caller and a request
