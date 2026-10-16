@@ -24,7 +24,11 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
 
 ## 2. Consistency and Idempotency
 
-- [ ] Inventory uses the selected Strong CP / PC-EC consistency model.
+- [x] Inventory uses the selected Strong CP / PC-EC consistency model.
+      *Checked by the Orders owner, 2026-10-16 (Inventory: Carmelo):* ADR-001 selects Strong CP / PC-EC; Inventory implements it on one
+      PostgreSQL primary with row locks (`SELECT … FOR UPDATE` in `SeatRepository.holdSeats`,
+      `ReservationRepository.findByReservationIdForUpdate`), so a reservation is refused rather than risked
+      when the database is unavailable.
 - [ ] The "never oversell" invariant is implemented with atomic 10-minute seat holds or an equivalent reservation state machine.
 - [x] Payment is attempted only after Inventory creates a valid hold.
       *Orders, 2026-09-18:* the pipeline runs `stageHold` → `stageAuthorize` → `stageConfirmInventory` in that order (`CheckoutOrchestrator`). `stageAuthorize` is reached only once `markPaymentPending` has committed the reservation id and expiry Inventory returned, so a refused or failed hold ends the pipeline before any Payments call is made.
