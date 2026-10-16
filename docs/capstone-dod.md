@@ -140,7 +140,10 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
       `ACR_USERNAME`/`ACR_PASSWORD` and `CONFIG_REPO_PAT` — no kubeconfig, Azure or cluster secret.
 - [ ] Orders canary is demonstrated with metric-gated promote/abort.
 - [ ] Catalog blue/green is demonstrated with fast rollback.
-- [ ] The team explains why rolling and all-at-once are not used for the critical path.
+- [x] The team explains why rolling and all-at-once are not used for the critical path.
+      *Checked by the Orders owner, 2026-10-16 (Delivery: Matteo):* configuration `docs/delivery/progressive-delivery.md` ("Strategies Not Used on the
+      Critical Path") says where rolling and all-at-once fit — low-risk changes, dev environments,
+      emergency rollback — and why the money path uses canary (Orders) and blue/green (Catalog) instead.
 - [x] Checkout latency and success-rate SLOs are defined in `operations/slo-observability.md`.
       *Orders, 2026-10-14:* [Checkout SLOs](operations/slo-observability.md#checkout-slos) defines both, each
       with a target, a 30-day window, an SLI and its measurement: success rate 99.0% of valid checkout
