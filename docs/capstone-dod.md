@@ -66,9 +66,9 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
       pins that a checkout's outbox rows share one trace id.
       **Limit — the evidence is local only.** The cluster has no trace backend and the chart ships
       `tracing.enabled: false` against an endpoint that does not exist (configuration #38), so this
-      cannot be shown on AKS. Separately, the AKS Orders connector does not yet place the `traceparent`
-      header the local one does, so even with a backend the Kafka hop would still start a new trace.
-      Both are open and named in `slo-observability.md`.
+      cannot be shown on AKS; it is named in `slo-observability.md`. The AKS Orders connector places
+      the `traceparent` header since configuration #58: on 2026-10-16 the three Kafka records of one
+      cluster checkout carried the same trace id, so the context does cross the Kafka hop there.
 
 ## 5. Security and Configuration
 
