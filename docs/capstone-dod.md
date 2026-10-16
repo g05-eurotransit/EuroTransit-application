@@ -37,7 +37,11 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
       with one `SOLD` seat, one reservation and one charge, VERIFIED.
 - [x] Payment is attempted only after Inventory creates a valid hold.
       *Orders, 2026-09-18:* the pipeline runs `stageHold` → `stageAuthorize` → `stageConfirmInventory` in that order (`CheckoutOrchestrator`). `stageAuthorize` is reached only once `markPaymentPending` has committed the reservation id and expiry Inventory returned, so a refused or failed hold ends the pipeline before any Payments call is made.
-- [ ] After payment authorization, Inventory atomically transitions the still-valid reservation `HELD -> CONFIRMED` and its seats `HELD -> SOLD` before Orders becomes `CONFIRMED`.
+- [x] After payment authorization, Inventory atomically transitions the still-valid reservation `HELD -> CONFIRMED` and its seats `HELD -> SOLD` before Orders becomes `CONFIRMED`.
+      *Checked by the Orders owner, 2026-10-16 (Inventory: Carmelo):* `confirmReservation` runs in one transaction: it locks the reservation
+      row, refuses one past its `expires_at` by the database clock, and moves the seats `HELD -> SOLD`
+      (`confirmSeats`, `WHERE status = 'HELD'`) with the reservation `CONFIRMED`; Orders reaches
+      `CONFIRMED` only after that call succeeds (`CONFIRMING_INVENTORY`, ADR-013).
 - [ ] Holds expire after 10 minutes or are released when payment fails/cancels.
 - [ ] Concurrent confirmation, expiration, and release prove that exactly one transition wins and that confirmed/sold seats are never released by hold cleanup.
 - [x] Orders, Inventory, and Payments persist idempotency keys and return stable outcomes for duplicate requests/events.
