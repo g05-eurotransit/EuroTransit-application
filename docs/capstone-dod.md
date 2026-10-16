@@ -48,7 +48,12 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
       hold through `DELETE /api/inventory/reservations/{id}`, which only touches `HELD` seats. On AKS on
       2026-10-16 the order abandoned after its hold expired ended with the reservation `EXPIRED` and its seat
       `AVAILABLE` (configuration #60, Payments latency).
-- [ ] Concurrent confirmation, expiration, and release prove that exactly one transition wins and that confirmed/sold seats are never released by hold cleanup.
+- [x] Concurrent confirmation, expiration, and release prove that exactly one transition wins and that confirmed/sold seats are never released by hold cleanup.
+      *Checked by the Orders owner, 2026-10-16 (Inventory: Carmelo):* `ReservationServiceIntegrationTest` races `confirmReservation` against
+      `releaseReservation` on a real database and accepts only one consistent end state (`SOLD` or
+      `AVAILABLE`); the sweep test checks that `CONFIRMED` reservations are ignored; release and expiry SQL
+      only match `status = 'HELD'`. **Limit:** no test races the expiry sweep against a confirmation
+      directly; both take the same reservation row lock.
 - [x] Orders, Inventory, and Payments persist idempotency keys and return stable outcomes for duplicate requests/events.
       *Orders, Inventory, Payments, 2026-10-14:* each service stores the key with the caller and a request
       fingerprint: the same key and payload replays the stored response, the same key with a different
