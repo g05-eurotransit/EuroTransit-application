@@ -94,7 +94,11 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
 
 ## 4. Delivery, Observability, and Proof
 
-- [ ] Two repositories are populated: application and configuration.
+- [x] Two repositories are populated: application and configuration.
+      *AKS check, 2026-10-16 (Orders owner):* `EuroTransit-application` holds the five services, tests,
+      CI workflows and `justfile`; `EuroTransit-configuration` holds the Helm chart, the Argo CD
+      Applications, platform bootstrap, SealedSecrets, alert rules and the operations docs. The same day a
+      change went through both: application #146 and a CI bump to configuration (`e13c464`).
 - [ ] CI builds/tests/publishes immutable images and updates the configuration repository.
 - [ ] ArgoCD reconciles the cluster state; CI holds no cluster credentials.
 - [ ] Orders canary is demonstrated with metric-gated promote/abort.
