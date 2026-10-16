@@ -176,11 +176,11 @@ duplicate relay — is another `process` span under the same `publish` span, so 
 as siblings. A **redrive** writes a new row from the operator's request, so the resumed pipeline
 lives in the redrive's trace, not the original checkout's; `correlationId` links the two.
 
-**Still missing in the cluster.** The AKS Orders connector
-(`EuroTransit-configuration/platform/connectors/base/orders-outbox-connect.yaml`) does not yet place
-the header, so there the consumer still starts its own trace. The line is the same as in
-`scripts/init-local-debezium.sh`; it waits for the AKS maintenance window because the Connect worker
-is shared.
+**On the cluster since configuration #58.** The AKS Orders connector
+(`EuroTransit-configuration/platform/connectors/base/orders-outbox-connect.yaml`) places the header
+with the same line as `scripts/init-local-debezium.sh`. Verified on 2026-10-16: the `order-placed`,
+`order-confirmed` and `notification-requested` records of one checkout (`CONFIRMED`) carry
+`traceparent` with the same trace id, so the Kafka hop no longer starts a new trace.
 
 **Not available in the cluster at all.** `platform/` has no trace backend, and the application
 chart ships `tracing.enabled: false` with an endpoint pointing at a collector that does not exist.

@@ -160,9 +160,9 @@ The Notifications consumer (`notifications/src/main/kotlin/it/polito/cpo/event/`
   `OrderOutbox` writes each row under a short `PRODUCER` span `<event> publish` and stores its W3C
   `traceparent` in `outbox_events.traceparent`. The Orders connector copies that column into a
   `traceparent` record header (`transforms.outbox.table.fields.additional.placement`), which Spring
-  Kafka's consumer observation reads. Locally a checkout is now one trace; the AKS connector still
-  needs the same line. Inventory's and Payments' outboxes do not carry trace context yet — the same
-  pattern applies. `correlationId` remains the cross-check in logs.
+  Kafka's consumer observation reads. A checkout is now one trace locally and, since configuration
+  #58 (2026-10-16), on the AKS connector too. Inventory's and Payments' outboxes do not carry trace
+  context yet — the same pattern applies. `correlationId` remains the cross-check in logs.
 - **Kafka bootstrap address in compose.** Neither Orders nor Notifications set `spring.kafka.bootstrap-servers` in `docker-compose.yml`, so both fall back to `localhost:9092`, which does not resolve inside a container. Notifications now sets `SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092` for its own service block; Orders likely needs the same on its block (not changed here — out of slice).
 - **Notifications not exposed through the gateway (in-slice, FIXED).** In live E2E the frontend SSE call `GET /api/notifications/stream` (via Traefik on port 80) fell through to the SPA catch-all router because the `notifications` service block had `traefik.enable=false` and no router. Added `traefik.enable=true` + a `PathPrefix(/api/notifications)` router to the notifications block in `docker-compose.yml` (mirrors catalog/orders). `inventory`/`payments` stay unexposed — they are internal, called server-to-server by Orders.
 - **Topics rely on broker auto-create locally.** `order-placed`, `order-confirmed`, `notification-requested` are auto-created by the KRaft broker in compose (no explicit provisioning). The cluster/demo target needs explicit `KafkaTopic` CRDs (partitions/replication/retention) in `EuroTransit-configuration` (Strimzi) — a config-repo follow-up.
