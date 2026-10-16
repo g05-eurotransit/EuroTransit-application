@@ -220,7 +220,11 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
 
 ## 6. Chaos Experiments
 
-- [ ] The chaos plan in `operations/chaos-experiments.md` is complete.
+- [x] The chaos plan in `operations/chaos-experiments.md` is complete.
+      *Checked by the Orders owner, 2026-10-16 (Resilience):* the plan covers the five required experiments — Payments latency, Inventory
+      kill mid-hold, node/AZ disruption, Kafka disruption, CloudNativePG failover — each with steady state,
+      hypothesis, injection and observations, plus a sixth (seat return refused during a refund). The
+      executed reports are in configuration #55 and #60.
 - [ ] Latency injection into Payments proves the Orders circuit breaker opens and Catalog remains healthy.
 - [ ] Inventory pod kill mid-hold proves idempotency and no oversell/double-charge.
 - [ ] Node or AZ-style disruption proves PDBs/topology spread protect the critical path.
