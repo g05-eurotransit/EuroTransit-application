@@ -29,7 +29,12 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
       PostgreSQL primary with row locks (`SELECT … FOR UPDATE` in `SeatRepository.holdSeats`,
       `ReservationRepository.findByReservationIdForUpdate`), so a reservation is refused rather than risked
       when the database is unavailable.
-- [ ] The "never oversell" invariant is implemented with atomic 10-minute seat holds or an equivalent reservation state machine.
+- [x] The "never oversell" invariant is implemented with atomic 10-minute seat holds or an equivalent reservation state machine.
+      *Checked by the Orders owner, 2026-10-16 (Inventory: Carmelo):* `holdSeats` locks the requested `AVAILABLE` seats and moves them to
+      `HELD` only if all of them are available, in one statement; the hold lasts `dbNow + 10 minutes`
+      (`ReservationService`), and `uk_reservations_order_id` (V5) allows one reservation per order. On AKS
+      (configuration #60, Inventory kill) five buyers of one seat with the Inventory pod killed mid-hold ended
+      with one `SOLD` seat, one reservation and one charge, VERIFIED.
 - [x] Payment is attempted only after Inventory creates a valid hold.
       *Orders, 2026-09-18:* the pipeline runs `stageHold` → `stageAuthorize` → `stageConfirmInventory` in that order (`CheckoutOrchestrator`). `stageAuthorize` is reached only once `markPaymentPending` has committed the reservation id and expiry Inventory returned, so a refused or failed hold ends the pipeline before any Payments call is made.
 - [ ] After payment authorization, Inventory atomically transitions the still-valid reservation `HELD -> CONFIRMED` and its seats `HELD -> SOLD` before Orders becomes `CONFIRMED`.
