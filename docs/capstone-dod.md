@@ -163,7 +163,10 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
       `/api/catalog`, `/api/orders`, `/api/notifications`) and `eurotransit-keycloak`; Inventory and Payments
       have none. Both require the `service` authority on their APIs (`SecurityConfig`), and the user context
       travels with Orders' calls: `X-User-Id` to Inventory, `principalId` in the Payments request.
-- [ ] The cluster/proof target uses Keycloak as the OIDC provider; local development may use a mock OIDC issuer or fixed development JWTs without changing production API contracts.
+- [x] The cluster/proof target uses Keycloak as the OIDC provider; local development may use a mock OIDC issuer or fixed development JWTs without changing production API contracts.
+      *AKS check, 2026-10-16 (Orders owner):* the issuer is `https://g05.cpo2026.it/realms/eurotransit`
+      (Keycloak, `eurotransit-keycloak-0`, operator-managed); the load-test client, the demo customers and
+      the operations user all obtained their tokens there for the 2026-10-16 runs.
 - [ ] Final cluster/demo proof does not depend on mocked services or fake in-memory substitutes for core infrastructure.
 - [ ] TLS is terminated at Traefik in the cluster environment.
 - [ ] Secrets are stored through SealedSecrets or an equivalent GitOps-safe mechanism.
