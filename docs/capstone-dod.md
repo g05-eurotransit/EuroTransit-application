@@ -99,7 +99,12 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
       CI workflows and `justfile`; `EuroTransit-configuration` holds the Helm chart, the Argo CD
       Applications, platform bootstrap, SealedSecrets, alert rules and the operations docs. The same day a
       change went through both: application #146 and a CI bump to configuration (`e13c464`).
-- [ ] CI builds/tests/publishes immutable images and updates the configuration repository.
+- [x] CI builds/tests/publishes immutable images and updates the configuration repository.
+      *AKS check, 2026-10-16 (Orders owner):* `ci.yml` runs `./gradlew build` (compile and tests) and the
+      image builds on every pull request; `docker-gitops.yml` (run 38914956866) built Orders from `dev`,
+      pushed `eurotransitregistry.azurecr.io/eurotransit/orders:45357ef` (a commit-SHA tag, never `latest`)
+      and committed the tag to configuration as `ci: bump EuroTransit images to 45357ef` (`e13c464`).
+      **Limit:** `docker-gitops.yml` does not re-run the tests itself; the test gate is the pull request.
 - [ ] ArgoCD reconciles the cluster state; CI holds no cluster credentials.
 - [ ] Orders canary is demonstrated with metric-gated promote/abort.
 - [ ] Catalog blue/green is demonstrated with fast rollback.
