@@ -167,7 +167,11 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
       *AKS check, 2026-10-16 (Orders owner):* the issuer is `https://g05.cpo2026.it/realms/eurotransit`
       (Keycloak, `eurotransit-keycloak-0`, operator-managed); the load-test client, the demo customers and
       the operations user all obtained their tokens there for the 2026-10-16 runs.
-- [ ] Final cluster/demo proof does not depend on mocked services or fake in-memory substitutes for core infrastructure.
+- [x] Final cluster/demo proof does not depend on mocked services or fake in-memory substitutes for core infrastructure.
+      *AKS check, 2026-10-16 (Orders owner):* the cluster runs Kafka through Strimzi
+      (`eurotransit-kafka`), PostgreSQL through CloudNativePG (`eurotransit-postgres`), Debezium Connect,
+      Keycloak and the Stripe sandbox; the 2026-10-16 experiments
+      (configuration #60) went through all of them.
 - [ ] TLS is terminated at Traefik in the cluster environment.
 - [ ] Secrets are stored through SealedSecrets or an equivalent GitOps-safe mechanism.
 - [x] Money-path audit logs include correlation ID, principal ID, order ID, and outcome, while excluding secrets and payment details.
