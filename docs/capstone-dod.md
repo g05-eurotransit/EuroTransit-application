@@ -105,7 +105,11 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
       pushed `eurotransitregistry.azurecr.io/eurotransit/orders:45357ef` (a commit-SHA tag, never `latest`)
       and committed the tag to configuration as `ci: bump EuroTransit images to 45357ef` (`e13c464`).
       **Limit:** `docker-gitops.yml` does not re-run the tests itself; the test gate is the pull request.
-- [ ] ArgoCD reconciles the cluster state; CI holds no cluster credentials.
+- [x] ArgoCD reconciles the cluster state; CI holds no cluster credentials.
+      *AKS check, 2026-10-16 (Orders owner):* the bump above reached the cluster only through Argo CD:
+      `eurotransit-marketplace` synced `e13c464` and rolled Orders out at 14:27 UTC; configuration #58 was
+      likewise applied by `eurotransit-connectors` at 13:56. The CI workflows of both repositories use only
+      `ACR_USERNAME`/`ACR_PASSWORD` and `CONFIG_REPO_PAT` — no kubeconfig, Azure or cluster secret.
 - [ ] Orders canary is demonstrated with metric-gated promote/abort.
 - [ ] Catalog blue/green is demonstrated with fast rollback.
 - [ ] The team explains why rolling and all-at-once are not used for the critical path.
