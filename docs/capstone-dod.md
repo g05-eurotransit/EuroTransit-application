@@ -158,7 +158,11 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
       token's audience; within the one realm, roles are the boundary.
 - [x] Order reads are authorized by owner identity or by an explicit operational/admin role.
       *Orders, 2026-09-18:* `OrderController` resolves the principal from the JWT `sub` and answers `404`, not `403`, to a non-owner, so the API never reveals that another customer's order exists. The explicit exception is the `operations` role, and it is deliberately **not** widened on the history endpoint — there the principal filter is applied in SQL (`OrderRepository.findHistoryFirstPage`) so a later controller edit cannot bypass it. Covered by `OrderControllerOwnershipTest`.
-- [ ] Inventory and Payments are internal service-to-service APIs, not public endpoints, and require service credentials plus propagated user context.
+- [x] Inventory and Payments are internal service-to-service APIs, not public endpoints, and require service credentials plus propagated user context.
+      *AKS check, 2026-10-16 (Orders owner):* the only IngressRoutes are `eurotransit-public-api` (frontend,
+      `/api/catalog`, `/api/orders`, `/api/notifications`) and `eurotransit-keycloak`; Inventory and Payments
+      have none. Both require the `service` authority on their APIs (`SecurityConfig`), and the user context
+      travels with Orders' calls: `X-User-Id` to Inventory, `principalId` in the Payments request.
 - [ ] The cluster/proof target uses Keycloak as the OIDC provider; local development may use a mock OIDC issuer or fixed development JWTs without changing production API contracts.
 - [ ] Final cluster/demo proof does not depend on mocked services or fake in-memory substitutes for core infrastructure.
 - [ ] TLS is terminated at Traefik in the cluster environment.
