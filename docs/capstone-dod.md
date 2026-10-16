@@ -72,7 +72,12 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
       real attempt — replaying a decline would block the refund for good.
 - [x] Duplicate `order-placed` events and retried payment authorizations cannot double-reserve or double-charge.
       *Orders, 2026-10-08:* Orders dispatches every redelivery on the durable order state and calls with one key per order (`inv-{orderId}`, `pay-{orderId}`): `CheckoutPipelineIntegrationTest` — "a redelivered order-placed is idempotent and does not reprocess a terminal order", "a crash between the Inventory sale and the Orders commit converges without duplicate events". Inventory cannot store a second reservation for an order even after its idempotency record expires (`uk_reservations_order_id`; "reserveSeats should return 409 when orderId already exists in DB…"), and Payments replays a stored authorization for a repeated key ("authorize - returns cached response on idempotency match"). On compose, a 40-record backlog redelivered across a stop and a stop while Payments was unreachable left exactly one authorization per order ([shutdown report](operations/reports/2026-10-orders-shutdown-local.md)). **Limit:** Payments keeps idempotency records for 24h and `payment_authorizations` has no per-order uniqueness, so an order left in `PAYMENT_PENDING` for more than a day and then redelivered would be authorized again; today that is prevented upstream — the hold expires after 10 minutes and a redrive of a `PAYMENT_PENDING` order whose hold expired is refused ("a redrive is refused when the hold behind a PAYMENT_PENDING order has already expired").
-- [ ] A delayed hold replay returns the reservation's current state and cannot return stale `HELD` or create a second reservation for the same order.
+- [x] A delayed hold replay returns the reservation's current state and cannot return stale `HELD` or create a second reservation for the same order.
+      *Checked by the Orders owner, 2026-10-16 (Inventory: Carmelo):* a replay with the same key re-reads the reservation
+      (`IdempotencyService.processExistingRecord`): `CONFIRMED` is returned as confirmed, `EXPIRED`,
+      `CANCELLED` or a `HELD` past its deadline by the database clock answer `409`, so a stale `HELD` is
+      never returned; a changed payload is `409 IDEMPOTENCY_CONFLICT`; `uk_reservations_order_id` blocks a
+      second reservation for the order. Covered by `IdempotencyServiceTest` and the concurrent same-key test.
 
 ## 3. Resilience Engineering
 
