@@ -187,3 +187,13 @@ Throw `ApiException(status, code, message)` from `it.polito.cpo.observability` f
 | Tempo | http://localhost:3200 | OTLP trace ingest on 4318 |
 
 Prometheus reaches services running on your host via `host.docker.internal` (works on macOS/Windows; on Linux it is mapped through `extra_hosts: host-gateway`).
+
+### Scrape Labels and Dashboard Compatibility
+
+Local Grafana dashboards (provisioned from `docker/observability/grafana/provisioning/dashboards/`) query Prometheus metrics using cluster-aligned selectors such as `{namespace="eurotransit", app="<service>"}`.
+
+To make these dashboards work locally without divergent PromQL queries, `docker/observability/prometheus.yml` statically decorates every local scrape target (both container `:8080` and host `8081-8085`) with `namespace: eurotransit` and `app: <service>`, mirroring the labels attached by Kubernetes `ServiceMonitor` resources in the cluster.
+
+> [!WARNING]
+> Do not strip or rename `namespace` or `app` labels in `docker/observability/prometheus.yml`. Removing them will silently break panel queries across all local Grafana dashboards, resulting in `No Data`.
+

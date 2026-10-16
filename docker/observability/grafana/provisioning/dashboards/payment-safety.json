@@ -1,0 +1,89 @@
+{
+  "title": "EuroTransit / Payment Safety",
+  "description": "KEEP IN SYNC with EuroTransit-configuration platform/kube-prometheus-stack/dashboards/payment-safety.configmap.yaml. A local dashboard that measures payment safety differently from production creates blind spots.",
+  "uid": "eurotransit-payment-safety",
+  "tags": ["eurotransit", "payments", "safety"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 2,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "title": "Circuit Breaker State (Orders -> Payments)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "resilience4j_circuitbreaker_state{application=\"orders\", name=\"payments\"}",
+          "legendFormat": "{{state}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "Inactive", "color": "transparent" },
+                "1": { "text": "Active", "color": "green" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "title": "Authorization Rate (2xx)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_requests_seconds_count{application=\"payments\", uri=\"/api/payments/authorize\", status=~\"2..\"}[5m]))",
+          "legendFormat": "Auths/s"
+        }
+      ]
+    },
+    {
+      "title": "Refund Rate (2xx)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_requests_seconds_count{application=\"payments\", uri=\"/api/payments/refund\", status=~\"2..\"}[5m]))",
+          "legendFormat": "Refunds/s"
+        }
+      ]
+    },
+    {
+      "title": "Declines and Failures (422 and 5xx)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_requests_seconds_count{application=\"payments\", status=~\"422|5..\"}[5m]))",
+          "legendFormat": "Errors/s"
+        }
+      ]
+    },
+    {
+      "title": "Idempotency Conflicts (409)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_requests_seconds_count{application=\"payments\", status=\"409\"}[5m]))",
+          "legendFormat": "Idempotency Conflicts/s"
+        }
+      ]
+    }
+  ]
+}

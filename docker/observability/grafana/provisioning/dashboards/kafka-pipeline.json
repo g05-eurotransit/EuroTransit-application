@@ -1,0 +1,122 @@
+{
+  "title": "EuroTransit / Kafka Pipeline",
+  "description": "KEEP IN SYNC with EuroTransit-configuration platform/kube-prometheus-stack/dashboards/kafka-pipeline.configmap.yaml. A local dashboard that measures kafka pipeline differently from production creates blind spots.",
+  "uid": "eurotransit-kafka-pipeline",
+  "tags": ["eurotransit", "kafka", "pipeline", "async"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "title": "Consumer Lag by Group",
+      "description": "Uses kafka_consumergroup_lag (cluster exporter). Falls back to Spring Kafka client fetch-position lag (kafka_consumer_fetch_manager_records_lag) in local compose. Note: client fetch lag cannot detect a completely stopped/dead consumer group.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (consumergroup) (kafka_consumergroup_lag{consumergroup=~\"orders|notifications|orders-dlt\"}) or sum by (consumergroup) (label_replace(kafka_consumer_fetch_manager_records_lag{application=~\"orders|notifications\"}, \"consumergroup\", \"$1\", \"application\", \"(.*)\"))",
+          "legendFormat": "{{consumergroup}}"
+        }
+      ]
+    },
+    {
+      "title": "Oldest In-Flight Order (Seconds)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "max by (state) (orders_pipeline_oldest_age_seconds)",
+          "legendFormat": "{{state}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2
+          }
+        }
+      }
+    },
+    {
+      "title": "Checkout Outcomes",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(orders_checkout_completed_total[5m]))",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "title": "DLT Exhausted Events (Permanent Failures)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum by (failure_class) (increase(orders_events_exhausted_total[5m]))",
+          "legendFormat": "{{failure_class}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": ".*" },
+            "properties": [ { "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } } ]
+          }
+        ]
+      }
+    },
+    {
+      "title": "DLT Consumer Processing Outcomes",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum by (result) (increase(orders_events_dlt_total[5m]))",
+          "legendFormat": "DLT Result: {{result}}"
+        }
+      ]
+    },
+    {
+      "title": "Open Reconciliation Records",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum by (kind) (orders_reconciliation_open)",
+          "legendFormat": "{{kind}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 80 } } }
+    },
+    {
+      "title": "Oldest Reconciliation Incident Age (Seconds)",
+      "type": "stat",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "expr": "max(orders_reconciliation_oldest_age_seconds)",
+          "legendFormat": "Max Age"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 300 },
+              { "color": "red", "value": 900 }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
