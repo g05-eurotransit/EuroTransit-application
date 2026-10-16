@@ -176,7 +176,10 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
       *AKS check, 2026-10-16 (Orders owner):* both IngressRoutes use the `websecure` entry point with the
       cert-manager certificate `eurotransit-production-tls` (Ready in `eurotransit` and `keycloak`); plain
       HTTP to `g05.cpo2026.it` answers `301` to HTTPS.
-- [ ] Secrets are stored through SealedSecrets or an equivalent GitOps-safe mechanism.
+- [x] Secrets are stored through SealedSecrets or an equivalent GitOps-safe mechanism.
+      *AKS check, 2026-10-16 (Orders owner):* configuration keeps only ciphertext
+      (`platform/environments/aks/secrets/*.sealedsecret.yaml`); on the cluster all 14 SealedSecrets are
+      `Synced`, `eurotransit-secrets` is Synced/Healthy, and the controller is installed outside Argo CD.
 - [x] Money-path audit logs include correlation ID, principal ID, order ID, and outcome, while excluding secrets and payment details.
       *Orders, 2026-10-08:* Orders coordinates the money path and writes one `audit` line per decision — checkout accepted/replayed/rejected, confirmed/failed, cancel, refund requested and settled, operator redrive and resolve — with `correlationId`, `principalId`, `orderId`, `outcome` (`MoneyPathAudit`; fields and vocabulary in [observability-conventions.md](design/observability-conventions.md#money-path-audit-log)). Only identifiers and closed-vocabulary values reach the line; a test asserts the payment token and email never do. Covered by `MoneyPathAuditTest`, `CheckoutOrchestratorTest`, `RefundOrchestratorTest`, and `CheckoutPipelineIntegrationTest` (one correlation id from the HTTP accept to the consumer's outcome). Compose proof: a checkout, a price-mismatch refusal and a refund produced five lines, every one with all four fields — the HTTP lines under the caller's `sub`, the pipeline lines under the owner and the client's `X-Correlation-Id` — and no token or email. Inventory and Payments act on Orders' calls under service credentials; their own logs are not audit lines.
 - [ ] No real card data or live charges are handled; Payments integrates with a provider sandbox/test API such as Stripe test mode or PayPal Sandbox.
