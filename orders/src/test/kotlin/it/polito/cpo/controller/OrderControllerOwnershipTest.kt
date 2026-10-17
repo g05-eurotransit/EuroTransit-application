@@ -33,12 +33,12 @@ import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder
 import org.springframework.http.MediaType
 import org.springframework.test.web.reactive.server.WebTestClient
 import org.mockito.Mockito.mock
+import org.mockito.Mockito.doAnswer
+import org.mockito.ArgumentMatchers.any
 import reactor.core.publisher.Mono
 import java.math.BigDecimal
 import java.time.Instant
 import java.time.LocalDate
-import java.time.LocalTime
-import java.time.ZoneId
 import java.time.LocalDateTime
 import java.time.OffsetDateTime
 import java.util.UUID
@@ -73,7 +73,7 @@ class OrderControllerOwnershipTest @Autowired constructor(
         catalogClient.lastRouteId = null
         catalogClient.failNextWith = null
         catalogClient.next = RouteOutcome.Found(
-            RouteSchedule("R1", LocalTime.of(23, 59), ZoneId.of("Europe/Rome")),
+            routeDepartingIn(1),
         )
     }
 
@@ -601,7 +601,7 @@ class OrderControllerOwnershipTest @Autowired constructor(
         // bookable. 409 rather than 400: the date is today and the request is well formed -- the
         // resource is valid and its state is wrong.
         catalogClient.next = RouteOutcome.Found(
-            RouteSchedule("R1", LocalTime.of(0, 1), ZoneId.of("Europe/Rome")),
+            routeDepartingIn(-1),
         )
 
         webTestClient.get().uri("/api/orders/seat-availability?routeId=R1&travelDate=${LocalDate.now()}")
@@ -618,7 +618,7 @@ class OrderControllerOwnershipTest @Autowired constructor(
     @Test
     fun `a same-day run that has not departed yet still returns its seat map`() {
         catalogClient.next = RouteOutcome.Found(
-            RouteSchedule("R1", LocalTime.of(23, 59), ZoneId.of("Europe/Rome")),
+            routeDepartingIn(1),
         )
         inventoryReadClient.next = SeatAvailabilityOutcome.Found(listOf(SeatAvailability("1A", true)))
 
@@ -772,9 +772,9 @@ class OrderControllerOwnershipTest @Autowired constructor(
      * orchestrator, which is a mock here.
      */
     open class FakeCatalogClient : CatalogClient {
-        /** Default: a route that leaves late enough that "today" has not departed during a test run. */
+        /** Default: a departure still in the future, independent of the runner/station time zones. */
         var next: RouteOutcome = RouteOutcome.Found(
-            RouteSchedule("R1", LocalTime.of(23, 59), ZoneId.of("Europe/Rome")),
+            routeDepartingIn(1),
         )
         var lastRouteId: String? = null
 
@@ -829,4 +829,14 @@ private fun jwtFor(token: String): Jwt {
         .expiresAt(now.plusSeconds(300))
         .claim("realm_access", mapOf("roles" to roles))
         .build()
+}
+
+/**
+ * This controller slice tests the departure decision, not Catalog's date/zone arithmetic.
+ * A hard-coded 23:59 Europe/Rome departure is already past after 22:00 UTC in summer.
+ * Keep the supplied departure an hour on the intended side of now, including near midnight.
+ */
+private fun routeDepartingIn(hours: Long): RouteSchedule = mock(RouteSchedule::class.java).also { route ->
+    doAnswer { OffsetDateTime.now().plusHours(hours) }
+        .`when`(route).departureAt(any(LocalDate::class.java) ?: LocalDate.MIN)
 }

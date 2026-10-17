@@ -3,6 +3,7 @@ package it.polito.cpo.integration
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException
 import io.github.resilience4j.circuitbreaker.CircuitBreaker
 import io.micrometer.core.instrument.MeterRegistry
+import io.r2dbc.spi.R2dbcException
 import it.polito.cpo.client.AuthorizationOutcome
 import it.polito.cpo.client.CatalogClient
 import it.polito.cpo.client.ConfirmReservationOutcome
@@ -54,11 +55,15 @@ import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Import
 import org.springframework.context.annotation.Primary
+import org.springframework.dao.NonTransientDataAccessResourceException
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.springframework.kafka.config.KafkaListenerEndpointRegistry
 import org.springframework.kafka.core.KafkaTemplate
 import org.springframework.kafka.core.ProducerFactory
 import org.springframework.kafka.listener.ListenerExecutionFailedException
+import org.springframework.kafka.listener.DefaultErrorHandler
+import org.springframework.kafka.listener.ErrorHandlingUtils
+import org.springframework.kafka.listener.RetryListener
 import org.springframework.kafka.support.KafkaHeaders
 import org.springframework.kafka.test.context.EmbeddedKafka
 import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder
@@ -193,6 +198,7 @@ class CheckoutPipelineIntegrationTest {
     @Autowired private lateinit var operations: ReconciliationOperationsService
     @Autowired private lateinit var reconciliationService: ReconciliationService
     @Autowired private lateinit var listenerRegistry: KafkaListenerEndpointRegistry
+    @Autowired private lateinit var kafkaErrorHandler: DefaultErrorHandler
 
     @Test
     fun `happy path drives the order through the outbox and Kafka to CONFIRMED`() = runBlocking {
@@ -429,6 +435,52 @@ class CheckoutPipelineIntegrationTest {
         assertEquals(1, payment.authorizedOrderIds.count { it == response.orderId })
         assertTrue(openRecords(response.orderId).isEmpty())
         assertEquals(exhaustedBefore, exhaustedCount("order-placed", FailureClassifier.DEPENDENCY_ERROR))
+    }
+
+    @Test
+    fun `a PostgreSQL resource failure after the hold recovers beyond the old delivery budget`() = runBlocking {
+        val response = orchestrator.checkout(request(), "it-pg-recovery-${UUID.randomUUID()}", "user-1", "user-1@example.com")
+        val orderId = response.orderId
+        val exhaustedBefore = exhaustedCount("order-placed", FailureClassifier.DEPENDENCY_ERROR)
+        // PostgreSQL itself raises SQLSTATE 08006 at the Orders write after Inventory has held the
+        // seats. This tests driver/Spring translation and the real Kafka error handler, not physical
+        // connection loss or CNPG promotion. Six failed deliveries exceed the old four-delivery budget.
+        armHoldWriteFailures(orderId, failures = 6)
+        val failures = CopyOnWriteArrayList<Exception>()
+        kafkaErrorHandler.setRetryListeners(RetryListener { record, exception, _ ->
+            if (record.key() == orderId.toString()) failures.add(exception)
+        })
+        try {
+            relayOrderPlaced(orderId) // One relay only: all subsequent attempts belong to Kafka.
+            val reserving = awaitStatus(orderId, OrderStatus.RESERVING)
+            assertEquals(null, reserving.reservationId)
+            assertFalse(payment.authorizedOrderIds.contains(orderId))
+
+            val terminal = awaitTerminal(orderId)
+            assertEquals(OrderStatus.CONFIRMED, terminal.status)
+            assertEquals("res-$orderId", terminal.reservationId)
+            assertEquals(7, inventory.reservedOrderIds.count { it == orderId })
+            assertEquals(6, failures.size)
+            failures.forEach { failure ->
+                val cause = ErrorHandlingUtils.findRootCause(failure)
+                assertTrue(cause is NonTransientDataAccessResourceException, "Unexpected translated failure: $cause")
+                val driverFailure = generateSequence<Throwable>(cause) { it.cause }.filterIsInstance<R2dbcException>().first()
+                assertEquals("08006", driverFailure.sqlState)
+            }
+            assertEquals(List(7) { "inv-$orderId" }, inventory.holdKeys.filter { it.first == orderId }.map { it.second })
+            assertEquals(1, inventory.holdsByKey.values.count { it.reservationId == "res-$orderId" })
+            assertEquals(1, payment.authorizedOrderIds.count { it == orderId })
+            assertEquals(listOf("pay-$orderId"), payment.authorizeKeys.filter { it.first == orderId }.map { it.second })
+            assertFalse(inventory.releasedReservationIds.contains("res-$orderId"))
+            assertFalse(payment.refundedOrderIds.contains(orderId))
+            assertTrue(openRecords(orderId).isEmpty())
+            assertEquals(exhaustedBefore, exhaustedCount("order-placed", FailureClassifier.DEPENDENCY_ERROR))
+            assertEquals(1, outboxRows(orderId, "order-confirmed").size)
+            assertEquals(1, outboxRows(orderId, "notification-requested").size)
+        } finally {
+            kafkaErrorHandler.setRetryListeners()
+            exec("DROP TRIGGER IF EXISTS test_fail_hold_write ON orders")
+        }
     }
 
     @Test
@@ -1537,6 +1589,27 @@ class CheckoutPipelineIntegrationTest {
 
     private suspend fun disarmCommitCrash() = exec("DROP TRIGGER IF EXISTS test_crash_confirm ON orders")
 
+    /** A sequence advances across rollback, so the injected resource failure ends after six writes. */
+    private suspend fun armHoldWriteFailures(orderId: UUID, failures: Int) {
+        exec("CREATE SEQUENCE IF NOT EXISTS test_hold_write_seq")
+        exec("SELECT setval('test_hold_write_seq', 1, false)")
+        exec(
+            """
+            CREATE OR REPLACE FUNCTION test_fail_hold_write() RETURNS trigger AS ${'$'}${'$'}
+            BEGIN
+                IF NEW.status = 'PAYMENT_PENDING' AND NEW.id = '$orderId'::uuid
+                   AND nextval('test_hold_write_seq') <= $failures THEN
+                    RAISE EXCEPTION 'simulated database resource failure after Inventory hold'
+                        USING ERRCODE = '08006';
+                END IF;
+                RETURN NEW;
+            END; ${'$'}${'$'} LANGUAGE plpgsql
+            """.trimIndent(),
+        )
+        exec("DROP TRIGGER IF EXISTS test_fail_hold_write ON orders")
+        exec("CREATE TRIGGER test_fail_hold_write BEFORE UPDATE ON orders FOR EACH ROW EXECUTE FUNCTION test_fail_hold_write()")
+    }
+
     /**
      * Fails the first [failures] attempts to write a reconciliation record for [orderId], standing in
      * for a database outage while the dead-letter consumer records the incident. Same sequence trick as
@@ -1587,6 +1660,8 @@ class CheckoutPipelineIntegrationTest {
      */
     class ControllableInventoryClient : InventoryClient {
         val reservedOrderIds = CopyOnWriteArrayList<UUID>()
+        val holdKeys = CopyOnWriteArrayList<Pair<UUID, String>>()
+        val holdsByKey = ConcurrentHashMap<String, HoldOutcome.Held>()
 
         /** orderId -> the observation type the hold call would have been a child of. */
         val holdParentObservation = ConcurrentHashMap<UUID, String>()
@@ -1620,9 +1695,12 @@ class CheckoutPipelineIntegrationTest {
             userId: String,
         ): HoldOutcome {
             reservedOrderIds.add(request.orderId)
+            holdKeys.add(request.orderId to idempotencyKey)
             parentObservationContextType()?.let { holdParentObservation[request.orderId] = it }
-            request.seats.forEach { heldTriples.add(Triple(request.routeId, request.travelDate, it)) }
-            return HoldOutcome.Held("res-${request.orderId}", OffsetDateTime.now().plusMinutes(10))
+            return holdsByKey.computeIfAbsent(idempotencyKey) {
+                request.seats.forEach { heldTriples.add(Triple(request.routeId, request.travelDate, it)) }
+                HoldOutcome.Held("res-${request.orderId}", OffsetDateTime.now().plusMinutes(10))
+            }
         }
 
         override suspend fun confirmReservation(reservationId: String, orderId: UUID): ConfirmReservationOutcome {
@@ -1686,6 +1764,7 @@ class CheckoutPipelineIntegrationTest {
 
     class ControllablePaymentClient : PaymentClient {
         val authorizedOrderIds = CopyOnWriteArrayList<UUID>()
+        val authorizeKeys = CopyOnWriteArrayList<Pair<UUID, String>>()
         /** The full requests, so what actually reaches Payments — amount and currency — is assertable. */
         val authorizeRequests = CopyOnWriteArrayList<PaymentRequest>()
         val refundedOrderIds = CopyOnWriteArrayList<UUID>()
@@ -1712,6 +1791,7 @@ class CheckoutPipelineIntegrationTest {
             idempotencyKey: String,
             correlationId: String,
         ): AuthorizationOutcome {
+            authorizeKeys.add(request.orderId to idempotencyKey)
             if (request.paymentMethodToken == DECLINE_TOKEN) {
                 return AuthorizationOutcome.Declined("DECLINED")
             }
