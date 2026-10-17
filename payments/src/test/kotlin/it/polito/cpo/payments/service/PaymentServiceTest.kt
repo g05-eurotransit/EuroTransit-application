@@ -63,6 +63,7 @@ class PaymentServiceTest {
         assertEquals("ch_123", response.providerReference)
         assertEquals(1, paymentAuthorizationRepository.saved.size)
         assertEquals(1, idempotencyRepository.saved.size)
+        assertEquals(listOf("order-123"), providerAdapter.authorizedOrderIds)
 
         assertEquals(1, outboxEventRepository.saved.size)
         val row = outboxEventRepository.saved.single()
@@ -351,9 +352,18 @@ class PaymentServiceTest {
         var refundThrows = false
         var refundCalls = 0
         val refundKeys = mutableListOf<String>()
+        val authorizedOrderIds = mutableListOf<String>()
 
-        override suspend fun authorize(amount: BigDecimal, currency: String, token: String, idempotencyKey: String) =
-            ProviderAuthorizationResult(true, "ch_123", null)
+        override suspend fun authorize(
+            orderId: String,
+            amount: BigDecimal,
+            currency: String,
+            token: String,
+            idempotencyKey: String,
+        ): ProviderAuthorizationResult {
+            authorizedOrderIds.add(orderId)
+            return ProviderAuthorizationResult(true, "ch_123", null)
+        }
 
         override suspend fun refund(ref: String, amount: BigDecimal?, idempotencyKey: String): ProviderRefundResult {
             refundCalls++

@@ -78,7 +78,7 @@ class PaymentService(
 
         // 2. Call provider (outside any DB transaction)
         val result = try {
-            providerAdapter.authorize(amount, currency, paymentMethodToken, idempotencyKey)
+            providerAdapter.authorize(orderId, amount, currency, paymentMethodToken, idempotencyKey)
         } catch (e: Exception) {
             log.error("Payment provider failed", e)
             return PaymentResponse(PaymentStatus.DEPENDENCY_FAILED, null, "PROVIDER_UNAVAILABLE")
