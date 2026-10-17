@@ -857,6 +857,46 @@ class CheckoutPipelineIntegrationTest {
         assertEquals(0, payment.authorizedOrderIds.count { it == orderId })
     }
 
+    /** A customer-hold order paid and exhausted past its hold; the window recorded or not. */
+    private suspend fun expiredCustomerHoldPaymentPending(tag: String, windowOpened: Boolean): UUID {
+        val user = "user-$tag-${UUID.randomUUID()}"
+        val orderId = orchestrator.checkout(request(token = null), "it-$tag-${UUID.randomUUID()}", user, null).orderId
+        seedState(orderId, OrderStatus.PAYMENT_PENDING, "res-$orderId")
+        seedHoldExpiry(orderId, OffsetDateTime.now().minusHours(2))
+        databaseClient.sql("UPDATE orders SET payment_window_opened = :w, payment_method_token = 'tok-123' WHERE id = :id")
+            .bind("w", windowOpened).bind("id", orderId).then().awaitSingleOrNull()
+        openIncident(orderId, ReconciliationKind.DELIVERY_EXHAUSTED)
+        return orderId
+    }
+
+    @Test
+    fun `an expired customer-hold order whose payment window never opened can be redriven, and fails unpaid`() = runBlocking {
+        // ADR-016: Inventory was down at the payment, so the window was never recorded and Payments was
+        // never called. Redriving asks for the window, Inventory refuses the expired hold, and the order
+        // fails with no money moved -- no abandonment, no provider check for a charge that cannot exist.
+        val orderId = expiredCustomerHoldPaymentPending("redrive-nowin", windowOpened = false)
+        inventory.refuseWindowWith[orderId] = InventoryRefusalCode.RESERVATION_EXPIRED
+
+        val accepted = operations.redrive(orderId, "redrive-nowin-$orderId", "ops-1")
+        assertEquals(OrderStatus.PAYMENT_PENDING, accepted.orderStatus)
+        relayLatestOrderPlaced(orderId)
+
+        assertEquals(OrderStatus.FAILED, awaitTerminal(orderId).status)
+        assertEquals(0, payment.authorizedOrderIds.count { it == orderId })
+        assertEquals(0, payment.refundedOrderIds.count { it == orderId })
+        assertTrue(openRecords(orderId).isEmpty(), "the exhausted delivery closes with the order")
+    }
+
+    @Test
+    fun `an expired customer-hold order whose window opened is still refused, it may have been charged`() = runBlocking {
+        val orderId = expiredCustomerHoldPaymentPending("redrive-win", windowOpened = true)
+
+        val ex = assertFailsWith<ApiException> { operations.redrive(orderId, "redrive-win-$orderId", "ops-1") }
+
+        assertEquals("RESERVATION_HOLD_EXPIRED", ex.code)
+        assertEquals(1, openRecords(orderId).size)
+    }
+
     @Test
     fun `a redrive of a PAYMENT_PENDING order whose hold is still live is accepted`() = runBlocking {
         // The negative half: the refusal is about an expired hold, not about PAYMENT_PENDING itself.

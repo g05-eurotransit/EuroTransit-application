@@ -57,8 +57,9 @@ Proposed by the Orders owner; the team confirms them in [slo-observability.md](s
   from the hold. For a customer-hold order it is **T2**, ten minutes from the payment, once the payment
   window opened — the column is overwritten when it opens, so the list and the redrive check need
   nothing new. If the window never opened (Inventory did not answer at the payment), it is still
-  **T1**, the customer's deadline, which may already be close: work those first. The list's ordering
-  by `reservationExpiresAt` already puts them first.
+  **T1**, the customer's deadline, which may already be close. Such an order stays redrivable even
+  past it: Payments has never been called for it, so the redrive asks Inventory for the window, gets
+  the expired hold refused, and the order fails with no money moved — no abandonment needed.
 
 The time line for an outage longer than the budget, measured on compose, leaves the operator a few
 minutes, not ten. "Payment starts" is the hold in the direct flow and the payment submission in the
@@ -100,7 +101,7 @@ Redriving into the same outage only exhausts the budget again.
 | `kind` | `orderStatus` | Action |
 | --- | --- | --- |
 | `DELIVERY_EXHAUSTED` | `ACCEPTED`, `RESERVING`, `CONFIRMING_INVENTORY`, `COMPENSATING` | Redrive. |
-| `DELIVERY_EXHAUSTED` | `PAYMENT_PENDING` | Redrive **before `reservationExpiresAt`**. After it the redrive is refused: abandon instead (step 5b). |
+| `DELIVERY_EXHAUSTED` | `PAYMENT_PENDING` | Redrive **before `reservationExpiresAt`**. After it the redrive is refused: abandon instead (step 5b). Exception: a customer-hold order whose payment window never opened is still accepted, and fails unpaid (ADR-016). |
 | `DELIVERY_EXHAUSTED` | `HELD_AWAITING_PAYMENT` | Nothing to do: a later delivery took the hold and the order is waiting for the customer (ADR-016). A redrive is harmless and useless — the order parks again. The incident closes when the order ends: paid and terminal, cancelled, or cancelled by the T1 expiry job at most ten minutes later. |
 | `DELIVERY_EXHAUSTED`, `PAYMENT_REVERSAL_FAILURE`, `SEAT_RETURN_FAILURE` | `REFUNDING` | Redrive: it resumes the refund pipeline. |
 | `PAYMENT_REVERSAL_FAILURE` | `COMPENSATING` | Redrive: it retries the reversal. |

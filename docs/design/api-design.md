@@ -377,7 +377,10 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     treated as terminal here: the money or the seat may still be unresolved, and closing its incident
     on redrive would be exactly the failure this endpoint exists to fix.
   - A `payment_pending` order whose seat hold has already expired returns
-    `409 RESERVATION_HOLD_EXPIRED` and leaves the incident open; its exit is `abandon` below. That phase resumes by authorizing and
+    `409 RESERVATION_HOLD_EXPIRED` and leaves the incident open; its exit is `abandon` below. The one
+    exception is a customer-hold order whose payment window was never recorded (ADR-016): it resumes by
+    asking Inventory for the window, not by authorizing, so the redrive is accepted and the expired hold
+    makes the order fail with no money moved. That phase resumes by authorizing and
     the hold is gone, so the redrive would buy nothing but a charge and its reversal. Only that phase
     is refused: the others either re-take the hold or drive the order to a resolution it needs. The
     same comparison is deliberately not made at authorization time, where the deadline is an Inventory

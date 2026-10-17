@@ -135,8 +135,17 @@ class ReconciliationOperationsService(
             // Orders' clock at that boundary would throw away sales Inventory would still honour. By
             // redrive time the deadline is long past, the ambiguity is gone, and the operator gets an
             // honest refusal instead of triggering a charge and its reversal with one click.
+            //
+            // One PAYMENT_PENDING order resumes WITHOUT authorizing (ADR-016): a customer-hold order whose
+            // payment window was never recorded. Its resume action is the window request, which an
+            // expired hold makes Inventory refuse, and the order then fails with no money moved — Payments
+            // is only ever called after the window is recorded. Refusing it here would leave abandonment as
+            // the only exit, and abandonment ends in PAYMENT_OUTCOME_UNKNOWN: an operator checking the
+            // provider for an order Payments never saw.
+            val resumesWithoutAuthorizing = order.paymentDeferred && !order.paymentWindowOpened
             val expiresAt = order.reservationExpiresAt
             if (order.status == OrderStatus.PAYMENT_PENDING &&
+                !resumesWithoutAuthorizing &&
                 expiresAt != null &&
                 expiresAt.toInstant().isBefore(Instant.now())
             ) {

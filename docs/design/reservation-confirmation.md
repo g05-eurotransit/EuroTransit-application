@@ -213,7 +213,9 @@ attempted, a later refusal must not be read as "no money moved" (invariant 8).
 `PAYMENT_PENDING` enters `COMPENSATING` only through an operator: a delivery that
 exhausted its retries leaves the order there, and once its seat hold has expired
 the redrive refuses it, because resuming means authorizing against a hold that no
-longer exists. `POST /api/orders/{orderId}/reconciliation/abandon` (below) is that
+longer exists. A customer-hold order whose payment window was never recorded is
+the exception: it resumes with the window request, Inventory refuses the expired
+hold, and the order fails unpaid, so the redrive accepts it. `POST /api/orders/{orderId}/reconciliation/abandon` (below) is that
 order's only exit (#140). Nothing on that path authorizes.
 
 ## Reservation Confirmation API
