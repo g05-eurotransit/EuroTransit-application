@@ -97,16 +97,18 @@ Orders, the money path's coordinator, writes one line per decision that moves or
 | Field | Meaning |
 | --- | --- |
 | `correlationId` | The request's correlation id (MDC). The pipeline lines carry the id the accept put on the event, so one id joins a checkout from the HTTP accept to the consumer's outcome. |
-| `principalId` | Who the decision is attributed to: the caller (JWT `sub`) on an HTTP action, the order's owner on the asynchronous pipelines that act for them, the operator on a reconciliation action. |
+| `principalId` | Who the decision is attributed to: the caller (JWT `sub`) on an HTTP action, the order's owner on the asynchronous pipelines that act for them, the operator on a reconciliation action, and `system:hold-expiry` for the T1 expiry job (ADR-016), which nobody asked for. |
 | `orderId` | The order. `null` only for a checkout refused before an order existed. |
 | `action`, `outcome` | Closed vocabulary, below. |
 | `reason` | Only on `rejected`/`failed`: the API error code or the failure label (`FailureClassifier`), never free text. |
-| `ownerId` | Only when the principal is not the owner: a staff cancel or refund, an operator redrive or resolve. |
+| `ownerId` | Only when the principal is not the owner: a staff cancel or refund, an operator redrive or resolve, a hold closed by the expiry job. |
 
 | `action` | `outcome` |
 | --- | --- |
 | `checkout` | `accepted`, `replayed`, `rejected` |
 | `checkout.pipeline` | `confirmed`, `failed` |
+| `payment.submit` | `accepted`, `replayed`, `rejected` (ADR-016; `reason` is `HOLD_EXPIRED`, `PAYMENT_ALREADY_STARTED`, `ORDER_NOT_PAYABLE` or `IDEMPOTENCY_CONFLICT`) |
+| `hold.expiry` | `cancelled` (ADR-016: a customer hold closed at T1) |
 | `cancel` | `cancelled`, `rejected` |
 | `refund` | `accepted`, `replayed`, `rejected` |
 | `refund.pipeline` | `refunded`, `failed` (the order stays `REFUNDING`; an incident is open) |

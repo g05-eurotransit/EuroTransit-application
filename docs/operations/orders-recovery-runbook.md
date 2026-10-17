@@ -48,19 +48,25 @@ Proposed by the Orders owner; the team confirms them in [slo-observability.md](s
 - **Automatic convergence.** An accepted order caught by a dependency outage of up to about a minute
   reaches a terminal state without an operator, within about a minute of the dependency returning.
 - **Operator response.** A `DELIVERY_EXHAUSTED` incident on a `PAYMENT_PENDING` order is redriven
-  **before the order's `reservationExpiresAt`**. That is the hard limit: Inventory's hold lasts ten
-  minutes from the reservation, and past it the redrive refuses (`RESERVATION_HOLD_EXPIRED`), because
-  authorizing a payment Inventory can no longer confirm buys only a charge and its reversal. The sale
-  is then lost and the order can only be abandoned (step 5b). Other
+  **before the order's `reservationExpiresAt`**. That is the hard limit: past it the redrive refuses
+  (`RESERVATION_HOLD_EXPIRED`), because authorizing a payment Inventory can no longer confirm buys only
+  a charge and its reversal. The sale is then lost and the order can only be abandoned (step 5b). Other
   phases stay redrivable after the hold expires (they re-take the hold, or let Inventory refuse and the
   pipeline compensate), but should be handled within the same window.
+- **Which deadline `reservationExpiresAt` is (ADR-016).** For a direct-flow order it is ten minutes
+  from the hold. For a customer-hold order it is **T2**, ten minutes from the payment, once the payment
+  window opened — the column is overwritten when it opens, so the list and the redrive check need
+  nothing new. If the window never opened (Inventory did not answer at the payment), it is still
+  **T1**, the customer's deadline, which may already be close: work those first. The list's ordering
+  by `reservationExpiresAt` already puts them first.
 
 The time line for an outage longer than the budget, measured on compose, leaves the operator a few
-minutes, not ten:
+minutes, not ten. "Payment starts" is the hold in the direct flow and the payment submission in the
+customer-hold flow, where T2 restarts the clock:
 
-| | Time from the hold |
+| | Time from the payment start |
 | --- | --- |
-| Hold taken, payment fails | 0 |
+| Payment starts, then fails | 0 |
 | Retry budget exhausted, incident opened | 1.5 to about 2.3 min |
 | `ReconciliationRecordOpen` fires (`for: 5m`) | 6.5 to about 7.3 min |
 | Hold expires; a `PAYMENT_PENDING` redrive is refused from here | 10 min |
@@ -80,6 +86,11 @@ Most urgent first: incidents whose order still has a live seat hold, nearest dea
 those with no hold deadline, oldest first; then those past their hold. Each with `kind`, `orderState` (the phase that failed), `orderStatus` (where the order is
 now), `failureClass`, `attemptCount`, `createdAt` and the order's `reservationExpiresAt`. Work the one closest to its `reservationExpiresAt` first.
 
+Orders in `HELD_AWAITING_PAYMENT` are never incidents on their own: a customer is reading the checkout
+page. Only `orders_holds_overdue` above zero for more than a minute means something is wrong — the T1
+expiry job is not running or cannot reach the database. The seat is not at risk (Inventory's sweep
+frees it at the same deadline); the order status is just stale until the job runs.
+
 **3. Check that the cause is gone.** For `failureClass: dependency_error`, the dependency named in the
 log must be healthy again (the Orders breaker state is in `resilience4j_circuitbreaker_state`).
 Redriving into the same outage only exhausts the budget again.
@@ -90,6 +101,7 @@ Redriving into the same outage only exhausts the budget again.
 | --- | --- | --- |
 | `DELIVERY_EXHAUSTED` | `ACCEPTED`, `RESERVING`, `CONFIRMING_INVENTORY`, `COMPENSATING` | Redrive. |
 | `DELIVERY_EXHAUSTED` | `PAYMENT_PENDING` | Redrive **before `reservationExpiresAt`**. After it the redrive is refused: abandon instead (step 5b). |
+| `DELIVERY_EXHAUSTED` | `HELD_AWAITING_PAYMENT` | Nothing to do: a later delivery took the hold and the order is waiting for the customer (ADR-016). A redrive is harmless and useless — the order parks again. The incident closes when the order ends: paid and terminal, cancelled, or cancelled by the T1 expiry job at most ten minutes later. |
 | `DELIVERY_EXHAUSTED`, `PAYMENT_REVERSAL_FAILURE`, `SEAT_RETURN_FAILURE` | `REFUNDING` | Redrive: it resumes the refund pipeline. |
 | `PAYMENT_REVERSAL_FAILURE` | `COMPENSATING` | Redrive: it retries the reversal. |
 | `PAYMENT_OUTCOME_UNKNOWN` | `COMPENSATING` | Check the provider, then settle (step 5c). |
