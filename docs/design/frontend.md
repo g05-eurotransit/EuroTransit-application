@@ -44,7 +44,8 @@ The checkout is two calls, minutes apart, and the seats are held between them.
   tells Orders to hold the seats and wait. The page goes to `/checkout?orderId=…`. The order id lives in
   the URL, so a reload resumes the same order rather than holding the seats a second time.
 - Its `Idempotency-Key` is kept in `sessionStorage` per selection (route, date, seats) until Orders
-  answers. A click after a lost response therefore replays the same order. This is a random request id,
+  gives a definitive answer. It is kept on a network failure or a `5xx`, so the next click replays the
+  same order, and dropped on success or on a refusal such as a `400`. This is a random request id,
   not a credential; the token-storage rule above is about the access token, which never goes there.
 - **The payment page** (`CheckoutPage`) polls the order until it is `HELD_AWAITING_PAYMENT`, then
   counts down to `reservationExpiresAt` (T1, ten minutes).
@@ -56,6 +57,12 @@ The checkout is two calls, minutes apart, and the seats are held between them.
   follows the order on `/orders/{orderId}` as before.
   - `HOLD_EXPIRED` / `ORDER_NOT_PAYABLE` → back to the seats with "time ran out".
   - `PAYMENT_ALREADY_STARTED` (another tab paid) → the order page.
+  - An unknown outcome (network, `5xx`) re-reads the order: if the payment got through, the page
+    follows it; otherwise "try again" **resends the same key and the same Stripe token**. Orders
+    fingerprints the token, so a fresh token under the old key would be refused rather than replayed.
+- **Before saying "seats released"** the page checks that it really released them. A cancel answered
+  `409 ORDER_NOT_CANCELLABLE` means the payment already started (another tab, a lost response), and the
+  page goes to the order instead.
 - **What releases the seats.** The page's own back button cancels the order. The countdown
   reaching zero also cancels it, so a new hold is possible at once instead of after the server's expiry job.
   Closing the tab, browser back or losing the network do **not**: browser exit signals are not

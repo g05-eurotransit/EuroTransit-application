@@ -143,4 +143,33 @@ describe("seat selection", () => {
     expect(await screen.findByText(/seats were just taken/)).toBeInTheDocument();
     await waitFor(() => expect(getSeatAvailability).toHaveBeenCalled());
   });
+
+  it("shows a definitive refusal such as a changed price, and starts the next attempt fresh", async () => {
+    vi.mocked(createHold).mockRejectedValue(
+      new ApiError("unknown", 400, "Offer of-001 costs 26.90 EUR per seat", "OFFER_PRICE_MISMATCH"),
+    );
+    renderSeats();
+    await pick("1A");
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(await screen.findByText(/costs 26.90 EUR/)).toBeInTheDocument();
+    expect(screen.queryByText(/could not reach/i)).not.toBeInTheDocument();
+    expect(sessionStorage.length).toBe(0);
+  });
+
+  it("does not book again when the other checkout turns out to be paid already", async () => {
+    vi.mocked(createHold).mockRejectedValueOnce(
+      new ApiError("conflict", 409, "m", "ACTIVE_HOLD_EXISTS", undefined, { orderId: "o-old" }),
+    );
+    vi.mocked(cancelOrder).mockRejectedValue(new ApiError("conflict", 409, "m", "ORDER_NOT_CANCELLABLE"));
+    renderSeats();
+    await pick("1A");
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel it and continue" }));
+
+    expect(await screen.findByText(/already being paid/)).toBeInTheDocument();
+    expect(createHold).toHaveBeenCalledTimes(1);
+  });
 });

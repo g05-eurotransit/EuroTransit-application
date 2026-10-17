@@ -51,8 +51,12 @@ interface Summary {
 }
 
 const HOLD_POLL_MS = 1000;
+// The hold normally takes a second or two. Past this the page stops waiting and says so, instead of
+// spinning for as long as the tab stays open.
+const HOLD_WAIT_LIMIT_MS = 60_000;
 
 const SEATS_TAKEN_NOTICE = "Sorry, those seats were just taken. Please choose others.";
+const HOLD_FAILED_NOTICE = "We could not hold those seats. Please try again.";
 const TIME_RAN_OUT_NOTICE = "The time to pay for your seats ran out, so they were released. Please choose again.";
 const NO_LONGER_ACTIVE_NOTICE = "That checkout is no longer active, so its seats were released. Please choose again.";
 
@@ -77,6 +81,19 @@ const CARD_ELEMENT_OPTIONS = {
 };
 
 type CardFieldName = "number" | "expiry" | "cvc";
+
+/** States in which the order still belongs on this page; anything else has gone past the payment. */
+const BEFORE_PAYMENT = new Set<OrderView["status"]>(["ACCEPTED", "RESERVING", "HELD_AWAITING_PAYMENT", "CANCELLED"]);
+
+/**
+ * One payment attempt: its Idempotency-Key and the Stripe token it sent. Kept together because Orders
+ * fingerprints the token — a retry after an unknown outcome must resend BOTH, so it replays the
+ * first answer instead of being refused as a different request.
+ */
+interface PaymentAttempt {
+  key: string;
+  tokenId: string;
+}
 
 /**
  * The payment step of the customer-hold checkout (ADR-016). The seats are already held for the
@@ -148,7 +165,7 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
   const [order, setOrder] = useState<OrderView | null>(null);
   const [clockOffsetMs, setClockOffsetMs] = useState(0);
   const [summary, setSummary] = useState<Summary | null>(offer ? summaryFromState(offer) : null);
-  const [attemptKey] = useState(newId());
+  const pendingAttempt = useRef<PaymentAttempt | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [completeFields, setCompleteFields] = useState<Record<CardFieldName, boolean>>({
     number: false,
@@ -156,6 +173,7 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
     cvc: false,
   });
   const [error, setError] = useState<string | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
   const leaving = useRef(false);
   const cardComplete = completeFields.number && completeFields.expiry && completeFields.cvc;
   const held = order?.status === "HELD_AWAITING_PAYMENT";
@@ -192,10 +210,50 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
     }
   }
 
+  /** Follows the order to its own page: the payment has started, from here or from another tab. */
+  function goToOrder() {
+    leaving.current = true;
+    navigate(`/orders/${encodeURIComponent(orderId)}`, { replace: true });
+  }
+
+  /**
+   * Gives the seats up and goes back — unless the payment has already started, in which case the
+   * customer is taken to the order instead of being told the seats were released. `cancel` answers
+   * 409 ORDER_NOT_CANCELLABLE exactly when that happened; any other failure re-reads the order to know.
+   */
+  async function cancelAndLeave(notice?: string) {
+    try {
+      await cancelOrder(orderId);
+      leave(notice);
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "ORDER_NOT_CANCELLABLE") return goToOrder();
+      try {
+        const o = await getOrder(orderId);
+        if (!BEFORE_PAYMENT.has(o.status)) return goToOrder();
+      } catch {
+        // Cannot tell: the order is unpaid as far as this page knows, and the hold runs out by itself.
+      }
+      leave(notice);
+    }
+  }
+
+  /** After an unknown payment outcome: follow the order if the payment got through, else let them retry. */
+  async function reconcileAfterUnknownPayment(message: string) {
+    try {
+      const o = await getOrder(orderId);
+      if (!BEFORE_PAYMENT.has(o.status)) return goToOrder();
+      if (o.status === "CANCELLED") return leave(NO_LONGER_ACTIVE_NOTICE);
+    } catch {
+      // Still unknown: the retry below resends the same attempt, so it cannot pay twice.
+    }
+    setError(message);
+  }
+
   // Waits for the hold the seat page asked for, then reads the order once: the countdown runs locally.
   useEffect(() => {
     const ac = new AbortController();
     let stop = false;
+    const waitingSince = Date.now();
 
     async function watch() {
       while (!stop) {
@@ -204,21 +262,26 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
           if (stop) return;
           setClockOffsetMs(clockOffsetFrom(o.serverNow));
           setOrder(o);
+          setReconnecting(false);
           if (o.status === "HELD_AWAITING_PAYMENT") return;
-          if (o.status === "FAILED") return leave(SEATS_TAKEN_NOTICE);
-          if (o.status === "CANCELLED") return leave(NO_LONGER_ACTIVE_NOTICE);
-          if (o.status !== "ACCEPTED" && o.status !== "RESERVING") {
-            // The payment already started, from here or from another tab: follow it there.
-            leaving.current = true;
-            return navigate(`/orders/${encodeURIComponent(orderId)}`, { replace: true });
+          if (o.status === "FAILED") {
+            return leave(o.failureCode === "SEATS_UNAVAILABLE" ? SEATS_TAKEN_NOTICE : HOLD_FAILED_NOTICE);
           }
+          if (o.status === "CANCELLED") return leave(NO_LONGER_ACTIVE_NOTICE);
+          if (!BEFORE_PAYMENT.has(o.status)) return goToOrder();
         } catch (e) {
-          if (e instanceof ApiError && e.kind === "network") return; // aborted
-          setError(
-            e instanceof ApiError && e.kind === "not_found"
-              ? "This checkout could not be found."
-              : "We could not load your checkout. Please refresh.",
-          );
+          // An abort (the page went away) also surfaces as a "network" error: only that one stops here.
+          if (stop || ac.signal.aborted) return;
+          if (e instanceof ApiError && e.kind === "not_found") {
+            setError("This checkout could not be found.");
+            return;
+          }
+          // A real network blip or a 5xx: say so, and keep trying.
+          setReconnecting(true);
+        }
+        if (Date.now() - waitingSince > HOLD_WAIT_LIMIT_MS) {
+          setReconnecting(false);
+          setError("Holding your seats is taking longer than usual. Refresh the page to check again.");
           return;
         }
         await new Promise((r) => setTimeout(r, HOLD_POLL_MS));
@@ -231,30 +294,30 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
     };
   }, [orderId]);
 
+  // Keyed on the order id, not on the order object: every poll produces a new object, and re-running
+  // this on each one would abort the catalog calls and could keep their fallback values.
   useEffect(() => {
     if (summary || !order) return;
     const ac = new AbortController();
-    summaryFromOrder(order, ac.signal).then(setSummary).catch(() => {});
+    summaryFromOrder(order, ac.signal)
+      .then((s) => {
+        if (!ac.signal.aborted) setSummary(s);
+      })
+      .catch(() => {});
     return () => ac.abort();
-  }, [order, summary]);
+  }, [order?.orderId, summary]);
 
   // Time is up: release the seats now (best effort — the server's expiry job would do it within
   // seconds) so the customer can hold again straight away, and go back to the seat map.
   useEffect(() => {
-    if (!held || !countdown.expired || submitting) return;
-    void cancelOrder(orderId).catch(() => {});
-    leave(TIME_RAN_OUT_NOTICE);
+    if (!held || !countdown.expired || submitting || leaving.current) return;
+    void cancelAndLeave(TIME_RAN_OUT_NOTICE);
   }, [held, countdown.expired, submitting]);
 
-  async function goBack() {
+  function goBack() {
     // An explicit "back" is the customer giving the seats up (ADR-016). Leaving the page any other
     // way does not cancel: the hold simply runs out, and the seat page offers to resume it.
-    try {
-      await cancelOrder(orderId);
-    } catch {
-      // Already paid or already gone: nothing to release from here.
-    }
-    leave();
+    void cancelAndLeave();
   }
 
   function fieldComplete(field: CardFieldName) {
@@ -274,36 +337,44 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
     setError(null);
 
     try {
-      const { token, error: tokenError } = await stripe.createToken(cardNumberElement);
-      if (tokenError || !token) {
-        setError(tokenError?.message ?? "Could not process the card.");
-        return;
+      // A retry after an unknown outcome resends the same attempt; only a fresh attempt asks Stripe
+      // for a new token.
+      let attempt = pendingAttempt.current;
+      if (!attempt) {
+        const { token, error: tokenError } = await stripe.createToken(cardNumberElement);
+        if (tokenError || !token) {
+          setError(tokenError?.message ?? "Could not process the card.");
+          return;
+        }
+        attempt = { key: newId(), tokenId: token.id };
+        pendingAttempt.current = attempt;
       }
 
-      await submitPayment(
-        orderId,
-        token.id,
-        attemptKey, // reused if the user retries this same attempt
-        newId(), // fresh correlation id per action
-      );
+      await submitPayment(orderId, attempt.tokenId, attempt.key, newId());
+      pendingAttempt.current = null;
       leaving.current = true;
       navigate(`/orders/${encodeURIComponent(orderId)}`);
     } catch (e) {
-      if (e instanceof ApiError) {
-        if (e.code === "HOLD_EXPIRED" || e.code === "ORDER_NOT_PAYABLE") {
-          leave(TIME_RAN_OUT_NOTICE);
-        } else if (e.code === "PAYMENT_ALREADY_STARTED") {
-          leaving.current = true;
-          navigate(`/orders/${encodeURIComponent(orderId)}`);
-        } else if (e.kind === "business") {
-          setError(`Checkout rejected: ${e.message}`);
-        } else if (e.kind === "dependency" || e.kind === "network") {
-          setError("A downstream service is temporarily unavailable. Try again shortly.");
-        } else {
-          setError(e.message);
-        }
-      } else {
+      if (!(e instanceof ApiError)) {
         setError("Unexpected error");
+      } else if (e.code === "HOLD_EXPIRED" || e.code === "ORDER_NOT_PAYABLE") {
+        pendingAttempt.current = null;
+        leave(TIME_RAN_OUT_NOTICE);
+      } else if (e.code === "PAYMENT_ALREADY_STARTED") {
+        pendingAttempt.current = null;
+        goToOrder();
+      } else if (e.code === "IDEMPOTENCY_CONFLICT") {
+        // Should not happen now that a retry resends the same token; if it does, the order knows.
+        pendingAttempt.current = null;
+        await reconcileAfterUnknownPayment("Your payment could not be confirmed. Please try again.");
+      } else if (e.kind === "network" || e.kind === "dependency" || (e.kind === "unknown" && e.status >= 500)) {
+        // Unknown outcome: the payment may have been accepted. Keep the attempt for the retry.
+        await reconcileAfterUnknownPayment(
+          "We could not confirm your payment. Try again — you will not be charged twice.",
+        );
+      } else {
+        pendingAttempt.current = null;
+        setError(e.kind === "business" ? `Checkout rejected: ${e.message}` : e.message);
       }
     } finally {
       setSubmitting(false);
@@ -349,6 +420,7 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
       {!held && !error && (
         <div className="text-secondary-emphasis d-flex align-items-center gap-2">
           <Spinner animation="border" size="sm" /> Holding your seats…
+          {reconnecting && <span className="small">(connection problem — retrying)</span>}
         </div>
       )}
 

@@ -68,6 +68,7 @@ export function SeatSelectionPage() {
   const [holdError, setHoldError] = useState<string | null>(null);
   // ACTIVE_HOLD_EXISTS: the customer already has seats held for another checkout (ADR-016).
   const [activeHoldOrderId, setActiveHoldOrderId] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
 
   useEffect(() => {
     if (!state) navigate("/", { replace: true });
@@ -168,10 +169,12 @@ export function SeatSelectionPage() {
         } else {
           setHoldError(e.message);
         }
-      } else if (e.kind === "network" || e.kind === "dependency" || e.kind === "unknown") {
+      } else if (e.kind === "network" || e.kind === "dependency" || (e.kind === "unknown" && e.status >= 500)) {
         // Unknown outcome: keep the key, so the next click replays this attempt rather than adding one.
         setHoldError("We could not reach the booking service. Please try again.");
       } else {
+        // A definitive answer (a 400 such as a changed price, a 409 conflict): show it, and let the
+        // next attempt start fresh.
         sessionStorage.removeItem(keyName);
         setHoldError(e.message);
       }
@@ -181,11 +184,24 @@ export function SeatSelectionPage() {
   }
 
   async function cancelWaitingHoldAndContinue() {
-    if (!activeHoldOrderId) return;
+    if (!activeHoldOrderId || cancelling) return;
+    setCancelling(true);
     try {
       await cancelOrder(activeHoldOrderId);
-    } catch {
-      // Already paid, cancelled or expired: either way it no longer blocks a new hold.
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "ORDER_NOT_CANCELLABLE") {
+        // Its payment started in the meantime: booking these seats too would be a second purchase the
+        // customer did not ask for. Say so instead of carrying on.
+        setActiveHoldOrderId(null);
+        setHoldError("Your other checkout is already being paid. Check My orders before booking again.");
+        return;
+      }
+      if (!(e instanceof ApiError && e.kind === "not_found")) {
+        setHoldError("We could not cancel your other checkout. Please try again.");
+        return;
+      }
+    } finally {
+      setCancelling(false);
     }
     await continueToCheckout();
   }
@@ -218,11 +234,17 @@ export function SeatSelectionPage() {
           <Button
             variant="primary"
             size="sm"
+            disabled={cancelling || holding}
             onClick={() => navigate(`/checkout?orderId=${encodeURIComponent(activeHoldOrderId)}`)}
           >
             Resume
           </Button>
-          <Button variant="outline-dark" size="sm" disabled={holding} onClick={() => void cancelWaitingHoldAndContinue()}>
+          <Button
+            variant="outline-dark"
+            size="sm"
+            disabled={cancelling || holding}
+            onClick={() => void cancelWaitingHoldAndContinue()}
+          >
             Cancel it and continue
           </Button>
         </Alert>

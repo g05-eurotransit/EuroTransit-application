@@ -204,4 +204,99 @@ describe("checkout payment step", () => {
     expect(await screen.findByRole("button", { name: "Pay now" })).toBeInTheDocument();
     expect(await screen.findByText(/Torino/)).toBeInTheDocument();
   });
+
+  // --- review findings ---------------------------------------------------------------------------
+
+  async function clickPay() {
+    const pay = await screen.findByRole("button", { name: "Pay now" });
+    await waitFor(() => expect(pay).toBeEnabled());
+    fireEvent.click(pay);
+  }
+
+  it("retries a payment whose answer was lost with the same key AND the same token", async () => {
+    vi.mocked(getOrder).mockResolvedValue(order("HELD_AWAITING_PAYMENT"));
+    vi.mocked(submitPayment)
+      .mockRejectedValueOnce(new ApiError("network", 0, "connection reset"))
+      .mockResolvedValueOnce({ orderId: "o-1", status: "PAYMENT_PENDING" });
+    renderCheckout();
+
+    await clickPay();
+    expect(await screen.findByText(/could not confirm your payment/i)).toBeInTheDocument();
+    await clickPay();
+
+    expect(await screen.findByText("order page o-1")).toBeInTheDocument();
+    const [first, second] = vi.mocked(submitPayment).mock.calls;
+    expect(second[1]).toBe(first[1]); // the token
+    expect(second[2]).toBe(first[2]); // the Idempotency-Key
+    expect(createToken).toHaveBeenCalledTimes(1);
+  });
+
+  it("follows the order when a lost payment answer turns out to have gone through", async () => {
+    vi.mocked(getOrder)
+      .mockResolvedValueOnce(order("HELD_AWAITING_PAYMENT"))
+      .mockResolvedValue(order("PAYMENT_PENDING"));
+    vi.mocked(submitPayment).mockRejectedValue(new ApiError("network", 0, "connection reset"));
+    renderCheckout();
+
+    await clickPay();
+
+    expect(await screen.findByText("order page o-1")).toBeInTheDocument();
+  });
+
+  it("re-reads the order on IDEMPOTENCY_CONFLICT instead of showing a technical error", async () => {
+    vi.mocked(getOrder)
+      .mockResolvedValueOnce(order("HELD_AWAITING_PAYMENT"))
+      .mockResolvedValue(order("PAYMENT_PENDING"));
+    vi.mocked(submitPayment).mockRejectedValue(new ApiError("conflict", 409, "reused", "IDEMPOTENCY_CONFLICT"));
+    renderCheckout();
+
+    await clickPay();
+
+    expect(await screen.findByText("order page o-1")).toBeInTheDocument();
+    expect(screen.queryByText(/reused/)).not.toBeInTheDocument();
+  });
+
+  it("goes to the order, not the seat map, when back finds the payment already started", async () => {
+    vi.mocked(getOrder).mockResolvedValue(order("HELD_AWAITING_PAYMENT"));
+    vi.mocked(cancelOrder).mockRejectedValue(new ApiError("conflict", 409, "m", "ORDER_NOT_CANCELLABLE"));
+    renderCheckout();
+    await screen.findByRole("button", { name: "Pay now" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Go back" }));
+
+    expect(await screen.findByText("order page o-1")).toBeInTheDocument();
+    expect(screen.queryByTestId("seats-state")).not.toBeInTheDocument();
+  });
+
+  it("never says the seats were released when another tab paid before the countdown ran out", async () => {
+    const now = new Date();
+    vi.mocked(getOrder).mockResolvedValue(
+      order("HELD_AWAITING_PAYMENT", {
+        reservationExpiresAt: new Date(now.getTime() - 1000).toISOString(),
+        serverNow: now.toISOString(),
+      }),
+    );
+    vi.mocked(cancelOrder).mockRejectedValue(new ApiError("conflict", 409, "m", "ORDER_NOT_CANCELLABLE"));
+    renderCheckout();
+
+    expect(await screen.findByText("order page o-1")).toBeInTheDocument();
+    expect(screen.queryByTestId("seats-state")).not.toBeInTheDocument();
+  });
+
+  it("keeps waiting for the hold through a network blip", async () => {
+    vi.mocked(getOrder)
+      .mockRejectedValueOnce(new ApiError("network", 0, "offline"))
+      .mockResolvedValue(order("HELD_AWAITING_PAYMENT"));
+    renderCheckout();
+
+    expect(await screen.findByText(/connection problem/i)).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Pay now" }, { timeout: 3000 })).toBeInTheDocument();
+  });
+
+  it("does not blame other buyers when the hold failed for another reason", async () => {
+    vi.mocked(getOrder).mockResolvedValue(order("FAILED", { failureCode: "CHECKOUT_FAILED" }));
+    renderCheckout();
+
+    expect(await seatsNotice()).toMatch(/could not hold those seats/);
+  });
 });
