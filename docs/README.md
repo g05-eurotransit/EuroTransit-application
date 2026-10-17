@@ -9,6 +9,7 @@ This folder contains the assignment requirements and the project-owned documents
 
 ## Design
 
+- [design/architecture.md](design/architecture.md): microservice overview with an inline SVG, optional interactive HTML, implementation boundaries, and links to contracts.
 - [design/architecture-decisions.md](design/architecture-decisions.md): consistency, money-path, and progressive-delivery decisions with alternatives.
 - [design/api-design.md](design/api-design.md): service boundaries, APIs, events, and sync/async communication shape.
 - [design/reservation-confirmation.md](design/reservation-confirmation.md): Inventory confirmation protocol, HTTP/Kafka responsibilities, concurrency rules, retries, and compensation decisions.
@@ -31,6 +32,7 @@ This folder contains the assignment requirements and the project-owned documents
 
 ## Supporting Material
 
+- [templates/README.md](templates/README.md): shared writing guide and templates for both repositories, with architecture and deployment examples.
 - [planning/implementation-plan.md](planning/implementation-plan.md): phased work plan.
 - [planning/team-agentic-implementation-plan.md](planning/team-agentic-implementation-plan.md): five-person parallel implementation plan with AI coding agents.
 - [templates/postmortem-template.md](templates/postmortem-template.md): template for the required blameless postmortem.
