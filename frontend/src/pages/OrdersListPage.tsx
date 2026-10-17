@@ -25,6 +25,8 @@ const STATUS_VARIANT: Record<OrderStatus, string> = {
   PAYMENT_PENDING: "warning",
   CONFIRMING_INVENTORY: "warning",
   COMPENSATING: "accent",
+  REFUNDING: "accent",
+  REFUNDED: "secondary",
 };
 
 /** The two reachable views: "My tickets" (confirmed only) and the unfiltered list. */
@@ -116,7 +118,14 @@ export function OrdersListPage() {
 
       <Stack gap={3}>
         {orders.map((o) => (
-          <Card as={Link} to={`/orders/${o.orderId}`} key={o.orderId} className="shadow-sm border-0 text-decoration-none">
+          <Card
+            as={Link}
+            to={`/orders/${o.orderId}`}
+            // The order page shows the refund button only for an arrival from this list.
+            state={{ fromTickets: true }}
+            key={o.orderId}
+            className="shadow-sm border-0 text-decoration-none"
+          >
             <Card.Body className="d-flex justify-content-between align-items-center gap-3">
               <div>
                 <div className="text-secondary-emphasis small mb-1">Order #{o.orderId.slice(0, 8)}</div>
