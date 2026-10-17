@@ -4,8 +4,7 @@ import { Alert, Badge, Button, Card } from "react-bootstrap";
 import { getOrder, isTerminal, type OrderStatus, type OrderView } from "../api/orders";
 import { getRoute, type Route } from "../api/catalog";
 import { ApiError } from "../api/client";
-import { HAPPY_PATH, OrderStepper } from "../components/OrderStepper";
-import { useCountdown } from "../hooks/useCountdown";
+import { OrderStepper, stepIndexOf } from "../components/OrderStepper";
 
 const CURRENCY = "EUR";
 
@@ -30,20 +29,22 @@ const HOLD_GRACE_MS = 10_000;
 // in the past and this fires on the very first poll.
 const NO_PROGRESS_MS = 10 * 60_000;
 
-type PollStopReason = "hold-expired" | "no-progress";
+type PollStopReason = "deadline-passed" | "no-progress";
 
 function pollStopReason(order: OrderView, watchingSinceMs: number): PollStopReason | null {
   if (order.reservationExpiresAt) {
     const deadline = new Date(order.reservationExpiresAt).getTime();
-    return Date.now() > deadline + HOLD_GRACE_MS ? "hold-expired" : null;
+    return Date.now() > deadline + HOLD_GRACE_MS ? "deadline-passed" : null;
   }
   return Date.now() - watchingSinceMs > NO_PROGRESS_MS ? "no-progress" : null;
 }
 
 const POLL_STOPPED_COPY: Record<PollStopReason, string> = {
-  "hold-expired":
-    "The seat hold for this order has expired, so this page will no longer update on its own. " +
-    "The order may still be resolving — refresh to check its latest status.",
+  // Deliberately says nothing about a hold or its deadline: after the payment that deadline (T2) is the
+  // pipeline's business, not the customer's (ADR-016), so the page never shows or names it.
+  "deadline-passed":
+    "This page will no longer update on its own. The order may still be resolving — refresh to " +
+    "check its latest status.",
   "no-progress":
     "This order has not progressed since this page was opened, so this page will no longer update " +
     "on its own. The order may still be resolving — refresh to check its latest status.",
@@ -55,6 +56,7 @@ const STATUS_VARIANT: Record<OrderStatus, string> = {
   CANCELLED: "danger",
   ACCEPTED: "warning",
   RESERVING: "warning",
+  HELD_AWAITING_PAYMENT: "warning",
   PAYMENT_PENDING: "warning",
   CONFIRMING_INVENTORY: "warning",
   COMPENSATING: "accent",
@@ -84,7 +86,7 @@ export function OrderStatusPage() {
           const o = await getOrder(orderId!, ac.signal);
           if (stop) return;
           setOrder(o);
-          const idx = HAPPY_PATH.findIndex((s) => s.status === o.status);
+          const idx = stepIndexOf(o.status);
           if (idx >= 0) setLastKnownStepIndex((prev) => Math.max(prev, idx));
           if (isTerminal(o.status) || o.status === "COMPENSATING") return;
           const reason = pollStopReason(o, watchingSince);
@@ -139,11 +141,6 @@ export function OrderStatusPage() {
     }
   }
 
-  const countdown = useCountdown(
-    order?.reservationExpiresAt ?? null,
-    !!order && !isTerminal(order.status) && !stopReason,
-  );
-
   if (error) return <p className="text-danger">{error}</p>;
   if (!order) return <p>Loading order…</p>;
 
@@ -158,14 +155,6 @@ export function OrderStatusPage() {
               <Badge bg={STATUS_VARIANT[order.status]} className="fs-6">
                 {order.status}
               </Badge>
-              {countdown && (
-                <div className="bg-primary text-white rounded-3 px-3 py-2 text-center">
-                  <div className="text-uppercase" style={{ fontSize: "0.6rem", letterSpacing: "0.08em" }}>
-                    Hold expires in
-                  </div>
-                  <div className="fw-bold fs-5 lh-1">{countdown}</div>
-                </div>
-              )}
             </div>
           </div>
 
@@ -194,6 +183,17 @@ export function OrderStatusPage() {
             </div>
           </div>
 
+          {order.status === "HELD_AWAITING_PAYMENT" && (
+            <Alert variant="warning" className="d-flex flex-wrap align-items-center gap-3 mb-3">
+              <div className="flex-grow-1">Your seats are held and waiting for your payment.</div>
+              <Link
+                to={`/checkout?orderId=${encodeURIComponent(order.orderId)}`}
+                className="btn btn-primary btn-sm fw-semibold"
+              >
+                Complete payment
+              </Link>
+            </Alert>
+          )}
           {!isTerminal(order.status) && order.status !== "COMPENSATING" && stopReason && (
             <Alert variant="warning" className="mb-0">
               <div className="d-flex align-items-start gap-2 mb-2">

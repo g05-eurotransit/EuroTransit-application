@@ -3,8 +3,8 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { Alert, Button, Card, Col, Row, Spinner } from "react-bootstrap";
 import { BackButton } from "../components/BackButton";
 import { OrderSummaryCard } from "../components/OrderSummaryCard";
-import { getSeatAvailability, type SeatView } from "../api/orders";
-import { ApiError } from "../api/client";
+import { cancelOrder, createHold, getOrder, getSeatAvailability, isPaymentUnderway, type SeatView } from "../api/orders";
+import { ApiError, newId } from "../api/client";
 
 interface OfferState {
   routeId: string;
@@ -19,6 +19,25 @@ interface OfferState {
   currency: string;
   conditions: string;
   travelDate: string;
+  /** Set by the checkout when it sends the customer back here: the seats were taken, time ran out. */
+  notice?: string;
+}
+
+/**
+ * The Idempotency-Key of one "Continue" for one selection, kept in sessionStorage until Orders
+ * answers. A click after a lost response (or a reload in between) reuses it, so Orders replays the
+ * same order instead of holding the seats twice; a different selection gets a key of its own.
+ */
+function holdKeyName(offer: OfferState, seats: string[]): string {
+  return `hold-key:${offer.routeId}|${offer.travelDate}|${[...seats].sort().join(",")}`;
+}
+
+function holdKeyFor(name: string): string {
+  const existing = sessionStorage.getItem(name);
+  if (existing) return existing;
+  const key = newId();
+  sessionStorage.setItem(name, key);
+  return key;
 }
 
 function groupByRow(seats: SeatView[]): { row: string; seats: SeatView[] }[] {
@@ -45,6 +64,11 @@ export function SeatSelectionPage() {
   const [selectedSeats, setSelectedSeats] = useState<string[]>([]);
   const [seats, setSeats] = useState<SeatView[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [holding, setHolding] = useState(false);
+  const [holdError, setHoldError] = useState<string | null>(null);
+  // ACTIVE_HOLD_EXISTS: the customer already has seats held for another checkout (ADR-016).
+  const [activeHoldOrderId, setActiveHoldOrderId] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
 
   useEffect(() => {
     if (!state) navigate("/", { replace: true });
@@ -104,14 +128,93 @@ export function SeatSelectionPage() {
   // Multiply integer cents so floating-point tails never reach Orders' decimal price check.
   const total = (Math.round(offer.price * 100) * selectedSeats.length) / 100;
 
-  function continueToCheckout() {
-    navigate("/checkout", {
-      state: {
-        ...offer,
-        seats: selectedSeats,
-        totalAmount: total,
-      },
-    });
+  async function continueToCheckout(retriedVanishedHold = false) {
+    if (holding) return;
+    setHolding(true);
+    setHoldError(null);
+    setActiveHoldOrderId(null);
+    const keyName = holdKeyName(offer, selectedSeats);
+    try {
+      const res = await createHold(
+        {
+          routeId: offer.routeId,
+          seats: selectedSeats,
+          travelDate: offer.travelDate,
+          totalAmount: total,
+          offerId: offer.offerId,
+        },
+        holdKeyFor(keyName),
+        newId(),
+      );
+      sessionStorage.removeItem(keyName);
+      const { notice: _notice, ...offerOnly } = offer;
+      navigate(`/checkout?orderId=${encodeURIComponent(res.orderId)}`, {
+        state: { ...offerOnly, seats: selectedSeats, totalAmount: total, orderId: res.orderId },
+      });
+    } catch (e) {
+      if (!(e instanceof ApiError)) {
+        setHoldError("Unexpected error");
+        return;
+      }
+      if (e.code === "ACTIVE_HOLD_EXISTS") {
+        sessionStorage.removeItem(keyName);
+        const waiting = typeof e.details?.orderId === "string" ? e.details.orderId : null;
+        if (waiting) {
+          setActiveHoldOrderId(waiting);
+        } else if (!retriedVanishedHold) {
+          // The blocking hold ended in the instant between the refusal and the lookup: just try again.
+          setHolding(false);
+          await continueToCheckout(true);
+          return;
+        } else {
+          setHoldError(e.message);
+        }
+      } else if (e.kind === "network" || e.kind === "dependency" || (e.kind === "unknown" && e.status >= 500)) {
+        // Unknown outcome: keep the key, so the next click replays this attempt rather than adding one.
+        setHoldError("We could not reach the booking service. Please try again.");
+      } else {
+        // A definitive answer (a 400 such as a changed price, a 409 conflict): show it, and let the
+        // next attempt start fresh.
+        sessionStorage.removeItem(keyName);
+        setHoldError(e.message);
+      }
+    } finally {
+      setHolding(false);
+    }
+  }
+
+  async function cancelWaitingHoldAndContinue() {
+    if (!activeHoldOrderId || cancelling) return;
+    setCancelling(true);
+    try {
+      await cancelOrder(activeHoldOrderId);
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "ORDER_NOT_CANCELLABLE") {
+        // The same answer covers a payment that started meanwhile and an order that simply expired.
+        // Only the first must stop us: booking these seats too would be a second purchase.
+        let underway: boolean | null = null;
+        try {
+          underway = isPaymentUnderway((await getOrder(activeHoldOrderId)).status);
+        } catch {
+          // Unknown: ask the customer to try again rather than guess.
+        }
+        if (underway === null) {
+          setHoldError("We could not cancel your other checkout. Please try again.");
+          return;
+        }
+        if (underway) {
+          setActiveHoldOrderId(null);
+          setHoldError("Your other checkout is already being paid. Check My orders before booking again.");
+          return;
+        }
+      } else if (!(e instanceof ApiError && e.kind === "not_found")) {
+        setHoldError("We could not cancel your other checkout. Please try again.");
+        return;
+      }
+    } finally {
+      setCancelling(false);
+    }
+    await continueToCheckout();
   }
 
   return (
@@ -130,6 +233,33 @@ export function SeatSelectionPage() {
           </p>
         </div>
       </div>
+
+      {offer.notice && <Alert variant="warning">{offer.notice}</Alert>}
+      {holdError && <Alert variant="danger">{holdError}</Alert>}
+      {activeHoldOrderId && (
+        <Alert variant="warning" className="d-flex flex-wrap align-items-center gap-3">
+          <div className="flex-grow-1">
+            You already have seats held for another checkout. Finish that one, or cancel it to book
+            these seats instead.
+          </div>
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={cancelling || holding}
+            onClick={() => navigate(`/checkout?orderId=${encodeURIComponent(activeHoldOrderId)}`)}
+          >
+            Resume
+          </Button>
+          <Button
+            variant="outline-dark"
+            size="sm"
+            disabled={cancelling || holding}
+            onClick={() => void cancelWaitingHoldAndContinue()}
+          >
+            Cancel it and continue
+          </Button>
+        </Alert>
+      )}
 
       <Row className="g-4">
         <Col lg={8}>
@@ -189,10 +319,10 @@ export function SeatSelectionPage() {
             seats={selectedSeats}
             totalAmount={total}
             currency={offer.currency}
-            actionLabel="Continue"
-            actionDisabled={selectedSeats.length === 0}
+            actionLabel={holding ? "Holding your seats…" : "Continue"}
+            actionDisabled={selectedSeats.length === 0 || holding}
             actionType="button"
-            onAction={continueToCheckout}
+            onAction={() => void continueToCheckout()}
           />
         </Col>
       </Row>
