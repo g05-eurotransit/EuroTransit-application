@@ -8,6 +8,7 @@ package it.polito.cpo.model
  * ACCEPTED -> RESERVING -> PAYMENT_PENDING -> CONFIRMING_INVENTORY -> CONFIRMED
  * CONFIRMING_INVENTORY -> COMPENSATING -> FAILED
  * CONFIRMED -> REFUNDING -> REFUNDED
+ * RESERVING -> HELD_AWAITING_PAYMENT -> PAYMENT_PENDING   (customer-hold flow, ADR-016)
  *
  * The last line is a separate durable process (ADR-015), not a continuation of the checkout
  * pipeline above it: it has its own trigger, its own consumer (`RefundOrchestrator`), and reaches
@@ -16,6 +17,18 @@ package it.polito.cpo.model
 enum class OrderStatus {
     ACCEPTED,
     RESERVING,
+
+    /**
+     * Customer-hold flow only (ADR-016): the seats are held, the reservation id and the T1 deadline
+     * are stored, and the customer has not paid yet. Nothing in the pipeline moves an order out of
+     * here: only the payment command, a customer cancellation, or the T1 expiry job, each a
+     * compare-and-set on this predecessor so exactly one wins. A redelivered `order-placed` is
+     * acknowledged without a remote call, which is what keeps Kafka from ever starting a payment.
+     *
+     * Not terminal: the order is waiting, not settled.
+     */
+    HELD_AWAITING_PAYMENT,
+
     PAYMENT_PENDING,
 
     /**

@@ -203,7 +203,9 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     order's `reservationExpiresAt` is still ahead of the Orders database clock — stores the token and
     the submission time, stores the idempotency record, and writes a new `order-placed` outbox row.
     The pipeline then opens the T2 payment window in Inventory and authorizes. Returns
-    `202 Accepted` with the order, now `payment-pending`.
+    `202 Accepted` with the `orderId` and the status `payment-pending`, the same shape as the checkout
+    response; the client follows the rest on `GET /api/orders/{orderId}`.
+  - `400 PAYMENT_TOKEN_REQUIRED` for a blank token, before the order is touched.
   - The same key with the same token replays the stored response. Refusals, each `409`:
     `HOLD_EXPIRED` (T1 has passed by the Orders clock; the client goes back to seat selection),
     `PAYMENT_ALREADY_STARTED` (a payment for this order was already accepted under another key or

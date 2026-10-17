@@ -9,6 +9,7 @@ import it.polito.cpo.controller.dtos.CheckoutResponse
 import it.polito.cpo.controller.dtos.OrderHistoryCursor
 import it.polito.cpo.controller.dtos.OrderPage
 import it.polito.cpo.controller.dtos.OrderView
+import it.polito.cpo.controller.dtos.PaymentSubmissionRequest
 import it.polito.cpo.controller.dtos.SeatAvailabilityView
 import it.polito.cpo.controller.dtos.SeatView
 import it.polito.cpo.model.OrderStatus
@@ -284,6 +285,34 @@ class OrderController(
         return toView(order)
     }
 
+    /**
+     * The customer-hold payment (ADR-016): the token for an order parked in `HELD_AWAITING_PAYMENT`.
+     * `202 Accepted`: what commits here is the acceptance — the payment window, authorization and
+     * confirmation run asynchronously, and the client follows them on `GET /api/orders/{orderId}`.
+     *
+     * Owner only. A non-owner gets 404, never 403, as everywhere on this controller — and unlike
+     * [cancel] there is no `operations` widening: staff never pay on a customer's behalf. The security
+     * chain already admits customers only; this check is the ownership half.
+     */
+    @PostMapping("/{orderId}/payment")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    suspend fun submitPayment(
+        @PathVariable orderId: UUID,
+        @RequestBody request: PaymentSubmissionRequest,
+        @RequestHeader("Idempotency-Key") idempotencyKey: String,
+        @AuthenticationPrincipal jwt: Jwt,
+    ): CheckoutResponse {
+        val userId = jwt.subject ?: throw ResponseStatusException(HttpStatus.UNAUTHORIZED, "Missing subject claim")
+        val order = orderService.getOrderById(orderId)
+        if (order == null || order.userId != userId) {
+            throw ResponseStatusException(HttpStatus.NOT_FOUND, "Order not found")
+        }
+        if (request.paymentMethodToken.isBlank()) {
+            throw ApiException(HttpStatus.BAD_REQUEST, "PAYMENT_TOKEN_REQUIRED", "A payment method token is required")
+        }
+        return checkoutOrchestrator.submitPayment(orderId, request.paymentMethodToken, idempotencyKey, userId)
+    }
+
     @PostMapping("/{orderId}/cancel")
     suspend fun cancel(
         @PathVariable orderId: UUID,
@@ -346,6 +375,9 @@ class OrderController(
             currency = order.currency,
             createdAt = order.createdAt,
             reservationExpiresAt = order.reservationExpiresAt,
+            // The JVM clock, deliberately: this only lets a browser correct its own clock for a
+            // countdown. Whether a payment is still accepted is decided in SQL, never from this.
+            serverNow = OffsetDateTime.now(),
             failureCode = failure?.name,
             // Derived, not stored: display text is presentation, and storing it would freeze today's
             // wording into every historical row.

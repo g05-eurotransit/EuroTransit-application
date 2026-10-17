@@ -91,6 +91,24 @@ sealed interface ConfirmReservationOutcome {
     data class Refused(val code: InventoryRefusalCode, val detail: String?) : ConfirmReservationOutcome
 }
 
+/**
+ * Result of the Inventory payment-window command (ADR-016): the one-time T2 restart of a
+ * customer-hold reservation's deadline, asked for before Payments is called.
+ *
+ * Only definitive answers are variants. `RESERVATION_NOT_HELD` (a sold reservation behind an unpaid
+ * order) is deliberately not one: it is outside [InventoryRefusalCode], so the client rethrows it as
+ * an unknown outcome and the order stays PAYMENT_PENDING for an operator rather than failing as if no
+ * money could have moved.
+ */
+sealed interface PaymentWindowOutcome {
+
+    /** The window is open — now, or by an earlier call this replays — and runs until [expiresAt]. */
+    data class Opened(val reservationId: String, val expiresAt: OffsetDateTime) : PaymentWindowOutcome
+
+    /** A definitive refusal. Payments has not been called for this order, so it fails unpaid. */
+    data class Refused(val code: InventoryRefusalCode, val detail: String?) : PaymentWindowOutcome
+}
+
 /** Result of the Inventory hold command. */
 sealed interface HoldOutcome {
 

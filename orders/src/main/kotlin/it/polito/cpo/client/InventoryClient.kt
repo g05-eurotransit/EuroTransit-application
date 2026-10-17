@@ -28,6 +28,15 @@ interface InventoryClient {
     suspend fun confirmReservation(reservationId: String, orderId: UUID): ConfirmReservationOutcome
 
     /**
+     * Opens the one-time T2 payment window of a customer-hold reservation (ADR-016). Called before
+     * Payments, never after.
+     *
+     * No `Idempotency-Key`: idempotent by reservation state, like [confirmReservation]. A replay after
+     * the window opened returns the same deadline and never extends it again.
+     */
+    suspend fun startPaymentWindow(reservationId: String, orderId: UUID): PaymentWindowOutcome
+
+    /**
      * Releases a hold. Inventory's release only ever touches HELD rows, so releasing an already
      * terminal reservation is an idempotent no-op and has no business refusal to report.
      */

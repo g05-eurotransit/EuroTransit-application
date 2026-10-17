@@ -32,6 +32,9 @@ class MockInventoryClient : InventoryClient {
         orderId: UUID,
     ): ConfirmReservationOutcome = ConfirmReservationOutcome.Confirmed(reservationId)
 
+    override suspend fun startPaymentWindow(reservationId: String, orderId: UUID): PaymentWindowOutcome =
+        PaymentWindowOutcome.Opened(reservationId, OffsetDateTime.now().plusMinutes(10))
+
     override suspend fun releaseSeats(reservationId: String, idempotencyKey: String) {
         // Mock release - no operational work needed
     }

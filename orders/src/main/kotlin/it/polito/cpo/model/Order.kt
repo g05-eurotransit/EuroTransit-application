@@ -87,6 +87,15 @@ class Order(
     var refundRequestedAt: OffsetDateTime? = null,
     var refundedAt: OffsetDateTime? = null,
     var refundProviderReference: String? = null,
+    // ADR-016 (V19). Whether this order follows the customer-hold flow: placed without a payment token,
+    // it stops in HELD_AWAITING_PAYMENT until the customer pays. False for the direct flow.
+    val paymentDeferred: Boolean = false,
+    // When the customer's payment was accepted, by the database clock. Null for a direct-flow order,
+    // whose payment arrived with the order: measurements that start here fall back to createdAt.
+    var paymentSubmittedAt: OffsetDateTime? = null,
+    // Inventory opened the one-time T2 window and its deadline is in reservationExpiresAt. Set before
+    // Payments is called, so once true an authorization may have been attempted.
+    var paymentWindowOpened: Boolean = false,
 ) : Persistable<UUID> {
 
     @Transient

@@ -3,7 +3,14 @@ package it.polito.cpo.repository
 import it.polito.cpo.model.Order
 import it.polito.cpo.model.OrderStatus
 import it.polito.cpo.service.CustomerFailureCode
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.reactor.awaitSingle
 import kotlinx.coroutines.runBlocking
+import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
@@ -11,6 +18,8 @@ import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Import
 import org.springframework.context.annotation.Primary
+import org.springframework.dao.DuplicateKeyException
+import org.springframework.r2dbc.core.DatabaseClient
 import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
@@ -27,6 +36,8 @@ import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import kotlin.test.assertFalse
 
 /**
  * Proves the money-path transition SQL against real PostgreSQL, one (from-state x method) pair at a
@@ -97,6 +108,7 @@ class OrderTransitionsIntegrationTest {
     }
 
     @Autowired private lateinit var orders: OrderRepository
+    @Autowired private lateinit var db: DatabaseClient
 
     // --- phase markers: accept the expected predecessor AND their own target state ---------------
 
@@ -151,9 +163,9 @@ class OrderTransitionsIntegrationTest {
     }
 
     @Test
-    fun `cancelIfUnpaid accepts only ACCEPTED and RESERVING`() = runBlocking {
+    fun `cancelIfUnpaid accepts only ACCEPTED, RESERVING and HELD_AWAITING_PAYMENT`() = runBlocking {
         assertRowsAffected(
-            accepting = setOf(OrderStatus.ACCEPTED, OrderStatus.RESERVING),
+            accepting = setOf(OrderStatus.ACCEPTED, OrderStatus.RESERVING, OrderStatus.HELD_AWAITING_PAYMENT),
             resultingIn = OrderStatus.CANCELLED,
         ) { id -> orders.cancelIfUnpaid(id) }
     }
@@ -298,6 +310,210 @@ class OrderTransitionsIntegrationTest {
         assertNull(stored.departureAt)
     }
 
+    // --- customer-hold flow (ADR-016) -------------------------------------------------------------
+
+    @Test
+    fun `markHeldAwaitingPayment parks a customer-hold order from RESERVING and repeats itself`() = runBlocking {
+        val id = seed(OrderStatus.RESERVING, paymentDeferred = true)
+        assertEquals(1L, orders.markHeldAwaitingPayment(id, "res-1", HOLD_DEADLINE))
+        val order = orders.findById(id)!!
+        assertEquals(OrderStatus.HELD_AWAITING_PAYMENT, order.status)
+        assertEquals("res-1", order.reservationId)
+        assertEquals(HOLD_DEADLINE.toInstant(), order.reservationExpiresAt?.toInstant())
+
+        // A redelivered hold resolves the same reservation and rewrites the same values.
+        assertEquals(1L, orders.markHeldAwaitingPayment(id, "res-1", HOLD_DEADLINE))
+        // A different reservation id is a violated hold contract, never a silent rebinding.
+        assertEquals(0L, orders.markHeldAwaitingPayment(id, "res-other", HOLD_DEADLINE))
+    }
+
+    @Test
+    fun `markHeldAwaitingPayment never parks a direct-flow order, and accepts no other state`() = runBlocking {
+        val direct = seed(OrderStatus.RESERVING)
+        assertEquals(0L, orders.markHeldAwaitingPayment(direct, "res-1", HOLD_DEADLINE))
+        assertEquals(OrderStatus.RESERVING, statusOf(direct))
+
+        (ALL_STATES - OrderStatus.RESERVING - OrderStatus.HELD_AWAITING_PAYMENT).forEach { from ->
+            val id = seed(from, paymentDeferred = true)
+            assertEquals(0L, orders.markHeldAwaitingPayment(id, "res-1", HOLD_DEADLINE), "expected $from to be refused")
+            assertEquals(from, statusOf(id))
+        }
+    }
+
+    @Test
+    fun `submitPayment accepts only a held order inside T1, stamps the database time, and never repeats`() = runBlocking {
+        (ALL_STATES - OrderStatus.HELD_AWAITING_PAYMENT).forEach { from ->
+            val id = seed(from, paymentDeferred = true, reservationExpiresAt = OffsetDateTime.now().plusMinutes(5))
+            assertEquals(0L, orders.submitPayment(id, "tok_visa"), "expected $from to be refused")
+            assertEquals(from, statusOf(id))
+        }
+
+        val id = heldOrder("5 minutes")
+        assertEquals(1L, orders.submitPayment(id, "tok_visa"))
+        val order = orders.findById(id)!!
+        assertEquals(OrderStatus.PAYMENT_PENDING, order.status)
+        assertEquals("tok_visa", order.paymentMethodToken)
+        assertNotNull(order.paymentSubmittedAt)
+
+        // No self-transition: a second submission must learn that the payment already started.
+        assertEquals(0L, orders.submitPayment(id, "tok_other"))
+        assertEquals("tok_visa", orders.findById(id)!!.paymentMethodToken)
+    }
+
+    @Test
+    fun `T1 boundary - one second either side of the deadline by the database clock`() = runBlocking {
+        val inside = heldOrder("1 second")
+        assertEquals(1L, orders.submitPayment(inside, "tok_visa"))
+        assertEquals(0L, orders.cancelExpiredHold(heldOrder("1 second")))
+
+        val past = heldOrder("-1 second")
+        assertEquals(0L, orders.submitPayment(past, "tok_visa"))
+        assertEquals(OrderStatus.HELD_AWAITING_PAYMENT, statusOf(past))
+        assertEquals(1L, orders.cancelExpiredHold(past))
+        assertEquals(OrderStatus.CANCELLED, statusOf(past))
+    }
+
+    @Test
+    fun `submitPayment never accepts a direct-flow order`() = runBlocking {
+        val id = seed(OrderStatus.HELD_AWAITING_PAYMENT, reservationExpiresAt = OffsetDateTime.now().plusMinutes(5))
+        assertEquals(0L, orders.submitPayment(id, "tok_visa"))
+    }
+
+    @Test
+    fun `cancelExpiredHold accepts only a held order past its deadline`() = runBlocking {
+        (ALL_STATES - OrderStatus.HELD_AWAITING_PAYMENT).forEach { from ->
+            val id = seed(from, paymentDeferred = true, reservationExpiresAt = OffsetDateTime.now().minusMinutes(5))
+            assertEquals(0L, orders.cancelExpiredHold(id), "expected $from to be refused")
+            assertEquals(from, statusOf(id))
+        }
+    }
+
+    @Test
+    fun `payment, cancellation and the expiry job race from HELD_AWAITING_PAYMENT with exactly one winner`() = runBlocking {
+        repeat(20) {
+            val id = heldOrder("5 minutes")
+            val rows = coroutineScope {
+                listOf(
+                    async(Dispatchers.IO) { orders.submitPayment(id, "tok_visa") },
+                    async(Dispatchers.IO) { orders.cancelIfUnpaid(id) },
+                    async(Dispatchers.IO) { orders.cancelExpiredHold(id) },
+                ).awaitAll()
+            }
+            assertEquals(1L, rows.sum(), "exactly one writer must win, got $rows")
+            assertEquals(0L, rows[2], "the expiry job must not win inside T1")
+            val expected = if (rows[0] == 1L) OrderStatus.PAYMENT_PENDING else OrderStatus.CANCELLED
+            assertEquals(expected, statusOf(id))
+        }
+    }
+
+    @Test
+    fun `after T1, payment and the expiry job race and only the job can win`() = runBlocking {
+        repeat(20) {
+            val id = heldOrder("-1 millisecond")
+            val rows = coroutineScope {
+                listOf(
+                    async(Dispatchers.IO) { orders.submitPayment(id, "tok_visa") },
+                    async(Dispatchers.IO) { orders.cancelExpiredHold(id) },
+                ).awaitAll()
+            }
+            assertEquals(listOf(0L, 1L), rows)
+            assertEquals(OrderStatus.CANCELLED, statusOf(id))
+        }
+    }
+
+    @Test
+    fun `markPaymentWindowOpened records T2 only for the stored reservation of a paid customer-hold order`() = runBlocking {
+        val t2 = HOLD_DEADLINE.plusMinutes(10)
+        (ALL_STATES - OrderStatus.PAYMENT_PENDING).forEach { from ->
+            val id = seed(from, paymentDeferred = true, reservationId = "res-1")
+            assertEquals(0L, orders.markPaymentWindowOpened(id, "res-1", t2), "expected $from to be refused")
+        }
+        val direct = seed(OrderStatus.PAYMENT_PENDING, reservationId = "res-1")
+        assertEquals(0L, orders.markPaymentWindowOpened(direct, "res-1", t2))
+
+        val id = seed(OrderStatus.PAYMENT_PENDING, paymentDeferred = true, reservationId = "res-1", reservationExpiresAt = HOLD_DEADLINE)
+        assertEquals(0L, orders.markPaymentWindowOpened(id, "res-other", t2))
+        assertEquals(1L, orders.markPaymentWindowOpened(id, "res-1", t2))
+        assertEquals(1L, orders.markPaymentWindowOpened(id, "res-1", t2), "a redelivery rewrites the same values")
+        val order = orders.findById(id)!!
+        assertTrue(order.paymentWindowOpened)
+        assertEquals(t2.toInstant(), order.reservationExpiresAt?.toInstant())
+    }
+
+    @Test
+    fun `one active hold per customer - the second concurrent insert fails, direct-flow orders do not count`() = runBlocking<Unit> {
+        val user = "user-one-hold-${UUID.randomUUID()}"
+        val results = coroutineScope {
+            List(2) {
+                async(Dispatchers.IO) {
+                    runCatching { seed(OrderStatus.ACCEPTED, paymentDeferred = true, userId = user) }
+                }
+            }.awaitAll()
+        }
+        assertEquals(1, results.count { it.isSuccess })
+        assertTrue(results.single { it.isFailure }.exceptionOrNull() is DuplicateKeyException)
+
+        // Direct-flow orders of the same customer are unaffected, however many there are.
+        repeat(3) { seed(OrderStatus.ACCEPTED, userId = user) }
+
+        // Once the held order ends, the customer may hold again.
+        val active = orders.findActiveHold(user)!!
+        assertEquals(1L, orders.cancelIfUnpaid(active.id))
+        seed(OrderStatus.ACCEPTED, paymentDeferred = true, userId = user)
+    }
+
+    @Test
+    fun `the index counts every waiting state, and a paid order frees the customer`() = runBlocking<Unit> {
+        listOf(OrderStatus.ACCEPTED, OrderStatus.RESERVING, OrderStatus.HELD_AWAITING_PAYMENT).forEach { waiting ->
+            val user = "user-waiting-${UUID.randomUUID()}"
+            seed(waiting, paymentDeferred = true, userId = user)
+            assertThrows<DuplicateKeyException> { seed(OrderStatus.ACCEPTED, paymentDeferred = true, userId = user) }
+        }
+        val user = "user-paid-${UUID.randomUUID()}"
+        val paid = heldOrder("5 minutes", userId = user)
+        assertEquals(1L, orders.submitPayment(paid, "tok_visa"))
+        seed(OrderStatus.ACCEPTED, paymentDeferred = true, userId = user)
+    }
+
+    @Test
+    fun `pipeline age of a customer-hold order starts at the payment, not at creation`() = runBlocking {
+        val id = UUID.randomUUID()
+        orders.save(
+            Order(
+                id = id,
+                userId = "user-age-${UUID.randomUUID()}",
+                status = OrderStatus.HELD_AWAITING_PAYMENT,
+                routeId = "route-1",
+                seats = "A1",
+                travelDate = LocalDate.now().plusDays(3),
+                totalAmount = BigDecimal("10.00"),
+                currency = "EUR",
+                // Created nine minutes ago: the customer read the page for most of T1.
+                createdAt = LocalDateTime.now().minusMinutes(9),
+                paymentDeferred = true,
+                reservationId = "res-age",
+            ).apply { setAsNew(true) },
+        )
+        setDeadline(id, "1 minute")
+        assertEquals(1L, orders.submitPayment(id, "tok_visa"))
+
+        val row = orders.countNonTerminalByState().toList().single { it.status == OrderStatus.PAYMENT_PENDING.name }
+        assertTrue(row.oldestAgeSeconds < 60.0, "age must start at the payment, was ${row.oldestAgeSeconds}s")
+    }
+
+    @Test
+    fun `findExpiredHolds and countOverdueHolds see only held orders past T1`() = runBlocking {
+        val overdue = heldOrder("-30 seconds")
+        val running = heldOrder("5 minutes")
+
+        val expired = orders.findExpiredHolds(1000).toList().map { it.id }
+        assertTrue(overdue in expired)
+        assertFalse(running in expired)
+        val count = orders.countOverdueHolds()
+        assertTrue(count.orderCount >= 1)
+        assertTrue(count.oldestAgeSeconds >= 30.0)
+    }
+
     // --- post-sale refund (ADR-015) -----------------------------------------------------------------
 
     @Test
@@ -428,6 +644,12 @@ class OrderTransitionsIntegrationTest {
 
     private suspend fun seed(
         status: OrderStatus,
+        paymentDeferred: Boolean = false,
+        // Customer-hold seeds get a user of their own: the one-active-hold index would otherwise make
+        // the second deferred ACCEPTED/RESERVING/HELD seed of a test collide with the first.
+        userId: String = if (paymentDeferred) "user-hold-${UUID.randomUUID()}" else "user-transitions",
+        reservationId: String? = null,
+        reservationExpiresAt: OffsetDateTime? = null,
         paymentMethodToken: String? = null,
         offerId: String? = null,
         currency: String = "EUR",
@@ -440,7 +662,7 @@ class OrderTransitionsIntegrationTest {
         orders.save(
             Order(
                 id = id,
-                userId = "user-transitions",
+                userId = userId,
                 status = status,
                 routeId = "route-1",
                 seats = "A1",
@@ -455,8 +677,29 @@ class OrderTransitionsIntegrationTest {
                 refundCutoffMinutesBeforeDeparture = refundCutoffMinutesBeforeDeparture,
                 offerTermsVersion = offerTermsVersion,
                 departureAt = departureAt,
+                paymentDeferred = paymentDeferred,
+                reservationId = reservationId,
+                reservationExpiresAt = reservationExpiresAt,
             ).apply { setAsNew(true) },
         )
+        return id
+    }
+
+    /** Places the order's hold deadline relative to the DATABASE clock, the only one the SQL reads. */
+    private suspend fun setDeadline(id: UUID, offset: String) {
+        db.sql("UPDATE orders SET reservation_expires_at = CURRENT_TIMESTAMP + CAST(:offset AS INTERVAL) WHERE id = :id")
+            .bind("offset", offset)
+            .bind("id", id)
+            .fetch().rowsUpdated().awaitSingle()
+    }
+
+    private suspend fun heldOrder(deadlineOffset: String, userId: String? = null): UUID {
+        val id = if (userId == null) {
+            seed(OrderStatus.HELD_AWAITING_PAYMENT, paymentDeferred = true, reservationId = "res-held")
+        } else {
+            seed(OrderStatus.HELD_AWAITING_PAYMENT, paymentDeferred = true, userId = userId, reservationId = "res-held")
+        }
+        setDeadline(id, deadlineOffset)
         return id
     }
 }
