@@ -556,3 +556,96 @@ about three seconds, so a dependency blip ordinary enough to be routine (an Inve
 strand an order in `REFUNDING` with no reconciliation record at all — `recordSeatReturnFailure` only
 runs on a *definitive* refusal, never on an outcome that merely timed out. `RefundRequestedDeadLetterListener`,
 modelled on `OrderPlacedDeadLetterListener`, closes that gap by opening `DELIVERY_EXHAUSTED`.
+
+## ADR-016: Customer Seat Hold with Two Timers
+
+**Decision:** "Continue" after seat selection creates the order and holds the seats before the customer
+enters payment details. The hold has two server-owned deadlines, both decided by the Inventory database
+clock:
+
+- **T1 — 10 minutes**, from the hold. The customer's time to pay, shown as a countdown. Never renewed.
+- **T2 — 10 minutes**, from the payment submission. Inventory restarts the hold once, in the same
+  locked transaction that checks T1 is still running, so the pipeline has the same ten minutes it has
+  today. Never renewed either, and independent of what was left of T1.
+
+Decided by the team on 2026-10-17. It is the reduced form of the proposal in issue #72: **no 3-D
+Secure**. Payment stays the Stripe token the browser already produces, authorized server-side with no
+further customer action, so Payments, its provider integration and the configuration repository do not
+change. The cost is that EuroTransit still has no Strong Customer Authentication, which #72 would have
+added and which the Definition of Done does not ask for.
+
+**Why.** Until now nothing held a seat until "Pay": the seat map is advisory, so two customers could
+fill in card details for the same seat and one of them only learned at the end that it was taken. The
+hold now starts at the moment the customer commits to a seat, and the customer sees how long it lasts.
+
+### How it fits the existing pipeline
+
+- **Same durable trigger (ADR-011).** `POST /api/orders` without a payment token stores the order with
+  `payment_deferred = true` and writes `order-placed` as before. The consumer takes the hold under
+  `inv-{orderId}` and, instead of authorizing, parks the order in the new non-terminal state
+  `HELD_AWAITING_PAYMENT`. A redelivery in that state does nothing: no Kafka event can start a payment.
+- **Payment is a second, explicit command.** `POST /api/orders/{orderId}/payment` carries the token. In
+  one Orders transaction it moves `HELD_AWAITING_PAYMENT -> PAYMENT_PENDING` with a compare-and-set
+  that also requires T1 not to have passed by the Orders database clock, stores the token, and writes a
+  new `order-placed` outbox row. That row is the recovery trigger: a crash after the commit resumes from
+  `PAYMENT_PENDING` without the browser. Reusing the `order-placed` type rather than a new one keeps the
+  Debezium routing and the Kafka topics in the configuration repository unchanged.
+- **T2 before money.** From `PAYMENT_PENDING`, before calling Payments, Orders asks Inventory to open the
+  payment window (`PUT /api/inventory/reservations/{reservationId}/payment-window`). Inventory locks the
+  reservation row: a `HELD` reservation still inside T1 gets `expires_at = CURRENT_TIMESTAMP + T2` once;
+  a replay returns the same deadline; a reservation past its deadline is expired and refused. Orders
+  stores the new deadline in `reservation_expires_at` and marks the window opened in the same statement,
+  and only then authorizes. A definitive refusal fails the order before any money moves. Inventory is
+  the final authority on T1 (invariant 4); the Orders check at payment submission is only a
+  conservative early refusal.
+- **Confirmation is unchanged (ADR-013).** After authorization the order confirms against the T2
+  deadline exactly as it confirms against the single deadline today.
+- **T1 expiry is an Orders job.** A scheduled job on the Orders database clock moves
+  `HELD_AWAITING_PAYMENT` orders past T1 to `CANCELLED` with a compare-and-set and releases the hold. The
+  job, a customer cancellation and a payment submission all start from the same predecessor, so exactly
+  one wins. The Inventory expiration sweep remains the safety net for the seat itself.
+- **One hold per customer during T1.** A partial unique index on `orders(user_id)` over the deferred
+  orders in `ACCEPTED`, `RESERVING` and `HELD_AWAITING_PAYMENT` refuses a second hold with
+  `409 ACTIVE_HOLD_EXISTS`. It is enforced by the database, so two concurrent requests cannot both pass.
+  After payment the customer may start another booking.
+- **Back or change seat** is `POST /api/orders/{orderId}/cancel`, now accepted in
+  `HELD_AWAITING_PAYMENT` too, followed by a new order. A seat change never mutates an existing
+  reservation.
+- **The direct flow stays.** A `POST /api/orders` that carries the token runs straight through, as it
+  always has. The k6 load test, the canary analysis jobs and the local load script use it; the frontend
+  moves to the new flow.
+
+### Consequences
+
+- The checkout latency SLO can no longer start at `POST /api/orders`: that would count up to ten
+  minutes of the customer reading the page. It starts at the accepted payment submission
+  (`payment_submitted_at`, equal to the creation time for a direct-flow order), and the non-terminal age
+  gauges use the same start.
+- The runbook deadline for redriving a `PAYMENT_PENDING` order is T2 once the window opened, and still
+  T1 if it never did. Because it lives in the same `reservation_expires_at` column, the redrive and
+  abandonment checks need no change.
+- Deployment needs no feature flag. Until the frontend sends a checkout without a token, no order enters
+  `HELD_AWAITING_PAYMENT` and Orders never calls the new Inventory command, so the backend ships first
+  and no older pod meets the new state during a canary.
+
+The protocol, invariants and recovery table are in
+[reservation-confirmation.md](reservation-confirmation.md); the endpoints in
+[api-design.md](api-design.md).
+
+### Alternatives Considered
+
+- **The full #72 proposal.** Provider-driven 3-D Secure needs webhooks, a provider payment identity in
+  Payments, three further Orders states, a durable release protocol and a new ingress route with its own
+  secret. Parked for its size; nothing in the reduced form prevents adding it later.
+- **A new `payment-submitted` event.** Cleaner name, but every outbox type is its own Kafka topic, so it
+  would need a new `KafkaTopic` in the configuration repository. The pipeline dispatches on the durable
+  state, so a second `order-placed` already means "resume this order".
+- **Taking the hold synchronously inside `POST /api/orders`.** It would save the client a short poll, but
+  it would add a second, non-durable path to the same hold and still need the consumer as the recovery
+  path. The client polls `GET /api/orders/{orderId}`, which it already does after payment.
+- **A feature flag.** Not needed, because the request shape selects the flow per order and the rollout
+  order above keeps the new state away from older pods.
+- **Removing the direct flow.** One flow instead of two, but the load test and canary jobs would have to
+  be rewritten in the configuration repository, and a broken canary blocks every Orders release.
+- **Renewing T1 on activity.** Rejected: a hold that renews on polling or page activity lets one
+  customer keep a seat indefinitely.

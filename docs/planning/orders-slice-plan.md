@@ -15,7 +15,7 @@ Do not re-litigate these; they were settled deliberately.
 | Plan scope | The Orders slice, plus a sequencing proposal for the rest of the team |
 | Optimise for | A complete, demonstrable money path — refund included |
 | Post-sale refund | Start on the Orders side now; do not wait on the dependencies |
-| #72 explicit checkout hold | Left open for now; the analysis is posted as a comment, decision deferred |
+| #72 explicit checkout hold | Left open for now; the analysis is posted as a comment, decision deferred. **Superseded 2026-10-17:** the team chose the reduced form without 3-D Secure — step 7, ADR-016 |
 | Splitting the three stages across separate agents | Dropped: the token cost was out of proportion to what it returned. The discipline below is kept, the delegation is not |
 
 ## How I work this slice
@@ -171,6 +171,7 @@ counter-proposal to negotiate.
 | 4 | Refund part 3 — refund state machine and endpoint | **done** — merged as #108 |
 | 5 | Orders canary — prove the one that now exists | **rewritten 2026-09-22, corrected 2026-10-07.** The machinery merged in configuration `eda1fb1`, disabled; three defects in the gates, reported as configuration #50; waits on `progressiveDelivery` and the AKS maintenance window, not on promotions |
 | 6 | Chaos experiments, postmortem, agent log | to be written |
+| 7 | Customer seat hold with two timers (ADR-016, reduced #72) | **in progress** — PR 1 (backend + docs), then PR 2 (frontend) |
 
 Steps 2 to 4 are one feature split by dependency, not three features. Step 3 needs part of #85 to
 have landed — `GET /api/catalog/offers/{offerId}` for 3a, the refund fields for 3b; step 2 needed
@@ -1370,6 +1371,66 @@ until the k6 pacing and the partition count were put next to the thresholds — 
 correct, and they still do not mean what they appear to mean. A gate is only understood once its
 sample size is known.
 
+
+---
+
+## Step 7 — Customer seat hold with two timers (ADR-016)
+
+Team decision of 2026-10-17, discussed with the Orders owner: "Continue" after seat selection holds
+the seats for **T1 = 10 minutes** with a countdown; paying restarts the hold once for **T2 = 10
+minutes**; **no 3-D Secure**, so Payments and the configuration repository stay unchanged. We
+implement Orders, Inventory (Carmelo reviews) and the frontend. The contract is ADR-016 plus the
+sections it links in `reservation-confirmation.md` and `api-design.md`.
+
+### Verified before writing
+
+- The pipeline already has `Step.Park` and an exhaustive `runStage`, so a state that waits for the
+  customer slots in without a new consumer.
+- Debezium routes the outbox by `type`, one topic per type: a new event type would need a
+  `KafkaTopic` in configuration. The payment command therefore writes another `order-placed`.
+- The k6 load test, the canary analysis jobs and `scripts/local-checkout-load.sh` send the token in
+  `POST /api/orders`. The direct flow stays, and the one-hold-per-customer index ignores it.
+- `countNonTerminalByState` and `orders.checkout.e2e.duration` both start at `created_at`; with T1 in
+  between they would count the customer's reading time, firing `CheckoutStuckNonTerminal` (>180 s)
+  falsely. Both move to `payment_submitted_at`.
+- Redrive and abandonment read `reservation_expires_at`; storing the T2 deadline there keeps them
+  correct without code changes.
+- Inventory's expiration sweep is enabled in production (`values-production.yaml`), so it is a real
+  safety net for a failed best-effort release.
+
+### Settled, open, and stop-and-ask
+
+- Settled with the owner: T1 expiry ends in `CANCELLED` (no failure email, no new public code); one
+  hold per customer during T1 only; the direct flow stays; two PRs, backend + docs first, frontend
+  last.
+- Settled in the contract: the payment-window command is a `PUT` idempotent by reservation state (no
+  `paywin-` key), and Orders records `payment_window_opened` with the T2 deadline before calling
+  Payments, so a later refusal is never read as "no money moved".
+- Stop and ask: anything that would touch the configuration repository beyond docs, or Payments.
+
+### Blocks
+
+- **A — contract (docs):** ADR-016, `reservation-confirmation.md`, `api-design.md`.
+- **B — Inventory:** `V8` (`payment_window_started_at`), shared request in `money-path-contracts`,
+  `startPaymentWindow` on the `confirmReservation` pattern, the endpoint, T2 as a property; boundary
+  and concurrency tests against PostgreSQL.
+- **C — Orders:** `V19` (`payment_deferred`, `payment_submitted_at`, `payment_window_opened`, partial
+  unique index), the new state and park, token optional, `/payment`, payment-window stage, T1 expiry
+  job, cancel widened, metrics on `payment_submitted_at`; transition, pipeline, ownership and
+  serialization tests.
+- **D — operations docs:** SLO definition and recovery objectives, runbook deadlines (T2, or T1 if the
+  window never opened). Review agent on the whole PR 1.
+- **E — frontend (PR 2):** hold on "Continue", countdown with `serverNow`, pay, cancel on back, back to
+  seat selection at zero, `409 ACTIVE_HOLD_EXISTS` / `HOLD_EXPIRED`.
+- **F — proof and alignment:** local end-to-end run, comment on #72 (with go-ahead), configuration
+  docs for the SLO wording.
+
+### Done when
+
+The direct flow and the load script behave exactly as before; a customer-hold order can be held,
+paid, cancelled and expired, each race (pay vs cancel vs expiry job; payment window vs sweep vs
+release vs confirm) has one winner in a PostgreSQL test, and the docs of both repositories say the
+same thing.
 
 ---
 

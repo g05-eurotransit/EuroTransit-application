@@ -26,6 +26,7 @@ EuroTransit is designed as an enterprise-grade system. Public APIs must assume a
 | --- | --- | --- | --- |
 | `GET /api/catalog/**` | Public or authenticated depending on offer visibility | Optional for public catalog; required for personalized offers | Public read or customer scope |
 | `POST /api/orders` | External | Required | Customer scope; principal becomes order owner |
+| `POST /api/orders/{orderId}/payment` | External | Required | Order owner only; submits the payment for a held customer-hold order (ADR-016), 404 for anyone else |
 | `GET /api/orders` | External | Required | Customer scope; always scoped to the caller's own orders, with no operations widening |
 | `GET /api/orders/seat-availability` | External | Required | Customer scope; no owned resource, so no ownership check — it is a checkout step, not public browsing |
 | `GET /api/orders/{orderId}` | External | Required | Order owner or privileged operations scope |
@@ -38,6 +39,7 @@ EuroTransit is designed as an enterprise-grade system. Public APIs must assume a
 | `GET /api/inventory/availability` | Internal | Required service credential | Orders service only; read behind the Orders façade, no propagated user context required |
 | `POST /api/inventory/reservations` | Internal | Required service credential plus propagated user context | Orders service only; order owner context required |
 | `PUT /api/inventory/reservations/{reservationId}/confirmation` | Internal | Required service credential plus propagated user context | Orders service only; confirms the reservation for its owning order |
+| `PUT /api/inventory/reservations/{reservationId}/payment-window` | Internal | Required service credential | Orders service only; opens the one-time T2 payment window for its owning order (ADR-016), idempotent by reservation state, no `Idempotency-Key` |
 | `DELETE /api/inventory/reservations/{reservationId}` | Internal | Required service credential plus propagated user context | Orders service only; compensation for owned order |
 | `POST /api/inventory/reservations/{reservationId}/refund` | Internal | Required service credential | Orders service only; post-sale seat return for a refund (ADR-014/ADR-015), idempotent by reservation state, no `Idempotency-Key` |
 | `POST /api/payments/authorize` | Internal | Required service credential plus propagated user context | Orders service only; payment belongs to owned order |
@@ -52,7 +54,7 @@ EuroTransit is designed as an enterprise-grade system. Public APIs must assume a
 | `Authorization`    | Protected external APIs and internal service calls according to the endpoint security summary                                                                                       | Carries a bearer JWT for public APIs or service identity for internal calls.                                                                            |
 | `X-User-Id`        | Internal service-to-service calls (e.g. `POST /api/inventory/reservations`)                                                                                                         | Explicitly propagates the original customer identity when the `Authorization` header carries a service account token instead of the user token.         |
 | `X-Correlation-Id` | All internal calls, logs, and Kafka events                                                                                                                                          | Public clients may provide it; the gateway generates one if absent; services must propagate it unchanged through one checkout flow.                     |
-| `Idempotency-Key`  | `POST /api/orders`, `POST /api/orders/{orderId}/refund`, both `POST /api/orders/{orderId}/reconciliation/**` operations, `POST /api/inventory/reservations`, `POST /api/payments/authorize`, `POST /api/payments/refund` | Identifies one mutating attempt. It is not an authorization credential and must be scoped with caller/user context, operation, and request fingerprint. |
+| `Idempotency-Key`  | `POST /api/orders`, `POST /api/orders/{orderId}/payment`, `POST /api/orders/{orderId}/refund`, both `POST /api/orders/{orderId}/reconciliation/**` operations, `POST /api/inventory/reservations`, `POST /api/payments/authorize`, `POST /api/payments/refund` | Identifies one mutating attempt. It is not an authorization credential and must be scoped with caller/user context, operation, and request fingerprint. |
 
 Idempotency keys are generated at the caller boundary for the operation they protect:
 
@@ -70,10 +72,11 @@ Idempotency retention is service-specific:
 | Service   | Operation                | Retention  |
 |-----------|--------------------------|------------|
 | Orders    | Checkout/order placement | 24 hours   |
+| Orders    | Payment submission       | 24 hours   |
 | Inventory | Seat reservation         | 30 minutes |
 | Payments  | Payment authorization    | 24 hours   |
 
-Inventory seat holds last 10 minutes. The 30-minute idempotency record identifies the original reservation but does not freeze a cached `HELD` response, extend the deadline, or create a replacement hold. A replay resolves the reservation's current state. `reservations.order_id` remains unique after idempotency-record purge, so one order cannot acquire a second reservation.
+Inventory seat holds last 10 minutes. A customer-hold order (ADR-016) gets one more 10-minute window, restarted once by the payment-window command when the customer pays; nothing else extends a hold. The 30-minute idempotency record identifies the original reservation but does not freeze a cached `HELD` response, extend the deadline, or create a replacement hold. A replay resolves the reservation's current state. `reservations.order_id` remains unique after idempotency-record purge, so one order cannot acquire a second reservation.
 
 ## Service Boundaries
 
@@ -124,8 +127,17 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
 ### Orders
 
 - `POST /api/orders`
-  - Accepts a checkout request: `routeId`, `seats`, `travelDate`, `totalAmount`,
-    `paymentMethodToken`, and an optional `offerId`.
+  - Accepts a checkout request: `routeId`, `seats`, `travelDate`, `totalAmount`, `offerId`, and an
+    optional `paymentMethodToken`.
+  - **The token selects the flow (ADR-016).** Without it, the order follows the customer-hold flow:
+    the pipeline holds the seats and stops in `held-awaiting-payment`, and the customer pays with
+    `POST /api/orders/{orderId}/payment` before the hold's T1 deadline. With it, the direct flow runs
+    hold, authorization and confirmation straight through, as it always has; the load test and the
+    canary analysis jobs depend on it. The frontend uses the customer-hold flow.
+  - `409 ACTIVE_HOLD_EXISTS` when the customer already has a customer-hold order in `accepted`,
+    `reserving` or `held-awaiting-payment`. `details.orderId` carries that order, so a client can
+    offer to resume it or cancel it. Enforced by a unique index, so two concurrent requests cannot
+    both pass. Direct-flow orders are not counted.
   - `travelDate` is the ISO day being travelled (`"2026-09-01"`). A route plus a seat does not identify
     a bookable thing on its own: Inventory keys seats by `(route_id, travel_date, seat_id)`, so the same
     physical seat is sold separately for each day.
@@ -176,10 +188,32 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     becomes a definitive hold rejection that fails the order through the normal path.
   - Requires a public-client-generated `Idempotency-Key` so client retries do not create duplicate orders.
     The stored request fingerprint includes `travelDate`, so reusing one key for two different days is an
-    `IDEMPOTENCY_CONFLICT` rather than a replay of the wrong day. It includes `offerId` for the same
+    `IDEMPOTENCY_CONFLICT` rather than a replay of the wrong day. A request with a token keeps exactly
+    the canonical string it had before ADR-016, so keys stored before that change still replay; a
+    request without one has a distinct marker in place of the token. It includes `offerId` for the same
     reason, and only when the field is present, so keys already in flight when the field shipped still
     replay instead of conflicting.
   - Stores checkout idempotency records for 24 hours.
+- `POST /api/orders/{orderId}/payment`
+  - Submits the payment for a customer-hold order (ADR-016): `paymentMethodToken` in the body and a
+    public-client-generated `Idempotency-Key`. Only the order owner may call it; anyone else gets
+    `404`, as for `GET /api/orders/{orderId}`. The operations role does not widen it: staff never pay
+    on a customer's behalf.
+  - In one Orders transaction it moves `held-awaiting-payment` to `payment-pending` — only while the
+    order's `reservationExpiresAt` is still ahead of the Orders database clock — stores the token and
+    the submission time, stores the idempotency record, and writes a new `order-placed` outbox row.
+    The pipeline then opens the T2 payment window in Inventory and authorizes. Returns
+    `202 Accepted` with the order, now `payment-pending`.
+  - The same key with the same token replays the stored response. Refusals, each `409`:
+    `HOLD_EXPIRED` (T1 has passed by the Orders clock; the client goes back to seat selection),
+    `PAYMENT_ALREADY_STARTED` (a payment for this order was already accepted under another key or
+    token — the first one stands, and the later token is not used), `ORDER_NOT_PAYABLE` (any other
+    state, including a direct-flow order, a cancelled one, or one still `reserving`), and
+    `IDEMPOTENCY_CONFLICT` (same key, different token).
+  - Inventory remains the authority on T1 (invariant 4): a payment admitted here a moment before the
+    Inventory deadline is refused by the payment-window command and the order fails before any money
+    moves.
+  - Stores payment-submission idempotency records for 24 hours.
 - `GET /api/orders`
   - Returns the authenticated customer's own order history, newest first.
   - Accepts an optional `status` filter, so a "my tickets" view is `?status=CONFIRMED` while the
@@ -241,7 +275,7 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     filter and selling a seat on a departed run.
 
 - `GET /api/orders/{orderId}`
-  - Returns the current order status: accepted, reserving, payment-pending, confirming-inventory, compensating, confirmed, failed, cancelled, refunding, or refunded. The last two are a separate durable process (ADR-015), reachable only from confirmed.
+  - Returns the current order status: accepted, reserving, held-awaiting-payment, payment-pending, confirming-inventory, compensating, confirmed, failed, cancelled, refunding, or refunded. The last two are a separate durable process (ADR-015), reachable only from confirmed.
   - Includes `travelDate`, distinct from `createdAt`: the day of travel, not the day of purchase.
   - Includes `currency` beside `totalAmount`, so an amount is never presented without the unit it was
     actually authorized in.
@@ -259,10 +293,15 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     has that revision.
   - Once seats are held, includes `reservationExpiresAt`: the Inventory hold deadline, carried as an
     offset-bearing instant because it is produced by the Inventory database clock and consumed by a
-    browser in an unknown zone. It is the deadline for the *checkout* to converge — covering crash,
-    retry, and Kafka lag — and **not** a payment window: the payment token arrives with the checkout
-    request and the pipeline runs server-side with no user interaction. Clients must not present it
-    as "you have ten minutes to pay". A customer-driven payment step is issue #72, deferred.
+    browser in an unknown zone. What it means depends on the state (ADR-016). In
+    `held-awaiting-payment` it is T1, the customer's deadline to pay, and clients show it as a
+    countdown. From `payment-pending` onward it is the deadline for the *checkout* to converge —
+    covering crash, retry, and Kafka lag — which in the customer-hold flow becomes T2 once the payment
+    window opens; it is not a customer deadline and clients must not count it down. 3-D Secure and
+    other customer actions after payment are not supported (#72).
+  - Includes `serverNow`, the Orders server's current instant, so a client can correct its own clock
+    before counting down to `reservationExpiresAt`. The countdown is presentation only; the server
+    decides whether a payment is still accepted.
   - On a `failed` order, includes `failureCode` and a ready-to-display `failureMessage`. The code is
     drawn from a deliberately small closed set — `SEATS_UNAVAILABLE`, `PAYMENT_DECLINED`, and a
     generic `CHECKOUT_FAILED` — because only the first two describe something a customer can act on.
@@ -274,7 +313,8 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
 - `POST /api/orders/{orderId}/cancel`
   - Cancels an order that has not yet started payment authorization, releasing any seat hold.
   - Requires the authenticated customer to own the order, or an operations role.
-  - Accepted only while the order is `accepted` or `reserving`. From `payment-pending` onward it
+  - Accepted only while the order is `accepted`, `reserving` or `held-awaiting-payment`; the last is
+    how the customer-hold flow goes back or changes seat — cancel, then a new order. From `payment-pending` onward it
     returns `409 ORDER_NOT_CANCELLABLE`, which is what closes the cancellation race before money
     moves; post-sale cancellation is a separate business process and cannot use hold release.
 - `POST /api/orders/{orderId}/refund`
@@ -396,6 +436,18 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
   - Is idempotent by reservation and order: a first success and every valid replay return `200 CONFIRMED`.
   - Serializes with expiration and release. If expiration wins, confirmation returns a stable conflict and cannot resurrect the reservation.
   - Uses the protocol and failure semantics defined in [reservation-confirmation.md](reservation-confirmation.md).
+- `PUT /api/inventory/reservations/{reservationId}/payment-window`
+  - Opens the one-time payment window (T2) of a customer-hold reservation for the owning `orderId`
+    (ADR-016): under the reservation-row lock, a `HELD` reservation whose deadline has not passed by
+    the Inventory database clock gets `expiresAt = now + T2` (default 10 minutes) once.
+  - Idempotent by reservation state, no `Idempotency-Key`: a replay after the window opened returns
+    `200 HELD` with the same deadline and never extends it again.
+  - Refusals: `404 RESERVATION_NOT_FOUND`, `409 RESERVATION_ORDER_CONFLICT`,
+    `409 RESERVATION_EXPIRED` (the deadline has passed — the reservation is expired and its seats
+    released in the same transaction), `409 RESERVATION_CANCELLED`, `409 RESERVATION_NOT_HELD`
+    (`CONFIRMED` or `REFUNDED`).
+  - Serializes with confirmation, release, and expiration; the full mapping is in
+    [reservation-confirmation.md](reservation-confirmation.md#payment-window-api-adr-016).
 - `DELETE /api/inventory/reservations/{reservationId}`
   - Releases a hold when payment fails, the order is cancelled, or the 10-minute hold expires.
   - Is idempotent by reservation state, operates only on `HELD`, never releases `CONFIRMED`/`SOLD`, and does not require an `Idempotency-Key`.
@@ -545,13 +597,15 @@ The selected money path is hybrid sync+async:
 9. Kafka publishes facts such as `order-confirmed` and asynchronous work such as `notification-requested`.
 10. Notifications consumes events asynchronously; if it is down, checkout remains successful and Kafka retains the work.
 
+In the customer-hold flow (ADR-016), step 1 carries no payment token and the pipeline stops after step 4 in `HELD_AWAITING_PAYMENT`, with the seats held for T1. The customer then submits `POST /api/orders/{orderId}/payment`, which moves the order to `PAYMENT_PENDING` and writes a new `order-placed` row; the pipeline opens the T2 payment window in Inventory and continues from step 6.
+
 ## Resilience Requirements
 
 - All synchronous service calls must have timeouts, bounded retries with backoff/jitter, circuit breakers, and bulkheads.
 - Orders must flip readiness to refuse new traffic during shutdown while in-flight coroutine work drains or is cancelled cooperatively. Orders drains: the record in progress finishes and the rest is redelivered and resumed from durable state ([orders-shutdown-and-replay.md](../operations/orders-shutdown-and-replay.md)).
 - Inventory and Payments must persist idempotency records so duplicate events or HTTP retries return the same outcome.
 - Orders persists checkout idempotency records for 24 hours, Inventory persists reservation idempotency records for 30 minutes, and Payments persists authorization idempotency records for 24 hours.
-- Inventory holds must expire after 10 minutes if payment does not complete, returning the seat to available state. Inventory idempotency retention must not renew an expired hold.
+- Inventory holds must expire after 10 minutes if payment does not complete, returning the seat to available state; a customer-hold reservation gets its one T2 window from the payment submission (ADR-016). Inventory idempotency retention must not renew an expired hold.
 - Reservation confirmation, expiration, and release must use atomic state transitions. Unknown confirmation outcomes are retried or reconciled; they are not treated as definitive failures.
 - Kafka retry exhaustion publishes to `order-placed.DLT`; a DLT consumer creates a reconciliation record without changing the durable checkout phase or issuing speculative compensation. Redrive uses the transactional outbox and resumes from the stored order state.
 - Notification failure is a degraded mode, not a checkout failure.
