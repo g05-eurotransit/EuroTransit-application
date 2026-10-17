@@ -9,6 +9,15 @@ export const HAPPY_PATH: { status: OrderStatus; label: string; icon: string }[] 
   { status: "CONFIRMED", label: "Confirmed", icon: "bi-check-circle" },
 ];
 
+/**
+ * The step a status is drawn on. A customer-hold order waiting for its payment (ADR-016) sits on the
+ * "Payment" step: the seats are held and the next thing to happen is the customer paying.
+ */
+export function stepIndexOf(status: OrderStatus): number {
+  const shown = status === "HELD_AWAITING_PAYMENT" ? "PAYMENT_PENDING" : status;
+  return HAPPY_PATH.findIndex((s) => s.status === shown);
+}
+
 type StepState = "done" | "active" | "pending";
 
 function stepCircleClass(state: StepState): string {
@@ -19,7 +28,7 @@ function stepCircleClass(state: StepState): string {
 
 function stepStates(status: OrderStatus): StepState[] {
   if (status === "COMPENSATING") return ["done", "done", "done", "done", "active"];
-  const currentIndex = HAPPY_PATH.findIndex((s) => s.status === status);
+  const currentIndex = stepIndexOf(status);
   return HAPPY_PATH.map((_, i) => {
     if (status === "CONFIRMED") return "done";
     if (i < currentIndex) return "done";
@@ -35,7 +44,7 @@ function progressPercent(status: OrderStatus): number {
     const idx = HAPPY_PATH.findIndex((s) => s.status === "CONFIRMING_INVENTORY");
     return (idx / (HAPPY_PATH.length - 1)) * 100;
   }
-  const idx = HAPPY_PATH.findIndex((s) => s.status === status);
+  const idx = stepIndexOf(status);
   return (idx / (HAPPY_PATH.length - 1)) * 100;
 }
 

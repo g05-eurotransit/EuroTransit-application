@@ -36,6 +36,36 @@ Every security decision is grounded in the course's **Frontend Security lecture 
   401→login, 403/404→not-authorized/not-found, 409→conflict, 422→business error,
   503→dependency/circuit-open.
 
+## Checkout with a seat hold (ADR-016)
+
+The checkout is two calls, minutes apart, and the seats are held between them.
+
+- **Continue** (`SeatSelectionPage`) sends `POST /api/orders` **without** a payment token, which
+  tells Orders to hold the seats and wait. The page goes to `/checkout?orderId=…`. The order id lives in
+  the URL, so a reload resumes the same order rather than holding the seats a second time.
+- Its `Idempotency-Key` is kept in `sessionStorage` per selection (route, date, seats) until Orders
+  answers. A click after a lost response therefore replays the same order. This is a random request id,
+  not a credential; the token-storage rule above is about the access token, which never goes there.
+- **The payment page** (`CheckoutPage`) polls the order until it is `HELD_AWAITING_PAYMENT`, then
+  counts down to `reservationExpiresAt` (T1, ten minutes).
+  - The countdown is corrected by `serverNow`, so a wrong PC clock does not change it. It is
+    presentation only: the server decides whether a payment is still accepted.
+  - If the hold failed because the seats were taken, the customer goes back to the seat map with a
+    message.
+- **Pay now** creates the Stripe token and sends it to `POST /api/orders/{orderId}/payment`, then
+  follows the order on `/orders/{orderId}` as before.
+  - `HOLD_EXPIRED` / `ORDER_NOT_PAYABLE` → back to the seats with "time ran out".
+  - `PAYMENT_ALREADY_STARTED` (another tab paid) → the order page.
+- **What releases the seats.** The page's own back button cancels the order. The countdown
+  reaching zero also cancels it, so a new hold is possible at once instead of after the server's expiry job.
+  Closing the tab, browser back or losing the network do **not**: browser exit signals are not
+  reliable, so the hold simply runs out at T1.
+- **One hold per customer.** A second Continue while a hold is waiting gets `409 ACTIVE_HOLD_EXISTS`. The
+  seat page then offers **Resume** (the waiting order) or **Cancel it and continue**.
+- **No second countdown.** After the payment the order page shows progress only. The deadline Orders
+  keeps for the rest of the checkout (T2) is the pipeline's, not the customer's, and the UI never shows or
+  names it. A held order opened from the order list shows **Complete payment**.
+
 ## SSE (live notifications)
 
 - Uses `@microsoft/fetch-event-source`, **not** the native `EventSource`, specifically so
@@ -84,4 +114,4 @@ Every security decision is grounded in the course's **Frontend Security lecture 
   from `*` to the real frontend origin; add the Traefik CSP/HSTS/security-headers middleware
   on the frontend route (roll out `Content-Security-Policy-Report-Only` first — slide 23).
 - **Person 4 (payments):** confirm the exact `paymentMethodToken` value/format the sandbox
-  provider accepts (the UI currently sends `tok_visa`).
+  provider accepts (the UI sends the token Stripe.js creates from the card form).

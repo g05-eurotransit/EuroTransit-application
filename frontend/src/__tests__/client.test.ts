@@ -63,6 +63,15 @@ describe("apiFetch", () => {
     });
   });
 
+  it("carries the error's details, such as the waiting order of ACTIVE_HOLD_EXISTS", async () => {
+    const f = mockFetch(409, { code: "ACTIVE_HOLD_EXISTS", message: "m", details: { orderId: "o-waiting" } }, false);
+    vi.stubGlobal("fetch", f);
+    await expect(apiFetch("/orders", { method: "POST" })).rejects.toMatchObject({
+      code: "ACTIVE_HOLD_EXISTS",
+      details: { orderId: "o-waiting" },
+    });
+  });
+
   it("wraps a thrown fetch as a network ApiError", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
     const err = await apiFetch("/catalog/routes").catch((e: unknown) => e);

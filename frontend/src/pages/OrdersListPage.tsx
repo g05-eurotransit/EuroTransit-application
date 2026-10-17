@@ -21,6 +21,7 @@ const STATUS_VARIANT: Record<OrderStatus, string> = {
   CANCELLED: "danger",
   ACCEPTED: "warning",
   RESERVING: "warning",
+  HELD_AWAITING_PAYMENT: "warning",
   PAYMENT_PENDING: "warning",
   CONFIRMING_INVENTORY: "warning",
   COMPENSATING: "accent",

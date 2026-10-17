@@ -3,6 +3,8 @@ import { apiFetch } from "./client";
 export type OrderStatus =
   | "ACCEPTED"
   | "RESERVING"
+  // Customer-hold flow (ADR-016): seats held, waiting for the customer to pay before the deadline.
+  | "HELD_AWAITING_PAYMENT"
   | "PAYMENT_PENDING"
   | "CONFIRMING_INVENTORY"
   | "CONFIRMED"
@@ -10,13 +12,16 @@ export type OrderStatus =
   | "CANCELLED"
   | "COMPENSATING";
 
-export interface CheckoutRequest {
+/**
+ * What "Continue" sends. Deliberately no payment token: without one, Orders holds the seats and waits
+ * for [submitPayment] (ADR-016). The token-carrying direct flow is for the load test and canary jobs.
+ */
+export interface HoldRequest {
   routeId: string;
   seats: string[];
   travelDate: string;
   totalAmount: number;
-  paymentMethodToken: string;
-  offerId?: string;
+  offerId: string;
 }
 
 export interface CheckoutResponse {
@@ -35,7 +40,14 @@ export interface OrderView {
   travelDate: string;
   totalAmount: number;
   createdAt: string;
+  /**
+   * In HELD_AWAITING_PAYMENT: the customer's deadline to pay (T1), shown as a countdown. After the
+   * payment it is the pipeline's own deadline (T2), which is never shown to the customer.
+   */
   reservationExpiresAt?: string | null;
+  /** The server's clock when it answered, so the countdown does not trust the browser's clock. */
+  serverNow?: string | null;
+  offerId?: string | null;
   failureCode?: FailureCode | null;
   failureMessage?: string | null;
 }
@@ -57,11 +69,12 @@ export interface SeatAvailabilityView {
 }
 
 /**
- * Place a checkout. Requires auth + a fresh Idempotency-Key per attempt (reused only on
- * retry of the SAME attempt). The correlationId ties this UI action to the money-path trace.
+ * "Continue": creates the order and has Orders hold the seats (ADR-016). Answers 202 at once; the hold
+ * itself is taken asynchronously, so the caller polls [getOrder] until HELD_AWAITING_PAYMENT (or
+ * FAILED when the seats were taken). A fresh Idempotency-Key per attempt, reused only to retry it.
  */
-export function placeOrder(
-  body: CheckoutRequest,
+export function createHold(
+  body: HoldRequest,
   idempotencyKey: string,
   correlationId: string,
   signal?: AbortSignal,
@@ -72,6 +85,33 @@ export function placeOrder(
     auth: true,
     idempotencyKey,
     correlationId,
+    signal,
+  });
+}
+
+/** "Pay now": the Stripe token for a held order. 202 with PAYMENT_PENDING; the rest is asynchronous. */
+export function submitPayment(
+  orderId: string,
+  paymentMethodToken: string,
+  idempotencyKey: string,
+  correlationId: string,
+  signal?: AbortSignal,
+): Promise<CheckoutResponse> {
+  return apiFetch<CheckoutResponse>(`/orders/${encodeURIComponent(orderId)}/payment`, {
+    method: "POST",
+    body: { paymentMethodToken },
+    auth: true,
+    idempotencyKey,
+    correlationId,
+    signal,
+  });
+}
+
+/** Back / change seat: cancels an unpaid order and releases its seats. */
+export function cancelOrder(orderId: string, signal?: AbortSignal): Promise<OrderView> {
+  return apiFetch<OrderView>(`/orders/${encodeURIComponent(orderId)}/cancel`, {
+    method: "POST",
+    auth: true,
     signal,
   });
 }

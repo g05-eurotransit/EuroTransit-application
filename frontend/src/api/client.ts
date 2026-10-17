@@ -22,6 +22,8 @@ export class ApiError extends Error {
     override readonly message: string,
     readonly code?: string,
     readonly correlationId?: string,
+    // Machine-readable extras some conflicts carry, e.g. the waiting order of ACTIVE_HOLD_EXISTS.
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "ApiError";
@@ -91,19 +93,22 @@ export async function apiFetch<T>(path: string, opts: RequestOptions = {}): Prom
     let code: string | undefined;
     let message = res.statusText;
     let correlationId: string | undefined;
+    let details: Record<string, unknown> | undefined;
     try {
       const problem = (await res.json()) as {
         code?: string;
         message?: string;
         correlationId?: string;
+        details?: Record<string, unknown>;
       };
       code = problem.code;
       message = problem.message ?? message;
       correlationId = problem.correlationId;
+      details = problem.details;
     } catch {
       // non-JSON error body; keep statusText
     }
-    throw new ApiError(kindForStatus(res.status), res.status, message, code, correlationId);
+    throw new ApiError(kindForStatus(res.status), res.status, message, code, correlationId, details);
   }
 
   if (res.status === 204) return undefined as T;
