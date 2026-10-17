@@ -139,7 +139,13 @@ class CheckoutOrchestratorTest {
 
         override suspend fun getOrderById(id: UUID): Order? = ordersById[id]
 
+        /** Simulates the blocking hold ending between the failed insert and the read that explains it. */
+        var duplicateWithNoActiveHold = false
+
         override suspend fun saveOrder(order: Order): Order {
+            if (duplicateWithNoActiveHold && order.paymentDeferred) {
+                throw DuplicateKeyException("uk_orders_one_active_hold_per_user")
+            }
             // V19's partial unique index: one waiting customer-hold order per customer.
             if (order.paymentDeferred && activeHoldOf(order.userId) != null) {
                 throw DuplicateKeyException("uk_orders_one_active_hold_per_user")
@@ -1758,6 +1764,29 @@ class CheckoutOrchestratorTest {
         assertEquals(first.orderId, ex.details?.get("orderId"))
         // A direct-flow checkout is not affected by the waiting hold.
         orchestrator.checkout(deferredRequest(listOf("3A")).copy(paymentMethodToken = "tok_visa"), "key-3", "user-1", null)
+    }
+
+    @Test
+    fun `a hold that ended between the insert and the read is a retryable conflict, not a 500`() = runTest {
+        val service = FakeOrderService().apply { duplicateWithNoActiveHold = true }
+
+        val ex = assertThrows<ApiException> { orchestratorFor(service).checkout(deferredRequest(), "key-race", "user-1", null) }
+
+        assertEquals(HttpStatus.CONFLICT, ex.status)
+        assertEquals("ACTIVE_HOLD_EXISTS", ex.code)
+        assertNull(ex.details?.get("orderId"))
+    }
+
+    @Test
+    fun `a payment after the expiry job cancelled the order is still HOLD_EXPIRED`() = runTest {
+        val service = FakeOrderService()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = heldOrder(orderId, deadline = service.dbNow.minusSeconds(20))
+            .apply { status = OrderStatus.CANCELLED }
+
+        val ex = assertThrows<ApiException> { orchestratorFor(service).submitPayment(orderId, "tok_visa", "k", "user-1") }
+
+        assertEquals("HOLD_EXPIRED", ex.code)
     }
 
     @Test

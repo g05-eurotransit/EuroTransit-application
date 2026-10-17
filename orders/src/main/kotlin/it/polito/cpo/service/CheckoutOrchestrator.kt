@@ -334,9 +334,18 @@ class CheckoutOrchestrator(
             )
         }
         // A direct-flow order is not counted by the index, so for it the duplicate cannot be the hold.
-        val active = (if (order.paymentDeferred) orderService.findActiveHold(userId) else null)
-            ?: throw duplicate
+        if (!order.paymentDeferred) throw duplicate
         meterRegistry.counter("orders.checkout.rejected", "reason", "active_hold_exists").increment()
+        // The blocking hold can end between the failed insert and this read (paid, cancelled, expired).
+        // Then there is nothing to point at, and the honest answer is the same conflict with no order:
+        // the customer simply tries again, and this time the insert passes. Not a raw 500.
+        val active = orderService.findActiveHold(userId)
+            ?: throw ApiException(
+                HttpStatus.CONFLICT,
+                "ACTIVE_HOLD_EXISTS",
+                "Your previous held checkout has just ended. Please try again.",
+                mapOf("orderId" to null),
+            )
         throw ApiException(
             HttpStatus.CONFLICT,
             "ACTIVE_HOLD_EXISTS",
@@ -450,8 +459,14 @@ class CheckoutOrchestrator(
     private suspend fun paymentRefusal(orderId: UUID): ApiException {
         val order = orderService.getOrderById(orderId)
             ?: return ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "Order not found")
+        // A hold past T1 is the same answer whether the expiry job has already cancelled the order or not
+        // yet: the job runs every few seconds, and the customer's situation is identical either way.
+        // The JVM clock only picks the wording here; the decision was the compare-and-set's.
+        val expiredHold = order.paymentDeferred &&
+            order.reservationExpiresAt?.isAfter(OffsetDateTime.now()) == false &&
+            (order.status == OrderStatus.HELD_AWAITING_PAYMENT || order.status == OrderStatus.CANCELLED)
         val (code, message) = when {
-            order.status == OrderStatus.HELD_AWAITING_PAYMENT ->
+            order.status == OrderStatus.HELD_AWAITING_PAYMENT || expiredHold ->
                 "HOLD_EXPIRED" to "The time to pay for these seats has run out. Please choose your seats again."
             order.paymentDeferred && order.paymentSubmittedAt != null ->
                 "PAYMENT_ALREADY_STARTED" to "A payment for this order has already been accepted."

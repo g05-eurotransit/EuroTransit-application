@@ -626,7 +626,11 @@ hold now starts at the moment the customer commits to a seat, and the customer s
   abandonment checks need no change.
 - Deployment needs no feature flag. Until the frontend sends a checkout without a token, no order enters
   `HELD_AWAITING_PAYMENT` and Orders never calls the new Inventory command, so the backend ships first
-  and no older pod meets the new state during a canary.
+  and no older pod meets the new state during a canary. The order is therefore load-bearing: Inventory
+  and Orders both fully rolled out before the frontend, and no other client may omit the token before
+  then. An older Orders pod cannot read the new state, and would authorize a second `order-placed`
+  without opening the payment window; an older Inventory answers the window command with a code-less
+  `404`, which Orders treats as unknown and retries to the dead-letter topic.
 
 The protocol, invariants and recovery table are in
 [reservation-confirmation.md](reservation-confirmation.md); the endpoints in

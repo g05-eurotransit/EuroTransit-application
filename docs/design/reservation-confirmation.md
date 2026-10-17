@@ -466,7 +466,7 @@ In the customer-hold flow, steps 1 to 3 become:
 | `PAYMENT_PENDING` exhausted and its hold expired | An operator abandons it: transition to `COMPENSATING`, reverse with `refund-{orderId}`, release the hold, then `FAILED`. If Payments holds no `AUTHORIZED` row, keep `COMPENSATING` under `PAYMENT_OUTCOME_UNKNOWN` until an operator settles it with provider evidence; then `FAILED`. Payments writes its row only after the provider answers, so no row does not prove no charge. |
 | Hold release outcome unknown before payment | Repeat release; expiration is the final safety net. |
 | Customer-hold order reaches T1 unpaid | The T1 expiry job moves `HELD_AWAITING_PAYMENT` to `CANCELLED` and releases the hold best-effort; no notification is sent. |
-| Payment submitted after T1 by the Orders clock | The compare-and-set fails; `409 HOLD_EXPIRED`, no state change. |
+| Payment submitted after T1 by the Orders clock | The compare-and-set fails; `409 HOLD_EXPIRED`, no state change. The same code answers once the expiry job has cancelled the order. |
 | Payment submitted twice with different keys or tokens | The first compare-and-set wins; the other request returns `409 PAYMENT_ALREADY_STARTED`. |
 | Crash after the payment commit, before any remote call | The new `order-placed` row resumes `PAYMENT_PENDING` without the browser. |
 | Payment-window outcome unknown | Keep `PAYMENT_PENDING`, window not recorded; repeat the same `PUT`. Do not call Payments. |

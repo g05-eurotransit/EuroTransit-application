@@ -14,6 +14,11 @@ import org.springframework.stereotype.Component
  * that re-checks the deadline against the database clock, so two replicas picking the same order
  * produce one cancellation and one no-op. The Inventory expiration sweep frees the seat itself at
  * the same deadline regardless, so a late or failed run here delays only the order's status.
+ *
+ * It shares Spring's single default scheduler thread with the other `@Scheduled` jobs (gauges,
+ * idempotency cleanup), and its releases are sequential: a slow Inventory delays those jobs by up to
+ * one batch of release timeouts, bounded by the circuit breaker. Accepted rather than given a pool of
+ * its own, since none of those jobs is on the money path.
  */
 @Component
 class HoldExpiryJob(

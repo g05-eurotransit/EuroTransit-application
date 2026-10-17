@@ -137,7 +137,8 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
   - `409 ACTIVE_HOLD_EXISTS` when the customer already has a customer-hold order in `accepted`,
     `reserving` or `held-awaiting-payment`. `details.orderId` carries that order, so a client can
     offer to resume it or cancel it. Enforced by a unique index, so two concurrent requests cannot
-    both pass. Direct-flow orders are not counted.
+    both pass. Direct-flow orders are not counted. `details.orderId` is null when the blocking order
+    ended in the instant between the refusal and the lookup: the client simply retries.
   - `travelDate` is the ISO day being travelled (`"2026-09-01"`). A route plus a seat does not identify
     a bookable thing on its own: Inventory keys seats by `(route_id, travel_date, seat_id)`, so the same
     physical seat is sold separately for each day.
@@ -207,10 +208,11 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     response; the client follows the rest on `GET /api/orders/{orderId}`.
   - `400 PAYMENT_TOKEN_REQUIRED` for a blank token, before the order is touched.
   - The same key with the same token replays the stored response. Refusals, each `409`:
-    `HOLD_EXPIRED` (T1 has passed by the Orders clock; the client goes back to seat selection),
+    `HOLD_EXPIRED` (T1 has passed by the Orders clock, whether or not the expiry job has already
+    cancelled the order; the client goes back to seat selection),
     `PAYMENT_ALREADY_STARTED` (a payment for this order was already accepted under another key or
     token — the first one stands, and the later token is not used), `ORDER_NOT_PAYABLE` (any other
-    state, including a direct-flow order, a cancelled one, or one still `reserving`), and
+    state, including a direct-flow order, one the customer cancelled, or one still `reserving`), and
     `IDEMPOTENCY_CONFLICT` (same key, different token).
   - Inventory remains the authority on T1 (invariant 4): a payment admitted here a moment before the
     Inventory deadline is refused by the payment-window command and the order fails before any money
