@@ -61,6 +61,120 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
         reservationExpiresAt: OffsetDateTime,
     ): Long
 
+    // --- Customer-hold flow (ADR-016) -------------------------------------------------------------
+
+    // The customer-hold counterpart of markPaymentPending: same pinning to one reservation id, same
+    // id-and-deadline-in-one-statement rule, but the order stops here and waits for the customer.
+    // `payment_deferred` is in the predicate so a direct-flow order can never be parked by mistake.
+    @Modifying
+    @Query(
+        """
+        UPDATE orders
+           SET status = 'HELD_AWAITING_PAYMENT',
+               reservation_id = :reservationId,
+               reservation_expires_at = :reservationExpiresAt
+        WHERE id = :id
+          AND payment_deferred
+          AND (status = 'RESERVING'
+               OR (status = 'HELD_AWAITING_PAYMENT' AND reservation_id = :reservationId))
+        """,
+    )
+    suspend fun markHeldAwaitingPayment(
+        id: UUID,
+        reservationId: String,
+        reservationExpiresAt: OffsetDateTime,
+    ): Long
+
+    // The payment command's compare-and-set. T1 is checked HERE, against the database clock, not by
+    // the caller: the T1 expiry job runs the opposite predicate on the same row, so at most one of the
+    // two can ever match, and the row lock serializes them with a customer cancellation as well.
+    // Conservative only — Inventory decides T1 for good in the payment-window transaction.
+    // No self-transition: a second submission must see 0 rows and be told the payment already started.
+    @Modifying
+    @Query(
+        """
+        UPDATE orders
+           SET status = 'PAYMENT_PENDING',
+               payment_method_token = :paymentMethodToken,
+               payment_submitted_at = CURRENT_TIMESTAMP
+        WHERE id = :id
+          AND payment_deferred
+          AND status = 'HELD_AWAITING_PAYMENT'
+          AND reservation_expires_at > CURRENT_TIMESTAMP
+        """,
+    )
+    suspend fun submitPayment(id: UUID, paymentMethodToken: String): Long
+
+    // Records the T2 deadline Inventory returned together with the marker that the window is open,
+    // before Payments is called. Pinned to the stored reservation, and repeatable: a redelivery that
+    // receives the same deadline rewrites the same values.
+    @Modifying
+    @Query(
+        """
+        UPDATE orders
+           SET reservation_expires_at = :reservationExpiresAt,
+               payment_window_opened = TRUE
+        WHERE id = :id
+          AND payment_deferred
+          AND status = 'PAYMENT_PENDING'
+          AND reservation_id = :reservationId
+        """,
+    )
+    suspend fun markPaymentWindowOpened(
+        id: UUID,
+        reservationId: String,
+        reservationExpiresAt: OffsetDateTime,
+    ): Long
+
+    // The T1 expiry job's transition. The deadline is re-checked against the database clock in the
+    // statement itself, so a candidate selected a moment ago whose customer paid in between is left
+    // alone. CANCELLED, not FAILED: nothing went wrong, the customer did not pay, and no failure
+    // notification is sent (decided with the Orders owner, 2026-10-17).
+    @Modifying
+    @Query(
+        """
+        UPDATE orders SET status = 'CANCELLED', payment_method_token = NULL
+        WHERE id = :id
+          AND status = 'HELD_AWAITING_PAYMENT'
+          AND reservation_expires_at <= CURRENT_TIMESTAMP
+        """,
+    )
+    suspend fun cancelExpiredHold(id: UUID): Long
+
+    @Query(
+        """
+        SELECT * FROM orders
+         WHERE status = 'HELD_AWAITING_PAYMENT' AND reservation_expires_at <= CURRENT_TIMESTAMP
+         ORDER BY reservation_expires_at
+         LIMIT :limit
+        """,
+    )
+    fun findExpiredHolds(limit: Int): Flow<Order>
+
+    // The order an ACTIVE_HOLD_EXISTS refusal points the customer to: the same predicate as the
+    // unique index, so it finds the row that made the insert fail.
+    @Query(
+        """
+        SELECT * FROM orders
+         WHERE user_id = :userId
+           AND payment_deferred
+           AND status IN ('ACCEPTED', 'RESERVING', 'HELD_AWAITING_PAYMENT')
+         LIMIT 1
+        """,
+    )
+    suspend fun findActiveHold(userId: String): Order?
+
+    // How far behind the T1 expiry job is: held orders already past their deadline, and by how much.
+    @Query(
+        """
+        SELECT COUNT(*) AS order_count,
+               COALESCE(MAX(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - reservation_expires_at))), 0) AS oldest_age_seconds
+          FROM orders
+         WHERE status = 'HELD_AWAITING_PAYMENT' AND reservation_expires_at <= CURRENT_TIMESTAMP
+        """,
+    )
+    suspend fun countOverdueHolds(): OverdueHoldsRow
+
     @Modifying
     @Query(
         """
@@ -129,12 +243,14 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
     // Customer cancellation is accepted only while no payment authorization has started
     // (reservation-confirmation.md:147-149). From PAYMENT_PENDING onward the controller answers
     // 409 ORDER_NOT_CANCELLABLE. Closing the race before authorization is what makes every
-    // post-authorization phase single-writer.
+    // post-authorization phase single-writer. HELD_AWAITING_PAYMENT is included because that is how a
+    // customer-hold checkout goes back or changes seat (ADR-016); it races the payment command on the
+    // same predecessor, so a payment that won makes this affect 0 rows.
     @Modifying
     @Query(
         """
         UPDATE orders SET status = 'CANCELLED', payment_method_token = NULL
-        WHERE id = :id AND status IN ('ACCEPTED', 'RESERVING')
+        WHERE id = :id AND status IN ('ACCEPTED', 'RESERVING', 'HELD_AWAITING_PAYMENT')
         """,
     )
     suspend fun cancelIfUnpaid(id: UUID): Long
@@ -244,6 +360,13 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
      *
      * `created_at` is `TIMESTAMP WITHOUT TIME ZONE`, so its age is computed against `LOCALTIMESTAMP`;
      * comparing it with `CURRENT_TIMESTAMP` would silently offset every age by the session time zone.
+     * `HELD_AWAITING_PAYMENT` (ADR-016) is selected for its count only — the active customer holds.
+     * Its age is computed like any other row's and then not published: `PipelineStateGaugeJob`
+     * registers the age gauge for the pipeline phases alone, because that gauge feeds the
+     * checkout-stuck alert and a customer reading the checkout page is not a stuck pipeline.
+     * A customer-hold order (ADR-016) is measured from `payment_submitted_at` instead: before that
+     * the customer was reading the checkout page, which is up to ten minutes nobody should be paged
+     * for. Like `refund_requested_at` it is `TIMESTAMPTZ`, compared against `CURRENT_TIMESTAMP`.
      * `REFUNDING`'s age is measured differently and deliberately **not** from `created_at`: that column
      * is the *purchase* time, and a ticket bought months ago and refunded moments ago would otherwise
      * report an age of months the instant it enters `REFUNDING` — firing every age threshold on a
@@ -257,16 +380,24 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
                COALESCE(MAX(
                    CASE WHEN status = 'REFUNDING'
                         THEN EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - refund_requested_at))
+                        WHEN payment_submitted_at IS NOT NULL
+                        THEN EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - payment_submitted_at))
                         ELSE EXTRACT(EPOCH FROM (LOCALTIMESTAMP - created_at))
                    END
                ), 0) AS oldest_age_seconds
           FROM orders
-         WHERE status IN ('PAYMENT_PENDING', 'CONFIRMING_INVENTORY', 'COMPENSATING', 'REFUNDING')
+         WHERE status IN ('HELD_AWAITING_PAYMENT', 'PAYMENT_PENDING', 'CONFIRMING_INVENTORY', 'COMPENSATING', 'REFUNDING')
          GROUP BY status
         """,
     )
     fun countNonTerminalByState(): Flow<NonTerminalStateRow>
 }
+
+/** The single row of [OrderRepository.countOverdueHolds]. */
+data class OverdueHoldsRow(
+    val orderCount: Long,
+    val oldestAgeSeconds: Double,
+)
 
 /** One row of [OrderRepository.countNonTerminalByState]. */
 data class NonTerminalStateRow(

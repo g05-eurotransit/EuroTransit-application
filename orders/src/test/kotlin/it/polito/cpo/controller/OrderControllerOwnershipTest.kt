@@ -19,6 +19,7 @@ import it.polito.cpo.service.OrderService
 import it.polito.cpo.service.RefundOrchestrator
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
@@ -29,6 +30,7 @@ import org.springframework.context.annotation.Import
 import org.springframework.context.annotation.Primary
 import org.springframework.security.oauth2.jwt.Jwt
 import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder
+import org.springframework.http.MediaType
 import org.springframework.test.web.reactive.server.WebTestClient
 import org.mockito.Mockito.mock
 import reactor.core.publisher.Mono
@@ -140,6 +142,56 @@ class OrderControllerOwnershipTest @Autowired constructor(
             .headers { it.setBearerAuth("owner") }
             .exchange()
             .expectStatus().isNotFound
+    }
+
+    // --- POST /api/orders/{orderId}/payment (ADR-016) ------------------------------------------------
+
+    private fun pay(token: String) = webTestClient.post().uri("/api/orders/$orderId/payment")
+        .headers { it.setBearerAuth(token) }
+        .header("Idempotency-Key", "pay-key")
+        .contentType(MediaType.APPLICATION_JSON)
+        .bodyValue(mapOf("paymentMethodToken" to "tok_visa"))
+        .exchange()
+
+    @Test
+    fun `another customer cannot pay for someone else's order, and is told it does not exist`() {
+        seedOwnedBy("user-owner")
+        pay("other").expectStatus().isNotFound
+    }
+
+    @Test
+    fun `operations staff cannot pay on a customer's behalf`() {
+        seedOwnedBy("user-owner")
+        pay("ops").expectStatus().isForbidden
+    }
+
+    @Test
+    fun `paying for a missing order is 404`() {
+        orderService.next = null
+        pay("owner").expectStatus().isNotFound
+    }
+
+    @Test
+    fun `a blank payment token is a 400 before anything else happens`() {
+        seedOwnedBy("user-owner")
+        webTestClient.post().uri("/api/orders/$orderId/payment")
+            .headers { it.setBearerAuth("owner") }
+            .header("Idempotency-Key", "pay-key")
+            .contentType(MediaType.APPLICATION_JSON)
+            .bodyValue(mapOf("paymentMethodToken" to " "))
+            .exchange()
+            .expectStatus().isBadRequest
+            .expectBody().jsonPath("$.code").isEqualTo("PAYMENT_TOKEN_REQUIRED")
+    }
+
+    @Test
+    fun `the order view carries the server's clock for the countdown`() {
+        seedOwnedBy("user-owner")
+        webTestClient.get().uri("/api/orders/$orderId")
+            .headers { it.setBearerAuth("owner") }
+            .exchange()
+            .expectStatus().isOk
+            .expectBody().jsonPath("$.serverNow").value<String> { assertTrue(OffsetDateTime.parse(it) != null) }
     }
 
     // --- GET /api/orders (customer history) -------------------------------------------------------

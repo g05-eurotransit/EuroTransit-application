@@ -27,6 +27,10 @@ object MoneyPathAudit {
     enum class Action(val value: String) {
         CHECKOUT("checkout"),
         CHECKOUT_PIPELINE("checkout.pipeline"),
+        /** The customer-hold payment submission (ADR-016). */
+        PAYMENT_SUBMIT("payment.submit"),
+        /** The T1 expiry job closing a customer-hold order nobody paid for (ADR-016). */
+        HOLD_EXPIRY("hold.expiry"),
         CANCEL("cancel"),
         REFUND("refund"),
         REFUND_PIPELINE("refund.pipeline"),

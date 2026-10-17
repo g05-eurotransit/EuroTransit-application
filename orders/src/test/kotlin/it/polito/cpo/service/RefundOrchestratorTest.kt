@@ -3,6 +3,7 @@ package it.polito.cpo.service
 import io.micrometer.observation.ObservationRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import it.polito.cpo.client.AuthorizationOutcome
+import it.polito.cpo.client.PaymentWindowOutcome
 import it.polito.cpo.client.ConfirmReservationOutcome
 import it.polito.cpo.client.HoldOutcome
 import it.polito.cpo.client.InventoryClient
@@ -173,6 +174,13 @@ class RefundOrchestratorTest {
 
         override suspend fun confirmReservation(reservationId: String, orderId: UUID): ConfirmReservationOutcome =
             throw UnsupportedOperationException("not used by the refund pipeline")
+
+        // The refund never opens a payment window (ADR-016); implemented only to satisfy InventoryClient.
+
+        override suspend fun startPaymentWindow(reservationId: String, orderId: UUID): PaymentWindowOutcome =
+
+            PaymentWindowOutcome.Opened(reservationId, OffsetDateTime.now().plusMinutes(10))
+
 
         override suspend fun releaseSeats(reservationId: String, idempotencyKey: String) =
             throw UnsupportedOperationException("not used by the refund pipeline")

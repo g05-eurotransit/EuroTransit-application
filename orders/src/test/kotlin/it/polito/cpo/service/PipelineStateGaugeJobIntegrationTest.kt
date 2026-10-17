@@ -27,6 +27,7 @@ import java.time.OffsetDateTime
 import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -195,6 +196,22 @@ class PipelineStateGaugeJobIntegrationTest {
     }
 
     // --- helpers ---------------------------------------------------------------------------------
+
+    @Test
+    fun `active customer holds are counted, but never get an age series`() = runBlocking<Unit> {
+        seed(OrderStatus.HELD_AWAITING_PAYMENT)
+        seed(OrderStatus.HELD_AWAITING_PAYMENT)
+
+        job.publish()
+
+        assertEquals(2.0, inflight(OrderStatus.HELD_AWAITING_PAYMENT))
+        // The age gauge feeds CheckoutStuckNonTerminal: a customer reading the checkout page must
+        // never be able to page anyone through it (ADR-016).
+        assertNull(
+            meterRegistry.find("orders.pipeline.oldest.age.seconds")
+                .tag("state", OrderStatus.HELD_AWAITING_PAYMENT.name).gauge(),
+        )
+    }
 
     private fun inflight(state: OrderStatus): Double = gauge("orders.pipeline.inflight", state)
 

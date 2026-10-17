@@ -6,6 +6,7 @@ import io.github.resilience4j.reactor.bulkhead.operator.BulkheadOperator
 import io.github.resilience4j.reactor.circuitbreaker.operator.CircuitBreakerOperator
 import io.github.resilience4j.reactor.retry.RetryOperator
 import io.github.resilience4j.retry.RetryRegistry
+import it.polito.cpo.contracts.inventory.PaymentWindowRequest
 import it.polito.cpo.contracts.inventory.ReservationConfirmationRequest
 import it.polito.cpo.contracts.inventory.ReservationRefundRequest
 import it.polito.cpo.contracts.inventory.ReservationRequest
@@ -102,6 +103,26 @@ class WebClientInventoryClient(
             ConfirmReservationOutcome.Refused(refusal.asKnownCodeOrRethrow(), refusal.detail)
         }
 
+    override suspend fun startPaymentWindow(reservationId: String, orderId: UUID): PaymentWindowOutcome =
+        try {
+            val response = webClient.put()
+                // No Idempotency-Key and no X-User-Id, as for confirmation: idempotent by state.
+                .uri("/api/inventory/reservations/{reservationId}/payment-window", reservationId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(PaymentWindowRequest(orderId = orderId))
+                .retrieve()
+                .onStatus({ it.is4xxClientError }, ClientResponse::asDefinitiveRefusal)
+                .bodyToMono(ReservationResponse::class.java)
+                .timeout(timeout)
+                .transformDeferred(BulkheadOperator.of(bulkhead))
+                .transformDeferred(CircuitBreakerOperator.of(circuitBreaker))
+                .transformDeferred(RetryOperator.of(retry))
+                .awaitSingle()
+            windowOpened(reservationId, response)
+        } catch (refusal: DefinitiveRefusal) {
+            PaymentWindowOutcome.Refused(refusal.asKnownCodeOrRethrow(), refusal.detail)
+        }
+
     override suspend fun releaseSeats(reservationId: String, idempotencyKey: String) {
         webClient.delete()
             .uri("/api/inventory/reservations/{reservationId}", reservationId)
@@ -147,6 +168,17 @@ class WebClientInventoryClient(
             "Inventory answered 200 for reservation $reservationId with status ${response.status}, expected REFUNDED"
         }
         return RefundReservationOutcome.Refunded(response.reservationId)
+    }
+
+    /**
+     * A 200 that does not say HELD would mean the two services disagree about what the window command
+     * does: an unknown outcome, never a reason to authorize.
+     */
+    private fun windowOpened(reservationId: String, response: ReservationResponse): PaymentWindowOutcome {
+        check(response.status == ReservationStatus.HELD) {
+            "Inventory answered 200 for reservation $reservationId's payment window with status ${response.status}, expected HELD"
+        }
+        return PaymentWindowOutcome.Opened(response.reservationId, response.expiresAt)
     }
 
     /**

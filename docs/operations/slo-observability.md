@@ -15,9 +15,17 @@ The critical user journey is checkout: client request through gateway, Orders, I
 | SLO | Target | SLI | Measurement |
 | --- | --- | --- | --- |
 | Checkout success rate | 99.0% over 30 days | Successful confirmed checkouts / valid checkout attempts | Orders emits terminal status metrics by result. |
-| Checkout latency | 95% of successful checkouts complete within 2 seconds over 30 days | Duration from `POST /api/orders` accepted to confirmed/failed terminal status | Distributed trace span and Orders histogram. |
-| Checkout acceptance latency | 99% of `POST /api/orders` responses return within 300 ms | HTTP server duration at gateway and Orders | Gateway and Orders RED metrics. |
+| Checkout latency | 95% of successful checkouts complete within 2 seconds over 30 days | Duration from the accepted payment to confirmed/failed terminal status: `POST /api/orders/{orderId}/payment` for a customer-hold order (`payment_submitted_at`), `POST /api/orders` for a direct-flow order | `orders_checkout_e2e_duration_seconds` (same name and buckets as before) and distributed traces. |
+| Checkout acceptance latency | 99% of `POST /api/orders` and `POST /api/orders/{orderId}/payment` responses return within 300 ms | HTTP server duration at gateway and Orders | Gateway and Orders RED metrics. |
 | Notification degradation | 99.9% of successful checkout requests must not fail because Notifications is unavailable | Checkout failures attributed to Notifications / checkout attempts | Orders failure reason metric. |
+
+**Why the latency SLI starts at the payment (ADR-016).** In the customer-hold flow the order is
+created when the customer presses Continue, and the seats are then held for up to ten minutes (T1)
+while the customer fills in the card. Measuring from `POST /api/orders` would count that reading time
+as checkout latency and break the 2-second target on every order. The metric name is unchanged, so the
+configuration repository's alert and dashboard need no edit; only what the clock measures moved. The
+per-delivery timer `orders_checkout_duration_seconds` gains the value `held_awaiting_payment` on its
+`outcome` tag for the delivery that takes a hold and parks.
 
 ## Error Budget
 
@@ -35,18 +43,22 @@ confirmed by the team. The policy and the operator steps are in
 | --- | --- | --- |
 | Automatic convergence | An accepted order caught by a dependency outage of up to about a minute reaches a terminal state without an operator, within about a minute of the dependency returning. | `orders_pipeline_oldest_age_seconds`; no `orders_events_exhausted_total{failure_class="dependency_error"}` increase. |
 | Checkout recovery SLO (the `CheckoutStuckNonTerminal` threshold below) | 3 minutes: the retry budget (1.5 to about 2.3 minutes in real time) plus the pipeline itself, with margin. | `max(orders_pipeline_oldest_age_seconds) > 180` |
-| Incident response SLO (the `ReconciliationAgeHigh` threshold below) | An open incident is redriven or resolved within 5 minutes, and a `PAYMENT_PENDING` one always before its order's `reservationExpiresAt` (the ten-minute seat hold); past it, that redrive is refused. | `max(orders_reconciliation_oldest_age_seconds) > 300` |
+| Incident response SLO (the `ReconciliationAgeHigh` threshold below) | An open incident is redriven or resolved within 5 minutes, and a `PAYMENT_PENDING` one always before its order's `reservationExpiresAt`; past it, that redrive is refused. That deadline is ten minutes from the hold in the direct flow, and in the customer-hold flow ten minutes from the payment (T2) once the payment window opened, or still T1 if it never did. | `max(orders_reconciliation_oldest_age_seconds) > 300` |
+| Hold expiry (ADR-016) | A customer-hold order nobody paid for is cancelled within about 15 seconds of its T1 deadline, by the Orders job; Inventory's own sweep frees the seat at the same deadline regardless. | `orders_holds_overdue`, `orders_holds_overdue_oldest_seconds` |
 
-An outage longer than the budget opens its incident 1.5 to about 2.3 minutes after the hold was taken,
-so the operator has about 7.5 to 8.5 minutes, of which `ReconciliationRecordOpen`'s `for: 5m` currently
-spends five.
+An outage longer than the budget opens its incident 1.5 to about 2.3 minutes after the payment
+started — the hold in the direct flow, the payment submission in the customer-hold flow, since T2
+restarts there — so the operator has about 7.5 to 8.5 minutes, of which `ReconciliationRecordOpen`'s
+`for: 5m` currently spends five. The one exception is a customer-hold order whose payment window never
+opened because Inventory was down at the payment: its deadline is still T1, which can be close.
 A shorter `for` is proposed to the configuration repository.
 
 ## Dashboards
 
 - **Money Path RED:** request rate, error rate, and duration for gateway, Orders, Inventory, and Payments.
 - **Kafka Pipeline:** consumer lag, produced/consumed event counts, duplicate events, dead-letter count.
-- **Inventory Correctness:** hold attempts, successful holds, rejected holds, expired holds, duplicate idempotency hits, oversell invariant violations.
+- **Inventory Correctness:** hold attempts, successful holds, rejected holds, expired holds, duplicate idempotency hits, oversell invariant violations; payment windows opened, replayed and refused (`inventory_holds_payment_window_total{result}`, and `orders_inventory_payment_window_total{result,code}` from the Orders side).
+- **Customer holds (ADR-016):** active holds (`orders_pipeline_inflight{state="HELD_AWAITING_PAYMENT"}`), payment submissions by result (`orders_payment_submitted_total{result}`: accepted, replayed, `hold_expired`, `payment_already_started`, …), holds closed by the expiry job (`orders_holds_expiry_total{result}`), and the job's lag (`orders_holds_overdue*`). Held orders are deliberately absent from `orders_pipeline_oldest_age_seconds`: a customer reading the checkout page is not a stuck pipeline, and that gauge feeds `CheckoutStuckNonTerminal`.
 - **Payment Safety:** authorization attempts, duplicate idempotency hits, declines, retry count, circuit-breaker state.
 - **Infrastructure USE/Golden Signals:** CPU, memory, network, disk, pod restarts, saturation, and dependency health.
 
@@ -166,6 +178,12 @@ traefik POST → orders POST /api/orders
        → order-confirmed publish
        → notification-requested publish → notifications notification-requested process
 ```
+
+In the customer-hold flow (ADR-016) the same journey is **two** traces, because the customer's two
+requests are minutes apart: `POST /api/orders` → catalog → `order-placed` → inventory hold, ending with
+the order parked; then `POST /api/orders/{orderId}/payment` → `order-placed` → inventory
+`PUT …/payment-window` → payments authorize → inventory confirmation → final events. They share the
+order id, not a trace id.
 
 A refund is likewise one trace: `POST /api/orders/{orderId}/refund` → `refund-requested publish` →
 `refund-requested process` → Payments refund → Inventory seat return. A row written with tracing off

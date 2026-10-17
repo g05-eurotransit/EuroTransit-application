@@ -195,6 +195,58 @@ class WebClientInventoryClientTest {
         assertTrue(rejected, "a deadline without an offset must not decode into a hold")
     }
 
+    // --- the payment window (ADR-016) ---------------------------------------------------------------
+
+    @Test
+    fun `a 200 HELD opens the window and keeps the T2 deadline's offset`() = runBlocking {
+        val client = clientAnswering(
+            HttpStatus.OK,
+            """{"reservationId":"res-1","status":"HELD","expiresAt":"2026-08-05T12:10:00+02:00"}""",
+        )
+
+        val outcome = client.startPaymentWindow(reservationId, orderId)
+
+        assertIs<PaymentWindowOutcome.Opened>(outcome)
+        assertEquals(OffsetDateTime.parse("2026-08-05T12:10:00+02:00").toInstant(), outcome.expiresAt.toInstant())
+    }
+
+    @Test
+    fun `an expired or cancelled hold is a definitive window refusal`() = runBlocking {
+        listOf("RESERVATION_EXPIRED", "RESERVATION_CANCELLED", "RESERVATION_ORDER_CONFLICT").forEach { wire ->
+            val outcome = clientAnswering(HttpStatus.CONFLICT, """{"code":"$wire","message":"m"}""")
+                .startPaymentWindow(reservationId, orderId)
+            assertIs<PaymentWindowOutcome.Refused>(outcome, "for $wire")
+            assertEquals(InventoryRefusalCode.valueOf(wire), outcome.code)
+        }
+    }
+
+    @Test
+    fun `RESERVATION_NOT_HELD is unknown, never something Orders could read as an expiry`() = runBlocking {
+        val client = clientAnswering(HttpStatus.CONFLICT, """{"code":"RESERVATION_NOT_HELD","message":"m"}""")
+
+        assertFailsWith<RuntimeException> { client.startPaymentWindow(reservationId, orderId) }
+        Unit
+    }
+
+    @Test
+    fun `a 200 for the window whose status is not HELD is unknown`() = runBlocking {
+        val client = clientAnswering(
+            HttpStatus.OK,
+            """{"reservationId":"res-1","status":"CONFIRMED","expiresAt":"2026-08-05T10:00:00Z"}""",
+        )
+
+        assertFailsWith<IllegalStateException> { client.startPaymentWindow(reservationId, orderId) }
+        Unit
+    }
+
+    @Test
+    fun `a 5xx on the window stays a dependency failure`() = runBlocking {
+        val client = clientAnswering(HttpStatus.SERVICE_UNAVAILABLE, """{"code":"INTERNAL_ERROR","message":"m"}""")
+
+        assertFailsWith<WebClientResponseException> { client.startPaymentWindow(reservationId, orderId) }
+        Unit
+    }
+
     private fun holdRequest() = ReservationRequest(
         orderId = orderId,
         seats = listOf("1A"),
@@ -219,7 +271,8 @@ class WebClientInventoryClientTest {
                 .route(RequestPredicates.PUT("/api/inventory/reservations/{id}/confirmation")) { answer(it) }
                 // The hold endpoint, so the deadline decoding can be exercised through the same
                 // client chain rather than through a hand-built ObjectMapper.
-                .andRoute(RequestPredicates.POST("/api/inventory/reservations")) { answer(it) },
+                .andRoute(RequestPredicates.POST("/api/inventory/reservations")) { answer(it) }
+                .andRoute(RequestPredicates.PUT("/api/inventory/reservations/{id}/payment-window")) { answer(it) },
         )
         val builder = WebClient.builder().clientConnector(HttpHandlerConnector(handler))
 

@@ -10,6 +10,7 @@ import it.polito.cpo.client.InventoryClient
 import it.polito.cpo.client.InventoryRefusalCode
 import it.polito.cpo.client.OfferOutcome
 import it.polito.cpo.client.PaymentClient
+import it.polito.cpo.client.PaymentWindowOutcome
 import it.polito.cpo.client.ResolvedOffer
 import it.polito.cpo.client.ReversalOutcome
 import it.polito.cpo.contracts.payments.PaymentRequest
@@ -33,6 +34,7 @@ import it.polito.cpo.config.CheckoutMetrics
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.reactor.ReactorContext
 import org.slf4j.LoggerFactory
+import org.springframework.dao.DuplicateKeyException
 import org.springframework.http.HttpStatus
 import org.springframework.stereotype.Service
 import org.springframework.transaction.reactive.TransactionalOperator
@@ -42,6 +44,7 @@ import java.security.MessageDigest
 import java.time.Duration
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.OffsetDateTime
 import java.util.UUID
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -112,6 +115,19 @@ class CheckoutOrchestrator(
          * deciding which currencies exist.
          */
         val ISO_CURRENCY = Regex("^[A-Z]{3}$")
+
+        /**
+         * Stands in the fingerprint for the token a customer-hold checkout does not carry (ADR-016).
+         * Angle brackets cannot occur in a provider token, so no real token can collide with it, and
+         * a checkout that does carry one keeps exactly the canonical string it always had.
+         */
+        const val NO_TOKEN_MARKER = "<payment-deferred>"
+
+        /** How many expired holds the T1 job closes per run. */
+        const val HOLD_EXPIRY_BATCH = 100
+
+        /** The audit actor for a transition no person asked for: the T1 expiry job. */
+        const val SYSTEM_ACTOR = "system:hold-expiry"
     }
 
     /** One delivery's working state. [reservationId] is seeded from the row, so a resume needs no lookup. */
@@ -119,6 +135,7 @@ class CheckoutOrchestrator(
         val orderId: UUID get() = order.id
         var reservationId: String? = order.reservationId
         var compensationReason: String? = order.compensationReason
+        var paymentWindowOpened: Boolean = order.paymentWindowOpened
     }
 
     /**
@@ -129,8 +146,12 @@ class CheckoutOrchestrator(
         /** A durable transition committed; keep dispatching on [next]. */
         data class Advance(val next: OrderStatus) : Step
 
-        /** Durable state intentionally left as is. Stop and acknowledge the delivery. */
-        data class Park(val state: OrderStatus, val reason: String) : Step
+        /**
+         * Durable state intentionally left as is. Stop and acknowledge the delivery. [expected] marks
+         * a park that is the normal flow (a customer-hold order waiting to be paid) rather than a
+         * problem, so it is not logged as a warning.
+         */
+        data class Park(val state: OrderStatus, val reason: String, val expected: Boolean = false) : Step
     }
 
     suspend fun checkout(
@@ -241,6 +262,7 @@ class CheckoutOrchestrator(
             currency = offer.currency,
             createdAt = LocalDateTime.now(),
             paymentMethodToken = request.paymentMethodToken,
+            paymentDeferred = request.paymentMethodToken == null,
             recipientEmail = recipientEmail,
             offerId = request.offerId,
             // The refund terms as they read at the moment of sale, frozen because Catalog keeps no
@@ -255,21 +277,214 @@ class CheckoutOrchestrator(
         //    order/idempotency and order/Kafka dual-write). Debezium relays the outbox row.
         val response = CheckoutResponse(orderId, OrderStatus.ACCEPTED)
         val responseBody = objectMapper.writeValueAsString(response)
-        txOperator.executeAndAwait {
-            orderService.saveOrder(order)
-            orderService.saveIdempotentRequest(idempotencyKey, responseBody, userId, "checkout", fingerprint)
-            outboxEventRepository.save(
-                outbox(
-                    "order-placed", orderId,
-                    OrderPlacedEvent(correlationId = correlationId, orderId = orderId, principalId = userId),
+        try {
+            txOperator.executeAndAwait {
+                orderService.saveOrder(order)
+                orderService.saveIdempotentRequest(idempotencyKey, responseBody, userId, "checkout", fingerprint)
+                outboxEventRepository.save(
+                    outbox(
+                        "order-placed", orderId,
+                        OrderPlacedEvent(correlationId = correlationId, orderId = orderId, principalId = userId),
+                    )
                 )
-            )
+            }
+        } catch (duplicate: DuplicateKeyException) {
+            return afterDuplicate(duplicate, order, idempotencyKey, fingerprint, userId, correlationId)
         }
 
         MoneyPathAudit.record(
             MoneyPathAudit.Action.CHECKOUT, MoneyPathAudit.Outcome.ACCEPTED, userId, orderId, correlationId,
         )
         return response
+    }
+
+    /**
+     * The checkout insert hit a unique constraint, and the whole transaction rolled back. Two
+     * constraints can do that, and they need opposite answers.
+     *
+     * The idempotency key is checked first: a concurrent retry of the same request lost the race on
+     * the key, and it must replay the winner's response — not be told it has another hold, which the
+     * winner's own order would otherwise make it look like. Only then the one-hold-per-customer index
+     * (V19, invariant 11): the customer already has a customer-hold order waiting, and the answer
+     * points at it so the client can resume or cancel it.
+     */
+    private suspend fun afterDuplicate(
+        duplicate: DuplicateKeyException,
+        order: Order,
+        idempotencyKey: String,
+        fingerprint: String,
+        userId: String,
+        correlationId: String,
+    ): CheckoutResponse {
+        orderService.findIdempotentRequest(idempotencyKey)?.let { existing ->
+            if (existing.requestFingerprint == fingerprint) {
+                meterRegistry.counter("orders.checkout.idempotent_replay").increment()
+                val replayed = objectMapper.readValue(existing.responseBody, CheckoutResponse::class.java)
+                MoneyPathAudit.record(
+                    MoneyPathAudit.Action.CHECKOUT, MoneyPathAudit.Outcome.REPLAYED, userId,
+                    replayed.orderId, correlationId,
+                )
+                return replayed
+            }
+            meterRegistry.counter("orders.checkout.idempotency_conflict").increment()
+            throw ApiException(
+                HttpStatus.CONFLICT,
+                "IDEMPOTENCY_CONFLICT",
+                "Idempotency key was reused with a different request",
+            )
+        }
+        // A direct-flow order is not counted by the index, so for it the duplicate cannot be the hold.
+        if (!order.paymentDeferred) throw duplicate
+        meterRegistry.counter("orders.checkout.rejected", "reason", "active_hold_exists").increment()
+        // The blocking hold can end between the failed insert and this read (paid, cancelled, expired).
+        // Then there is nothing to point at, and the honest answer is the same conflict with no order:
+        // the customer simply tries again, and this time the insert passes. Not a raw 500.
+        val active = orderService.findActiveHold(userId)
+            ?: throw ApiException(
+                HttpStatus.CONFLICT,
+                "ACTIVE_HOLD_EXISTS",
+                "Your previous held checkout has just ended. Please try again.",
+                mapOf("orderId" to null),
+            )
+        throw ApiException(
+            HttpStatus.CONFLICT,
+            "ACTIVE_HOLD_EXISTS",
+            "You already have seats held for another checkout. Resume it or cancel it first.",
+            mapOf("orderId" to active.id),
+        )
+    }
+
+    /**
+     * The customer-hold payment (ADR-016): accepts the token for an order parked in
+     * HELD_AWAITING_PAYMENT, while its T1 deadline has not passed by the database clock.
+     *
+     * One transaction, so the durable trigger cannot be lost: the compare-and-set to PAYMENT_PENDING
+     * (which also stores the token and the submission time), the idempotency record, and a new
+     * `order-placed` outbox row. The pipeline resumes from PAYMENT_PENDING on that row — opening the
+     * payment window first — so a crash after this commit needs no browser to recover.
+     *
+     * Ownership is the controller's; [userId] is the owner, already checked.
+     */
+    suspend fun submitPayment(
+        orderId: UUID,
+        paymentMethodToken: String,
+        idempotencyKey: String,
+        userId: String,
+    ): CheckoutResponse {
+        val correlationId = currentCorrelationId()
+        try {
+            return acceptPayment(orderId, paymentMethodToken, idempotencyKey, userId, correlationId)
+        } catch (e: ApiException) {
+            MoneyPathAudit.record(
+                MoneyPathAudit.Action.PAYMENT_SUBMIT, MoneyPathAudit.Outcome.REJECTED, userId,
+                orderId, correlationId, reason = e.code,
+            )
+            throw e
+        }
+    }
+
+    private suspend fun acceptPayment(
+        orderId: UUID,
+        paymentMethodToken: String,
+        idempotencyKey: String,
+        userId: String,
+        correlationId: String,
+    ): CheckoutResponse {
+        val fingerprint = paymentFingerprint(userId, orderId, paymentMethodToken)
+        replayPayment(idempotencyKey, fingerprint, userId, orderId, correlationId)?.let { return it }
+
+        val response = CheckoutResponse(orderId, OrderStatus.PAYMENT_PENDING)
+        val responseBody = objectMapper.writeValueAsString(response)
+        val accepted = try {
+            txOperator.executeAndAwait {
+                if (orderService.submitPayment(orderId, paymentMethodToken) == 0L) {
+                    false
+                } else {
+                    orderService.saveIdempotentRequest(idempotencyKey, responseBody, userId, "payment", fingerprint)
+                    outboxEventRepository.save(
+                        outbox(
+                            "order-placed", orderId,
+                            OrderPlacedEvent(correlationId = correlationId, orderId = orderId, principalId = userId),
+                        )
+                    )
+                    true
+                }
+            }
+        } catch (_: DuplicateKeyException) {
+            // The key was taken in between: by a concurrent retry of this very request (replay it), or
+            // by a different one (conflict). Either way the replay check below settles it.
+            false
+        }
+
+        if (accepted != true) {
+            replayPayment(idempotencyKey, fingerprint, userId, orderId, correlationId)?.let { return it }
+            throw paymentRefusal(orderId)
+        }
+
+        meterRegistry.counter("orders.payment.submitted", "result", "accepted").increment()
+        MoneyPathAudit.record(
+            MoneyPathAudit.Action.PAYMENT_SUBMIT, MoneyPathAudit.Outcome.ACCEPTED, userId, orderId, correlationId,
+        )
+        return response
+    }
+
+    /** The stored response for a retried submission, a conflict for a reused key, or null for a new one. */
+    private suspend fun replayPayment(
+        idempotencyKey: String,
+        fingerprint: String,
+        userId: String,
+        orderId: UUID,
+        correlationId: String,
+    ): CheckoutResponse? {
+        val existing = orderService.findIdempotentRequest(idempotencyKey) ?: return null
+        if (existing.requestFingerprint != fingerprint) {
+            meterRegistry.counter("orders.payment.submitted", "result", "idempotency_conflict").increment()
+            throw ApiException(
+                HttpStatus.CONFLICT,
+                "IDEMPOTENCY_CONFLICT",
+                "Idempotency key was reused with a different request",
+            )
+        }
+        meterRegistry.counter("orders.payment.submitted", "result", "replayed").increment()
+        MoneyPathAudit.record(
+            MoneyPathAudit.Action.PAYMENT_SUBMIT, MoneyPathAudit.Outcome.REPLAYED, userId, orderId, correlationId,
+        )
+        return objectMapper.readValue(existing.responseBody, CheckoutResponse::class.java)
+    }
+
+    /**
+     * Why the compare-and-set matched nothing, read back from the row. Read after the fact, so it
+     * describes the state that won, never a guess made before the race.
+     */
+    private suspend fun paymentRefusal(orderId: UUID): ApiException {
+        val order = orderService.getOrderById(orderId)
+            ?: return ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "Order not found")
+        // A hold past T1 is the same answer whether the expiry job has already cancelled the order or not
+        // yet: the job runs every few seconds, and the customer's situation is identical either way.
+        // The JVM clock only picks the wording here; the decision was the compare-and-set's.
+        val expiredHold = order.paymentDeferred &&
+            order.reservationExpiresAt?.isAfter(OffsetDateTime.now()) == false &&
+            (order.status == OrderStatus.HELD_AWAITING_PAYMENT || order.status == OrderStatus.CANCELLED)
+        val (code, message) = when {
+            order.status == OrderStatus.HELD_AWAITING_PAYMENT || expiredHold ->
+                "HOLD_EXPIRED" to "The time to pay for these seats has run out. Please choose your seats again."
+            order.paymentDeferred && order.paymentSubmittedAt != null ->
+                "PAYMENT_ALREADY_STARTED" to "A payment for this order has already been accepted."
+            else ->
+                "ORDER_NOT_PAYABLE" to "Order in state ${order.status} does not accept a payment."
+        }
+        meterRegistry.counter("orders.payment.submitted", "result", code.lowercase()).increment()
+        return ApiException(HttpStatus.CONFLICT, code, message)
+    }
+
+    // Same construction as the checkout fingerprint. The operation is part of the canonical string
+    // because the idempotency table is keyed by the key alone: a client reusing its checkout key here
+    // must get a conflict, not the checkout's stored response.
+    private fun paymentFingerprint(userId: String, orderId: UUID, paymentMethodToken: String): String {
+        val canonical = "payment|$userId|$orderId|$paymentMethodToken"
+        return MessageDigest.getInstance("SHA-256")
+            .digest(canonical.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
     }
 
     /**
@@ -414,7 +629,7 @@ class CheckoutOrchestrator(
             // believe it had booked the day it asked for.
             append(request.travelDate).append('|')
             append(request.totalAmount.stripTrailingZeros().toPlainString()).append('|')
-            append(request.paymentMethodToken)
+            append(request.paymentMethodToken ?: NO_TOKEN_MARKER)
             // Unconditional now that the field is required, which also removes the collision the
             // conditional form carried: with a variable number of separators, a paymentMethodToken
             // of `tok|of-001` with no offer hashed identically to the token `tok` with offer
@@ -447,7 +662,11 @@ class CheckoutOrchestrator(
             logger.info("Skipping order-placed for order {} already terminal in {}", event.orderId, order.status)
             return
         }
-        if (order.status != OrderStatus.ACCEPTED) {
+        // A customer-hold order's first delivery after the payment finds PAYMENT_PENDING with no window
+        // yet: that is its normal start, not a resume, and counting it would inflate the redelivery
+        // proxy by one per paid order.
+        val paymentStart = order.status == OrderStatus.PAYMENT_PENDING && order.paymentDeferred && !order.paymentWindowOpened
+        if (order.status != OrderStatus.ACCEPTED && !paymentStart) {
             meterRegistry.counter("orders.checkout.resumed", "state", order.status.name).increment()
             logger.info("Resuming checkout for order {} from {}", event.orderId, order.status)
         }
@@ -467,7 +686,11 @@ class CheckoutOrchestrator(
                 }
                 when (val step = runStage(state, ctx)) {
                     is Step.Park -> {
-                        logger.warn("Order {} parked in {}: {}", ctx.orderId, step.state, step.reason)
+                        if (step.expected) {
+                            logger.info("Order {} parked in {}: {}", ctx.orderId, step.state, step.reason)
+                        } else {
+                            logger.warn("Order {} parked in {}: {}", ctx.orderId, step.state, step.reason)
+                        }
                         state = step.state
                         break
                     }
@@ -493,7 +716,11 @@ class CheckoutOrchestrator(
     private suspend fun runStage(state: OrderStatus, ctx: PipelineContext): Step = when (state) {
         // doc:140 — ACCEPTED and RESERVING share one resume action: repeat the idempotent hold.
         OrderStatus.ACCEPTED, OrderStatus.RESERVING -> stageHold(ctx)
-        OrderStatus.PAYMENT_PENDING -> stageAuthorize(ctx)
+        // ADR-016: the customer has the seats and has not paid. Only the payment command, a
+        // cancellation or the T1 expiry job move the order on, so a redelivery does nothing at all.
+        OrderStatus.HELD_AWAITING_PAYMENT ->
+            Step.Park(OrderStatus.HELD_AWAITING_PAYMENT, "waiting for the customer's payment", expected = true)
+        OrderStatus.PAYMENT_PENDING -> stagePaymentWindowThenAuthorize(ctx)
         OrderStatus.CONFIRMING_INVENTORY -> stageConfirmInventory(ctx)
         OrderStatus.COMPENSATING -> stageCompensate(ctx)
         // REFUNDING/REFUNDED are ADR-015's own process, never entered by this pipeline's own
@@ -534,7 +761,14 @@ class CheckoutOrchestrator(
             is HoldOutcome.Held -> {
                 countHold("held", "none")
                 ctx.reservationId = outcome.reservationId
-                if (orderService.markPaymentPending(ctx.orderId, outcome.reservationId, outcome.expiresAt) == 0L) {
+                // The customer-hold flow stops here for the customer; the direct flow goes on to pay.
+                val next = if (ctx.order.paymentDeferred) OrderStatus.HELD_AWAITING_PAYMENT else OrderStatus.PAYMENT_PENDING
+                val marked = if (next == OrderStatus.HELD_AWAITING_PAYMENT) {
+                    orderService.markHeldAwaitingPayment(ctx.orderId, outcome.reservationId, outcome.expiresAt)
+                } else {
+                    orderService.markPaymentPending(ctx.orderId, outcome.reservationId, outcome.expiresAt)
+                }
+                if (marked == 0L) {
                     // doc:298 — a cancellation won the race while the hold was in flight. The order is
                     // CANCELLED with no reservation id stored, so the pipeline is the only place that
                     // can release this hold.
@@ -542,7 +776,68 @@ class CheckoutOrchestrator(
                     releaseHold(ctx, outcome.reservationId)
                     return Step.Advance(OrderStatus.CANCELLED)
                 }
-                Step.Advance(OrderStatus.PAYMENT_PENDING)
+                Step.Advance(next)
+            }
+        }
+    }
+
+    /**
+     * PAYMENT_PENDING. A customer-hold order whose payment window is not recorded yet asks Inventory
+     * for it first; every other order — direct flow, or a window already recorded — authorizes.
+     *
+     * The recorded marker is what makes this safe on redelivery. Before it, Payments has never been
+     * called, so a definitive refusal can fail the order with no reversal. After it, an authorization
+     * may have been attempted with an unknown outcome, and asking for the window again could turn a
+     * paid order into an "unpaid" failure — so it is never asked again (invariant 8).
+     */
+    private suspend fun stagePaymentWindowThenAuthorize(ctx: PipelineContext): Step {
+        if (ctx.order.paymentDeferred && !ctx.paymentWindowOpened) {
+            stagePaymentWindow(ctx)?.let { return it }
+        }
+        return stageAuthorize(ctx)
+    }
+
+    /** Opens the T2 window and records it, or ends the order. Null means: go on and authorize. */
+    private suspend fun stagePaymentWindow(ctx: PipelineContext): Step? {
+        val reservationId = ctx.reservationId
+            ?: throw IllegalStateException("Order ${ctx.orderId}: PAYMENT_PENDING without a stored reservation id")
+
+        // An unknown outcome throws out of here: PAYMENT_PENDING stays, the marker stays false, and
+        // Payments is not called. A redelivery asks again and gets the same answer.
+        return when (val outcome = inventoryClient.startPaymentWindow(reservationId, ctx.orderId)) {
+            is PaymentWindowOutcome.Opened -> {
+                if (orderService.markPaymentWindowOpened(ctx.orderId, reservationId, outcome.expiresAt) == 0L) {
+                    // Cancellation is refused from PAYMENT_PENDING on, and an operator can abandon only
+                    // past the hold, so nothing legitimate moves the row here. Unknown, not a decision.
+                    throw IllegalStateException(
+                        "Order ${ctx.orderId}: payment window opened but the order left PAYMENT_PENDING unexpectedly",
+                    )
+                }
+                meterRegistry.counter("orders.inventory.payment_window", "result", "opened", "code", "none").increment()
+                ctx.paymentWindowOpened = true
+                null
+            }
+            is PaymentWindowOutcome.Refused -> {
+                meterRegistry.counter(
+                    "orders.inventory.payment_window", "result", "refused", "code", outcome.code.name,
+                ).increment()
+                val failureClass = FailureClassifier.forInventoryRefusal(outcome.code)
+                if (outcome.code.isInvariantViolation) {
+                    val record = reconciliationService.recordInvariantViolation(
+                        orderId = ctx.orderId,
+                        orderState = OrderStatus.PAYMENT_PENDING.name,
+                        correlationId = ctx.correlationId,
+                        failureClass = failureClass,
+                        detail = "Inventory refused the payment window with ${outcome.code} for reservation $reservationId"
+                            + (outcome.detail?.let { ": $it" } ?: ""),
+                    )
+                    reconciliationService.countRequired(record)
+                }
+                // No money exists: Payments has never been called for this order. No release either:
+                // an expired hold was released by Inventory in the refusing transaction, a cancelled
+                // one already was, and on a conflict or a missing reservation there is nothing of
+                // ours to release.
+                failUnpaid(ctx, failureClass, releaseHold = false)
             }
         }
     }
@@ -886,8 +1181,8 @@ class CheckoutOrchestrator(
     }
 
     /**
-     * Cancels an order. Accepted only while no payment authorization has started, i.e. ACCEPTED or
-     * RESERVING (doc:147-149); from PAYMENT_PENDING onward this is a 409, which is what closes the
+     * Cancels an order. Accepted only while no payment authorization has started, i.e. ACCEPTED,
+     * RESERVING or HELD_AWAITING_PAYMENT (doc:147-149, ADR-016); from PAYMENT_PENDING onward this is a 409, which is what closes the
      * cancellation race before the money moves. Ownership is enforced by the controller; [actorId] is
      * who asked — the owner or `operations` staff — and is recorded on the audit line.
      */
@@ -935,6 +1230,56 @@ class CheckoutOrchestrator(
         )
         logger.info("Order {} cancelled", orderId)
         return order
+    }
+
+    /**
+     * Closes customer-hold orders past their T1 deadline (ADR-016), at most one batch per call, and
+     * returns how many this call closed.
+     *
+     * `CANCELLED`, not `FAILED`: the customer simply did not pay, so no failure notification is sent
+     * and no failure code is recorded. The deadline is re-checked by the compare-and-set itself, so a
+     * customer whose payment committed after the candidates were read keeps their order: the two
+     * predicates are opposite, and the row lock decides which statement ran first.
+     *
+     * The release is best-effort, as for a customer cancellation: Inventory's own sweep frees the seat
+     * at the same deadline, so a failed release only means the seat waits for that sweep.
+     */
+    suspend fun expireHolds(): Int {
+        var closed = 0
+        for (candidate in orderService.findExpiredHolds(HOLD_EXPIRY_BATCH)) {
+            val cancelled = txOperator.executeAndAwait {
+                if (orderService.cancelExpiredHold(candidate.id) == 0L) {
+                    false
+                } else {
+                    reconciliationService.closeAutoResolvable(candidate.id)
+                    true
+                }
+            }
+            if (cancelled != true) {
+                meterRegistry.counter("orders.holds.expiry", "result", "lost_race").increment()
+                continue
+            }
+            closed++
+            meterRegistry.counter("orders.holds.expiry", "result", "cancelled").increment()
+            MoneyPathAudit.record(
+                MoneyPathAudit.Action.HOLD_EXPIRY, MoneyPathAudit.Outcome.CANCELLED, SYSTEM_ACTOR,
+                candidate.id, correlationId = null, ownerId = candidate.userId,
+            )
+            candidate.reservationId?.let { rid ->
+                try {
+                    inventoryClient.releaseSeats(rid, "rel-${candidate.id}")
+                    meterRegistry.counter("orders.inventory.release", "result", "released").increment()
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (e: Exception) {
+                    logger.warn(
+                        "Release failed for expired hold of order {} (reservation {}); the Inventory sweep frees it",
+                        candidate.id, rid, e,
+                    )
+                }
+            }
+        }
+        return closed
     }
 
     // --- helpers ----------------------------------------------------------------------------------
@@ -1013,7 +1358,11 @@ class CheckoutOrchestrator(
      * survives redeliveries, which makes it the only correct checkout SLO measurement.
      */
     private fun recordEndToEnd(ctx: PipelineContext, outcome: String) {
-        val elapsed = Duration.between(ctx.order.createdAt, LocalDateTime.now())
+        // From the accepted payment for a customer-hold order (ADR-016): before it the customer was
+        // reading the checkout page, which is not checkout latency. A direct-flow order's payment
+        // arrived with the order, so its start is still the creation time.
+        val elapsed = ctx.order.paymentSubmittedAt?.let { Duration.between(it, OffsetDateTime.now()) }
+            ?: Duration.between(ctx.order.createdAt, LocalDateTime.now())
         CheckoutMetrics.recordEndToEnd(meterRegistry, elapsed, outcome)
     }
 }

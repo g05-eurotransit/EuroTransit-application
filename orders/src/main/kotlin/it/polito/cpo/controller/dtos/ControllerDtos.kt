@@ -14,7 +14,12 @@ data class CheckoutRequest(
     val travelDate: LocalDate,
     /** What the client displayed: the offer's per-seat price times [seats]. Checked, never trusted. */
     val totalAmount: BigDecimal,
-    val paymentMethodToken: String,
+    /**
+     * Selects the flow (ADR-016). Present: the direct flow, which holds, authorizes and confirms
+     * straight through — what the load test and the canary jobs send. Absent: the customer-hold flow,
+     * which holds the seats for T1 and waits for [PaymentSubmissionRequest].
+     */
+    val paymentMethodToken: String? = null,
     /**
      * Which offer is being bought. Required: it decides the price, and the post-sale refund
      * (ADR-015) reads its policy and cutoff from the terms frozen at checkout.
@@ -26,6 +31,11 @@ data class CheckoutRequest(
      * are.
      */
     val offerId: String,
+)
+
+/** Body of `POST /api/orders/{orderId}/payment` (ADR-016). */
+data class PaymentSubmissionRequest(
+    val paymentMethodToken: String,
 )
 
 data class CheckoutResponse(
@@ -51,12 +61,18 @@ data class OrderView(
     /**
      * When the Inventory seat hold expires, as an instant. Non-null once seats are held.
      *
-     * This is the deadline for the *checkout* to converge — it covers crash, retry and Kafka lag —
-     * and NOT a payment window: the payment token arrives with the checkout request and the whole
-     * pipeline runs server-side with no user interaction. A client must not present it as "you have
-     * ten minutes to pay".
+     * Its meaning depends on [status] (ADR-016). In `HELD_AWAITING_PAYMENT` it is T1, the customer's
+     * deadline to pay, shown as a countdown. From `PAYMENT_PENDING` onward it is the deadline for the
+     * *checkout* to converge — crash, retry and Kafka lag — which becomes T2 once the payment window
+     * opens; a client must not count that one down.
      */
     val reservationExpiresAt: OffsetDateTime? = null,
+    /**
+     * The server's own current instant, so a client can correct its clock before counting down to
+     * [reservationExpiresAt]. The countdown is presentation; the server decides whether a payment is
+     * still accepted.
+     */
+    val serverNow: OffsetDateTime? = null,
     /**
      * Why the checkout failed, from the closed `CustomerFailureCode` set. Non-null only on `FAILED`.
      *

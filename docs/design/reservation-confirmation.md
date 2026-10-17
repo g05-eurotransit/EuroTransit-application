@@ -4,7 +4,7 @@
 
 **Scope:** Orders, Inventory, Payments, and the Kafka-driven checkout pipeline
 
-**Related decisions:** ADR-001, ADR-002, ADR-004, ADR-008, ADR-011, and ADR-013
+**Related decisions:** ADR-001, ADR-002, ADR-004, ADR-008, ADR-011, ADR-013, and ADR-016
 
 ## Context
 
@@ -72,6 +72,29 @@ from atomic Inventory transitions, durable Orders state, idempotent remote
 operations, transactional outboxes, bounded retries, and explicit
 reconciliation.
 
+### Two checkout flows (ADR-016)
+
+The frontend uses the **customer-hold flow**: `POST /api/orders` without a
+payment token holds the seats and parks the order in `HELD_AWAITING_PAYMENT`
+for T1 (10 minutes); `POST /api/orders/{orderId}/payment` then submits the
+token, Inventory restarts the hold once for T2 (10 minutes), and the pipeline
+continues exactly as below. A `POST /api/orders` that carries the token runs the
+**direct flow** straight through, as it always has; the load test and canary
+jobs depend on it. The order row records which flow it follows
+(`payment_deferred`), so a redelivery resumes the right one.
+
+```text
+Client                Orders                         Inventory
+  | POST /api/orders (no token) -> 202
+  |                     | order-placed -> hold ------->  HELD, expires_at = now + T1
+  |                     | HELD_AWAITING_PAYMENT (parked)
+  | GET /api/orders/{id}: countdown to T1
+  | POST /api/orders/{id}/payment -> 202
+  |                     | PAYMENT_PENDING + order-placed
+  |                     | payment-window ------------->  expires_at = now + T2 (once)
+  |                     | authorize -> confirm -> CONFIRMED, as in the direct flow
+```
+
 ## Required Invariants
 
 The implementation must preserve all of these invariants:
@@ -91,6 +114,13 @@ The implementation must preserve all of these invariants:
    `CONFIRMED` and `SOLD`.
 8. An unknown remote outcome is never converted directly into a business
    failure or compensation.
+9. A reservation's deadline is extended at most once, only by the payment-window
+   command, and only while its current deadline has not passed by the Inventory
+   database clock. No replay, poll, or customer activity renews it.
+10. Payments is called for a customer-hold order only after Inventory has opened
+    its payment window and Orders has durably recorded the new deadline.
+11. A customer has at most one customer-hold order in `ACCEPTED`, `RESERVING`, or
+    `HELD_AWAITING_PAYMENT`, enforced by a unique index in the Orders database.
 
 ## State Models
 
@@ -115,6 +145,11 @@ AVAILABLE -> HELD -> AVAILABLE  (expiration or release)
 checkout creates a new order and reservation; it never resurrects a terminal
 reservation.
 
+The payment window is not a state. A `HELD` reservation whose window has opened
+records `payment_window_started_at` and carries the T2 deadline in `expires_at`;
+confirmation, release, and expiration treat it like any other `HELD`
+reservation, against whatever `expires_at` now says.
+
 ### Orders
 
 The checkout state machine is:
@@ -132,6 +167,11 @@ RESERVING            -> FAILED
 PAYMENT_PENDING      -> FAILED
 CONFIRMING_INVENTORY -> COMPENSATING -> FAILED
 PAYMENT_PENDING      -> COMPENSATING            (operator abandonment only, hold expired)
+
+Customer-hold flow only (ADR-016):
+RESERVING              -> HELD_AWAITING_PAYMENT  (hold taken, parked for the customer)
+HELD_AWAITING_PAYMENT  -> PAYMENT_PENDING        (payment submitted while T1 runs)
+HELD_AWAITING_PAYMENT  -> CANCELLED              (customer cancel, or the T1 expiry job)
 ```
 
 The state meanings and resume points are fixed:
@@ -139,23 +179,43 @@ The state meanings and resume points are fixed:
 | State | Durable meaning | Redelivery action |
 | --- | --- | --- |
 | `ACCEPTED` / `RESERVING` | No payment authorization has started. | Repeat the idempotent hold command. |
-| `PAYMENT_PENDING` | The reservation ID is stored and payment authorization has started. | Repeat the idempotent authorization command. |
+| `HELD_AWAITING_PAYMENT` | Customer-hold flow: the reservation ID and the T1 deadline are stored, and no payment has been submitted. | None: acknowledge without remote calls. Only the payment command, a cancellation, or the T1 expiry job moves the order. |
+| `PAYMENT_PENDING` | The reservation ID is stored and payment authorization has started. In the customer-hold flow, the payment has been submitted and the payment window may not be open yet. | Customer-hold flow, window not yet recorded: repeat the payment-window command, then authorize. Otherwise repeat the idempotent authorization command. |
 | `CONFIRMING_INVENTORY` | Payment is authorized and Inventory confirmation is required or its result is unknown. | Repeat the idempotent confirmation command. |
 | `COMPENSATING` | Checkout cannot complete after authorization and payment reversal is required or unknown, or an operator abandoned an expired `PAYMENT_PENDING` order whose payment outcome is unknown. | Repeat the idempotent refund command, then release any remaining hold. For an abandoned order, Payments holding no `AUTHORIZED` row opens `PAYMENT_OUTCOME_UNKNOWN` and waits for an operator's settlement. |
 | `CONFIRMED`, `FAILED`, `CANCELLED` | Checkout is terminal. | Acknowledge the duplicate event without remote calls. |
 
 Orders transitions to `PAYMENT_PENDING` with a compare-and-set update that also
-stores `reservationId`. Customer cancellation is accepted only in `ACCEPTED` or
-`RESERVING`. From `PAYMENT_PENDING` onward, customer cancellation returns
-`409 ORDER_NOT_CANCELLABLE`. This closes the cancellation race before payment
-authorization begins. Orders reaches `FAILED` after authorization only when the
-payment reversal has completed successfully; unresolved money remains in
-`COMPENSATING`.
+stores `reservationId`. Customer cancellation is accepted only in `ACCEPTED`,
+`RESERVING`, or `HELD_AWAITING_PAYMENT`. From `PAYMENT_PENDING` onward, customer
+cancellation returns `409 ORDER_NOT_CANCELLABLE`. This closes the cancellation
+race before payment authorization begins. Orders reaches `FAILED` after
+authorization only when the payment reversal has completed successfully;
+unresolved money remains in `COMPENSATING`.
+
+In the customer-hold flow the stored state stops at `HELD_AWAITING_PAYMENT`
+(the reservation ID and deadline are written in the same statement), and three
+writers race from it: the payment command, a customer cancellation, and the T1
+expiry job. Each is a compare-and-set on that predecessor, the payment command
+additionally requiring `reservation_expires_at > CURRENT_TIMESTAMP` and the job
+requiring the opposite, so exactly one wins. A cancellation or expiry releases
+the hold best-effort right away; if that release fails, the Inventory expiration
+sweep frees the seat at the T1 deadline at the latest.
+
+Once the payment window opens, Orders stores the T2 deadline in
+`reservation_expires_at` and sets `payment_window_opened` in one compare-and-set,
+before it calls Payments. The marker decides what a redelivery does. Without it,
+Payments has never been called, so a definitive payment-window refusal can fail
+the order with no reversal. With it, a redelivery goes straight to authorization
+and never asks for the window again: once an authorization may have been
+attempted, a later refusal must not be read as "no money moved" (invariant 8).
 
 `PAYMENT_PENDING` enters `COMPENSATING` only through an operator: a delivery that
 exhausted its retries leaves the order there, and once its seat hold has expired
 the redrive refuses it, because resuming means authorizing against a hold that no
-longer exists. `POST /api/orders/{orderId}/reconciliation/abandon` (below) is that
+longer exists. A customer-hold order whose payment window was never recorded is
+the exception: it resumes with the window request, Inventory refuses the expired
+hold, and the order fails unpaid, so the redrive accepts it. `POST /api/orders/{orderId}/reconciliation/abandon` (below) is that
 order's only exit (#140). Nothing on that path authorizes.
 
 ## Reservation Confirmation API
@@ -225,6 +285,56 @@ or a `400` from a contract drift means Inventory never evaluated the reservation
 treating it as a refusal would reverse a paid checkout in order to hide a deployment
 fault. Orders acts only on the codes listed above and redrives everything else.
 
+## Payment Window API (ADR-016)
+
+For a customer-hold order, Orders calls this before authorizing:
+
+```http
+PUT /api/inventory/reservations/{reservationId}/payment-window
+Authorization: Bearer <service-token>
+X-Correlation-Id: <checkout-correlation-id>
+Content-Type: application/json
+
+{
+  "orderId": "<order-id>"
+}
+```
+
+Like confirmation, it takes no `Idempotency-Key`: the reservation identity, the
+stored `orderId`, and `payment_window_started_at` make it naturally idempotent.
+It runs in one Inventory transaction:
+
+1. Lock the reservation row with `SELECT ... FOR UPDATE`.
+2. Verify that its stored `orderId` matches the request.
+3. If it is `EXPIRED` or `CANCELLED`, return the corresponding `409`.
+4. If it is `HELD` but `expires_at <= CURRENT_TIMESTAMP`, transition it to
+   `EXPIRED`, release only its `HELD` seats, commit, and return
+   `409 RESERVATION_EXPIRED`.
+5. If `payment_window_started_at` is already set, return the stored deadline
+   without writes.
+6. Otherwise set `expires_at = CURRENT_TIMESTAMP + T2` and
+   `payment_window_started_at = CURRENT_TIMESTAMP`, commit, and return the new
+   deadline.
+
+Steps 4 and 6 are the "T1 still valid" check and the extension in one locked
+transaction, which is what makes the extension atomic with respect to
+expiration, release, and confirmation. T2 is an Inventory property with a
+default of 10 minutes; T1 stays the 10-minute hold.
+
+| Condition | HTTP result | Code | Orders action |
+| --- | --- | --- | --- |
+| `HELD`, same order, before `expiresAt`, window not yet open | `200` | `HELD` with the T2 deadline | Record the deadline and the opened marker, then authorize. |
+| `HELD`, same order, before `expiresAt`, window already open | `200` | `HELD` with the stored deadline | Same as above. |
+| `HELD` but `expiresAt` has passed, or already `EXPIRED` | `409` | `RESERVATION_EXPIRED` | Fail the unpaid order; Payments is never called. |
+| Already `CANCELLED` | `409` | `RESERVATION_CANCELLED` | Fail the unpaid order; Payments is never called. |
+| Reservation belongs to another order | `409` | `RESERVATION_ORDER_CONFLICT` | Record an `INVARIANT_VIOLATION`, fail the unpaid order, do not release. |
+| Reservation does not exist | `404` | `RESERVATION_NOT_FOUND` | Record an `INVARIANT_VIOLATION`, fail the unpaid order. |
+| `CONFIRMED` or `REFUNDED` | `409` | `RESERVATION_NOT_HELD` | Unknown: an unpaid order cannot own a sold reservation. Keep `PAYMENT_PENDING` and redrive to an operator. |
+| Timeout, connection failure, circuit open, `5xx`, any other `4xx` | No definitive business result | Transport or unrecognised | Keep `PAYMENT_PENDING` and redrive. |
+
+A `200` whose `status` is anything other than `HELD` is an unknown outcome, as
+for confirmation.
+
 ## Atomic Inventory Implementation
 
 Confirmation runs in one Inventory database transaction:
@@ -292,9 +402,10 @@ stored reservation and returns its current state.
 - idempotency record already purged, but the permanent unique `order_id` still holds:
   return `409 ORDER_ALREADY_RESERVED`.
 
-The replay never extends `expiresAt` and never creates a replacement hold. A
-customer who wants another attempt creates a new checkout and therefore a new
-order ID and idempotency key.
+The replay never extends `expiresAt` and never creates a replacement hold; the
+payment-window command is the only extension and happens once. A customer who
+wants another attempt creates a new checkout and therefore a new order ID and
+idempotency key.
 
 `ORDER_ALREADY_RESERVED` is reachable only once the 30-minute idempotency retention
 has outlived the 10-minute hold deadline, so the surviving reservation is necessarily
@@ -322,6 +433,22 @@ The successful sequence is:
    writes `order-confirmed` and `notification-requested` outbox rows.
 9. Debezium publishes the final events to Kafka.
 
+In the customer-hold flow, steps 1 to 3 become:
+
+1. `POST /api/orders` without a token stores `ACCEPTED` with
+   `payment_deferred = true`, the public idempotency record, and the
+   `order-placed` outbox row in one Orders transaction, then returns `202`. The
+   unique index refuses a second active hold for the same customer.
+2. The consumer transitions the order to `RESERVING` and creates the hold using
+   `inv-{orderId}`.
+3. Orders atomically stores `reservationId` and the T1 deadline and transitions
+   to `HELD_AWAITING_PAYMENT`. The client shows the countdown.
+4. `POST /api/orders/{orderId}/payment` atomically transitions to
+   `PAYMENT_PENDING` while T1 runs, stores the token and `payment_submitted_at`,
+   and writes a new `order-placed` outbox row; then returns `202`.
+5. The consumer opens the payment window, stores the T2 deadline and the opened
+   marker, and continues with authorization as in step 4 above.
+
 ## Failure and Recovery Policy
 
 | Failure point | Required behavior |
@@ -338,6 +465,13 @@ The successful sequence is:
 | Payment reversal definitively fails | Keep `COMPENSATING`, create or update a `PAYMENT_REVERSAL_FAILURE` reconciliation record, and alert. Do not mark the order `FAILED`. |
 | `PAYMENT_PENDING` exhausted and its hold expired | An operator abandons it: transition to `COMPENSATING`, reverse with `refund-{orderId}`, release the hold, then `FAILED`. If Payments holds no `AUTHORIZED` row, keep `COMPENSATING` under `PAYMENT_OUTCOME_UNKNOWN` until an operator settles it with provider evidence; then `FAILED`. Payments writes its row only after the provider answers, so no row does not prove no charge. |
 | Hold release outcome unknown before payment | Repeat release; expiration is the final safety net. |
+| Customer-hold order reaches T1 unpaid | The T1 expiry job moves `HELD_AWAITING_PAYMENT` to `CANCELLED` and releases the hold best-effort; no notification is sent. |
+| Payment submitted after T1 by the Orders clock | The compare-and-set fails; `409 HOLD_EXPIRED`, no state change. The same code answers once the expiry job has cancelled the order. |
+| Payment submitted twice with different keys or tokens | The first compare-and-set wins; the other request returns `409 PAYMENT_ALREADY_STARTED`. |
+| Crash after the payment commit, before any remote call | The new `order-placed` row resumes `PAYMENT_PENDING` without the browser. |
+| Payment-window outcome unknown | Keep `PAYMENT_PENDING`, window not recorded; repeat the same `PUT`. Do not call Payments. |
+| Payment window refused (`EXPIRED`, `CANCELLED`) | Transition to `FAILED` with no reversal: Payments has never been called. |
+| Window opened in Inventory, Orders did not record it | Redelivery repeats the `PUT` and receives the same deadline. |
 
 `POST /api/payments/refund` is the EuroTransit compensation command for an
 authorized payment. It is idempotent by `refund-{orderId}`. The Payments adapter
@@ -488,7 +622,12 @@ The implementation records:
 - confirmation attempts, successes, business conflicts, transport failures, and
   idempotent replays;
 - expiration batches, committed expirations, duration, and errors;
-- orders in `PAYMENT_PENDING`, `CONFIRMING_INVENTORY`, and `COMPENSATING` by age;
+- orders in `PAYMENT_PENDING`, `CONFIRMING_INVENTORY`, and `COMPENSATING` by age,
+  measured from the payment submission (`payment_submitted_at`) so that a
+  customer's time on the checkout page is never counted as pipeline age;
+- customer-hold orders still in `HELD_AWAITING_PAYMENT` after their T1 deadline,
+  which is the T1 expiry job's lag;
+- payment-window openings, replays, and refusals;
 - payment reversal successes, failures, and unknown outcomes;
 - Kafka retries, DLT records, reconciliation records, redrives, and age;
 - traces spanning the Orders consumer, Inventory, Payments, both outboxes, and
@@ -518,6 +657,16 @@ The team accepts these consequences:
   of exactly-once message delivery.
 - Orders and Inventory share a versioned confirmation contract and require
   backward-compatible deployment.
+- A customer-hold seat is unavailable to others for up to T1 + T2 (20 minutes)
+  and, with one hold per customer during T1, an account can keep at most one
+  unpaid seat set waiting at a time. Rate limiting per account is not
+  implemented.
+- A seat released on cancellation can stay unavailable until the T1 deadline if
+  the immediate release fails, because that release is best-effort and the
+  expiration sweep is the fallback.
+- The Orders clock refuses a payment slightly before or admits it slightly after
+  the Inventory clock would; Inventory decides in the payment-window
+  transaction, so the error only changes which refusal the customer sees.
 
 These trade-offs are preferable to overselling a finite seat or reporting an
 order as confirmed before Inventory has accepted the sale.
@@ -535,7 +684,9 @@ Inventory invariant.
 ### Grace period before expiration
 
 Rejected as a correctness mechanism because it only moves the race boundary and
-keeps unpaid seats blocked longer.
+keeps unpaid seats blocked longer. The T2 payment window (ADR-016) is not a grace
+period: it is a new deadline set once, under the row lock, before any money
+moves, and confirmation is still refused the moment it passes.
 
 ### Confirm seats before payment authorization
 

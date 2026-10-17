@@ -24,6 +24,9 @@ class SecurityConfig {
                 // widen beyond the cancel action itself. Ownership is enforced in the controller.
                 it.pathMatchers(HttpMethod.POST, "/api/orders/*/cancel")
                     .hasAnyAuthority(EuroTransitAuthorities.CUSTOMER, EuroTransitAuthorities.OPERATIONS)
+                // The customer-hold payment (ADR-016). Customers only: staff never pay on a customer's
+                // behalf, so unlike cancel there is no operations widening. Ownership in the controller.
+                it.pathMatchers(HttpMethod.POST, "/api/orders/*/payment").hasAuthority(EuroTransitAuthorities.CUSTOMER)
                 // Same ownership rule as cancel: owner or operations. Declared before the reconciliation
                 // rules only for readability — the single-segment wildcard cannot collide with the
                 // two-segment `/reconciliation/**` paths below.

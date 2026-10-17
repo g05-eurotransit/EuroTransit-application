@@ -1,5 +1,6 @@
 package it.polito.cpo.controller
 
+import it.polito.cpo.contracts.inventory.PaymentWindowRequest
 import it.polito.cpo.contracts.inventory.ReservationConfirmationRequest
 import it.polito.cpo.contracts.inventory.ReservationRefundRequest
 import it.polito.cpo.contracts.inventory.ReservationRequest
@@ -53,6 +54,18 @@ class ReservationController(
         @RequestBody request: ReservationConfirmationRequest
     ): ResponseEntity<ReservationResponse> {
         val response = reservationService.confirmReservation(reservationId, request.orderId)
+        return ResponseEntity.ok(response)
+    }
+
+    /**
+     * Opens the one-time T2 payment window of a held reservation for its order (ADR-016).
+     */
+    @PutMapping("/{reservationId}/payment-window")
+    suspend fun startPaymentWindow(
+        @PathVariable reservationId: String,
+        @RequestBody request: PaymentWindowRequest
+    ): ResponseEntity<ReservationResponse> {
+        val response = reservationService.startPaymentWindow(reservationId, request.orderId)
         return ResponseEntity.ok(response)
     }
 

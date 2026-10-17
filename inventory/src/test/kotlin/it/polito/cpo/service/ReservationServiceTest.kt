@@ -368,4 +368,170 @@ class ReservationServiceTest {
         assertEquals("CONFIRMED", exception.details!!["status"])
     }
 
+
+    // --- payment window (ADR-016) ---------------------------------------------------------------
+
+    private val windowNow: OffsetDateTime = OffsetDateTime.parse("2026-10-17T12:00:00Z")
+
+    private suspend fun heldAt(
+        resRepo: FakeReservationRepository,
+        reservationId: String,
+        orderId: UUID,
+        expiresAt: OffsetDateTime,
+        status: ReservationStatus = ReservationStatus.HELD,
+        windowStartedAt: OffsetDateTime? = null,
+    ) {
+        resRepo.save(Reservation(
+            reservationId = reservationId,
+            orderId = orderId,
+            routeId = "route-1",
+            travelDate = LocalDate.now(),
+            status = status.name,
+            expiresAt = expiresAt,
+            paymentWindowStartedAt = windowStartedAt,
+        ))
+    }
+
+    @Test
+    fun `startPaymentWindow restarts the hold for T2 from the database clock and records when`() = runTest {
+        val resRepo = FakeReservationRepository().apply { currentDbTime = windowNow }
+        val meterRegistry = SimpleMeterRegistry()
+        val service = buildService(FakeSeatRepository(), resRepo, FakeOutboxEventRepository(), meterRegistry)
+        val orderId = UUID.randomUUID()
+        // One minute of T1 left: T2 starts from now, not from what remained.
+        heldAt(resRepo, "res-pw-1", orderId, windowNow.plusMinutes(1))
+
+        val response = service.startPaymentWindow("res-pw-1", orderId)
+
+        assertEquals(ReservationStatus.HELD, response.status)
+        assertEquals(windowNow.plusMinutes(10), response.expiresAt)
+        assertEquals(windowNow.plusMinutes(10), resRepo.store["res-pw-1"]?.expiresAt)
+        assertEquals(windowNow, resRepo.store["res-pw-1"]?.paymentWindowStartedAt)
+        assertEquals(1.0, meterRegistry.counter("inventory.holds.payment_window", "result", "opened").count())
+    }
+
+    @Test
+    fun `startPaymentWindow replay returns the stored deadline and never extends a second time`() = runTest {
+        val resRepo = FakeReservationRepository().apply { currentDbTime = windowNow }
+        val meterRegistry = SimpleMeterRegistry()
+        val service = buildService(FakeSeatRepository(), resRepo, FakeOutboxEventRepository(), meterRegistry)
+        val orderId = UUID.randomUUID()
+        heldAt(resRepo, "res-pw-2", orderId, windowNow.plusMinutes(5))
+
+        val first = service.startPaymentWindow("res-pw-2", orderId)
+        resRepo.currentDbTime = windowNow.plusMinutes(3)
+        val replay = service.startPaymentWindow("res-pw-2", orderId)
+
+        assertEquals(first.expiresAt, replay.expiresAt)
+        assertEquals(windowNow, resRepo.store["res-pw-2"]?.paymentWindowStartedAt)
+        assertEquals(1.0, meterRegistry.counter("inventory.holds.payment_window", "result", "opened").count())
+        assertEquals(1.0, meterRegistry.counter("inventory.holds.payment_window", "result", "replayed").count())
+    }
+
+    @Test
+    fun `startPaymentWindow at exactly the deadline is expired, like the sweep and confirmation`() = runTest {
+        val seatRepo = FakeSeatRepository()
+        val resRepo = FakeReservationRepository().apply { currentDbTime = windowNow }
+        val meterRegistry = SimpleMeterRegistry()
+        val service = buildService(seatRepo, resRepo, FakeOutboxEventRepository(), meterRegistry)
+        val orderId = UUID.randomUUID()
+        heldAt(resRepo, "res-pw-3", orderId, windowNow)
+
+        val exception = assertThrows<ApiException> { service.startPaymentWindow("res-pw-3", orderId) }
+
+        assertEquals(HttpStatus.CONFLICT, exception.status)
+        assertEquals("RESERVATION_EXPIRED", exception.code)
+        assertEquals("EXPIRED", resRepo.store["res-pw-3"]?.status)
+        assertNull(resRepo.store["res-pw-3"]?.paymentWindowStartedAt)
+        assertEquals("res-pw-3", seatRepo.releaseCalledWith)
+        assertEquals(1.0, meterRegistry.counter("inventory.holds.expired").count())
+        assertEquals(1.0, meterRegistry.counter("inventory.holds.payment_window", "result", "expired").count())
+    }
+
+    @Test
+    fun `startPaymentWindow one millisecond before the deadline still opens the window`() = runTest {
+        val resRepo = FakeReservationRepository().apply { currentDbTime = windowNow }
+        val service = buildService(FakeSeatRepository(), resRepo, FakeOutboxEventRepository())
+        val orderId = UUID.randomUUID()
+        heldAt(resRepo, "res-pw-4", orderId, windowNow.plusNanos(1_000_000))
+
+        val response = service.startPaymentWindow("res-pw-4", orderId)
+
+        assertEquals(windowNow.plusMinutes(10), response.expiresAt)
+    }
+
+    @Test
+    fun `startPaymentWindow after an opened window has run out is expired, not replayed`() = runTest {
+        val resRepo = FakeReservationRepository().apply { currentDbTime = windowNow }
+        val service = buildService(FakeSeatRepository(), resRepo, FakeOutboxEventRepository())
+        val orderId = UUID.randomUUID()
+        heldAt(resRepo, "res-pw-5", orderId, windowNow.minusSeconds(1), windowStartedAt = windowNow.minusMinutes(10))
+
+        val exception = assertThrows<ApiException> { service.startPaymentWindow("res-pw-5", orderId) }
+
+        assertEquals("RESERVATION_EXPIRED", exception.code)
+        assertEquals("EXPIRED", resRepo.store["res-pw-5"]?.status)
+    }
+
+    @Test
+    fun `startPaymentWindow refuses another order's reservation without touching it`() = runTest {
+        val resRepo = FakeReservationRepository().apply { currentDbTime = windowNow }
+        val service = buildService(FakeSeatRepository(), resRepo, FakeOutboxEventRepository())
+        heldAt(resRepo, "res-pw-6", UUID.randomUUID(), windowNow.plusMinutes(5))
+
+        val exception = assertThrows<ApiException> { service.startPaymentWindow("res-pw-6", UUID.randomUUID()) }
+
+        assertEquals(HttpStatus.CONFLICT, exception.status)
+        assertEquals("RESERVATION_ORDER_CONFLICT", exception.code)
+        assertEquals(windowNow.plusMinutes(5), resRepo.store["res-pw-6"]?.expiresAt)
+        assertNull(resRepo.store["res-pw-6"]?.paymentWindowStartedAt)
+    }
+
+    @Test
+    fun `startPaymentWindow answers 404 for an unknown reservation`() = runTest {
+        val service = buildService(FakeSeatRepository(), FakeReservationRepository(), FakeOutboxEventRepository())
+
+        val exception = assertThrows<ApiException> { service.startPaymentWindow("res-missing", UUID.randomUUID()) }
+
+        assertEquals(HttpStatus.NOT_FOUND, exception.status)
+        assertEquals("RESERVATION_NOT_FOUND", exception.code)
+    }
+
+    @Test
+    fun `startPaymentWindow refuses terminal reservations with their own codes`() = runTest {
+        val resRepo = FakeReservationRepository().apply { currentDbTime = windowNow }
+        val service = buildService(FakeSeatRepository(), resRepo, FakeOutboxEventRepository())
+        val expected = mapOf(
+            ReservationStatus.EXPIRED to "RESERVATION_EXPIRED",
+            ReservationStatus.CANCELLED to "RESERVATION_CANCELLED",
+            ReservationStatus.CONFIRMED to "RESERVATION_NOT_HELD",
+            ReservationStatus.REFUNDED to "RESERVATION_NOT_HELD",
+        )
+        expected.forEach { (status, code) ->
+            val orderId = UUID.randomUUID()
+            val reservationId = "res-pw-${status.name}"
+            heldAt(resRepo, reservationId, orderId, windowNow.plusMinutes(5), status = status)
+
+            val exception = assertThrows<ApiException> { service.startPaymentWindow(reservationId, orderId) }
+
+            assertEquals(HttpStatus.CONFLICT, exception.status, status.name)
+            assertEquals(code, exception.code, status.name)
+            assertEquals(status.name, resRepo.store[reservationId]?.status, "a refusal must not change $status")
+        }
+    }
+
+    @Test
+    fun `confirmation after the window opened is judged against the T2 deadline, not T1`() = runTest {
+        val resRepo = FakeReservationRepository().apply { currentDbTime = windowNow }
+        val service = buildService(FakeSeatRepository(), resRepo, FakeOutboxEventRepository())
+        val orderId = UUID.randomUUID()
+        heldAt(resRepo, "res-pw-confirm", orderId, windowNow.plusMinutes(1))
+        service.startPaymentWindow("res-pw-confirm", orderId)
+
+        // Past where T1 would have ended, well inside T2.
+        resRepo.currentDbTime = windowNow.plusMinutes(5)
+        val response = service.confirmReservation("res-pw-confirm", orderId)
+
+        assertEquals(ReservationStatus.CONFIRMED, response.status)
+    }
 }

@@ -6,6 +6,7 @@ import it.polito.cpo.model.Order
 import it.polito.cpo.model.OrderStatus
 import it.polito.cpo.repository.IdempotentRequestRepository
 import it.polito.cpo.repository.NonTerminalStateRow
+import it.polito.cpo.repository.OverdueHoldsRow
 import it.polito.cpo.repository.OrderRepository
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.toList
@@ -37,6 +38,30 @@ class OrderService(
         reservationId: String,
         reservationExpiresAt: OffsetDateTime,
     ): Long = orderRepository.markPaymentPending(id, reservationId, reservationExpiresAt)
+
+    // Customer-hold flow (ADR-016).
+    suspend fun markHeldAwaitingPayment(
+        id: UUID,
+        reservationId: String,
+        reservationExpiresAt: OffsetDateTime,
+    ): Long = orderRepository.markHeldAwaitingPayment(id, reservationId, reservationExpiresAt)
+
+    suspend fun submitPayment(id: UUID, paymentMethodToken: String): Long =
+        orderRepository.submitPayment(id, paymentMethodToken)
+
+    suspend fun markPaymentWindowOpened(
+        id: UUID,
+        reservationId: String,
+        reservationExpiresAt: OffsetDateTime,
+    ): Long = orderRepository.markPaymentWindowOpened(id, reservationId, reservationExpiresAt)
+
+    suspend fun cancelExpiredHold(id: UUID): Long = orderRepository.cancelExpiredHold(id)
+
+    suspend fun findExpiredHolds(limit: Int): List<Order> = orderRepository.findExpiredHolds(limit).toList()
+
+    suspend fun findActiveHold(userId: String): Order? = orderRepository.findActiveHold(userId)
+
+    suspend fun countOverdueHolds(): OverdueHoldsRow = orderRepository.countOverdueHolds()
 
     suspend fun markConfirmingInventory(id: UUID): Long = orderRepository.markConfirmingInventory(id)
 

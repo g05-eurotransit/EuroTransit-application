@@ -16,6 +16,7 @@ import it.polito.cpo.repository.IdempotencyRecordRepository
 import it.polito.cpo.repository.ReservationRepository
 import it.polito.cpo.repository.SeatRepository
 import io.micrometer.core.instrument.MeterRegistry
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.http.HttpStatus
 import org.springframework.stereotype.Service
 import java.security.MessageDigest
@@ -39,6 +40,10 @@ class ReservationService(
     private val objectMapper: ObjectMapper,
     private val transactionalOperator: TransactionalOperator,
     private val meterRegistry: MeterRegistry,
+    // T2 (ADR-016): how long the hold runs after the customer pays. Defaulted here and in no deployment
+    // value, so the configuration repository does not change; T1 stays the ten minutes below.
+    @Value("\${inventory.reservations.payment-window-minutes:10}")
+    private val paymentWindowMinutes: Long = 10,
 ) {
     private val logger = LoggerFactory.getLogger(ReservationService::class.java)
 
@@ -245,6 +250,83 @@ class ReservationService(
             meterRegistry.counter("inventory.holds.confirmed").increment()
         }
 
+        return response!!
+    }
+
+    /**
+     * Opens the one-time T2 payment window of a customer-hold reservation (ADR-016).
+     *
+     * Same shape as [confirmReservation], and for the same reason: the row lock is what serializes
+     * this with confirmation, release and the expiration sweep, so the "T1 still valid" check and the
+     * extension below are one decision rather than a read followed by a write somebody else can slip
+     * between. The expiry is evaluated before the replay check on purpose: a window that has already
+     * run out is as expired as a T1 that did, and answering `HELD` for it would send Orders to
+     * authorize against a seat that is about to be swept.
+     *
+     * Idempotent by state: once `paymentWindowStartedAt` is set, every replay returns the stored
+     * deadline and never extends it again (invariant 9).
+     */
+    suspend fun startPaymentWindow(reservationId: String, orderId: UUID): ReservationResponse {
+        var apiExceptionToThrow: ApiException? = null
+        var outcome = "replayed"
+
+        val response = transactionalOperator.executeAndAwait {
+            val reservation = reservationRepository.findByReservationIdForUpdate(reservationId) ?: throw ApiException(
+                HttpStatus.NOT_FOUND,
+                "RESERVATION_NOT_FOUND",
+                "Reservation not found"
+            )
+
+            if (reservation.orderId != orderId) {
+                throw ApiException(HttpStatus.CONFLICT, "RESERVATION_ORDER_CONFLICT", "Reservation belongs to another order")
+            }
+
+            when (reservation.status) {
+                ReservationStatus.EXPIRED.name ->
+                    throw ApiException(HttpStatus.CONFLICT, "RESERVATION_EXPIRED", "Reservation has expired")
+                ReservationStatus.CANCELLED.name ->
+                    throw ApiException(HttpStatus.CONFLICT, "RESERVATION_CANCELLED", "Reservation was cancelled")
+                ReservationStatus.HELD.name -> Unit
+                // CONFIRMED or REFUNDED: an order still waiting to pay cannot own a sold seat, so this is
+                // not a business answer Orders should act on. A distinct code keeps it from ever being
+                // mistaken for an expiry, which would fail the order as if no money had moved.
+                else -> throw ApiException(
+                    HttpStatus.CONFLICT,
+                    "RESERVATION_NOT_HELD",
+                    "Reservation is ${reservation.status}, not HELD",
+                )
+            }
+
+            val dbNow = reservationRepository.getCurrentTimestamp()
+            if (!reservation.expiresAt.isAfter(dbNow)) {
+                reservationRepository.save(reservation.copy(status = ReservationStatus.EXPIRED.name, isNewRecord = false))
+                seatRepository.releaseSeats(reservationId)
+                apiExceptionToThrow = ApiException(HttpStatus.CONFLICT, "RESERVATION_EXPIRED", "Reservation has expired")
+                return@executeAndAwait null
+            }
+
+            if (reservation.paymentWindowStartedAt != null) {
+                return@executeAndAwait ReservationResponse(reservationId, ReservationStatus.HELD, reservation.expiresAt)
+            }
+
+            val extended = reservation.copy(
+                expiresAt = dbNow.plusMinutes(paymentWindowMinutes),
+                paymentWindowStartedAt = dbNow,
+                isNewRecord = false,
+            )
+            reservationRepository.save(extended)
+            outcome = "opened"
+            ReservationResponse(reservationId, ReservationStatus.HELD, extended.expiresAt)
+        }
+
+        if (apiExceptionToThrow != null) {
+            meterRegistry.counter("inventory.holds.expired").increment()
+            meterRegistry.counter("inventory.holds.payment_window", "result", "expired").increment()
+            throw apiExceptionToThrow
+        }
+
+        // After the commit, so a rolled-back extension is never counted as opened.
+        meterRegistry.counter("inventory.holds.payment_window", "result", outcome).increment()
         return response!!
     }
 

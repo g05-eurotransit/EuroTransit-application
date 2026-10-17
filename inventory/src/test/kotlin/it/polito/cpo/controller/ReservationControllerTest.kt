@@ -1,6 +1,7 @@
 package it.polito.cpo.controller
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import it.polito.cpo.contracts.inventory.PaymentWindowRequest
 import it.polito.cpo.contracts.inventory.ReservationConfirmationRequest
 import it.polito.cpo.contracts.inventory.ReservationRequest
 import it.polito.cpo.contracts.inventory.ReservationResponse
@@ -17,6 +18,7 @@ import it.polito.cpo.security.SecurityConfig
 import it.polito.cpo.service.ReservationService
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito
@@ -91,6 +93,9 @@ class ReservationControllerTest {
         var lastConfirmReservationId: String? = null
         var lastConfirmOrderId: UUID? = null
         var reserveResponseStatus: ReservationStatus = ReservationStatus.HELD
+        var lastWindowReservationId: String? = null
+        var lastWindowOrderId: UUID? = null
+        var windowShouldThrow: ApiException? = null
 
         fun reset() {
             lastReserveRequest = null
@@ -102,6 +107,16 @@ class ReservationControllerTest {
             lastConfirmReservationId = null
             lastConfirmOrderId = null
             reserveResponseStatus = ReservationStatus.HELD
+            lastWindowReservationId = null
+            lastWindowOrderId = null
+            windowShouldThrow = null
+        }
+
+        override suspend fun startPaymentWindow(reservationId: String, orderId: UUID): ReservationResponse {
+            windowShouldThrow?.let { throw it }
+            lastWindowReservationId = reservationId
+            lastWindowOrderId = orderId
+            return ReservationResponse(reservationId, ReservationStatus.HELD, OffsetDateTime.now().plusMinutes(10))
         }
 
         override suspend fun reserveSeats(
@@ -439,5 +454,56 @@ class ReservationControllerTest {
             .bodyValue(request)
             .exchange()
             .expectStatus().isForbidden
+    }
+
+    @Test
+    fun `startPaymentWindow returns 200 HELD and delegates to service`() {
+        val orderId = UUID.randomUUID()
+
+        webClient
+            .mutateWith(mockJwt().authorities(SimpleGrantedAuthority(EuroTransitAuthorities.SERVICE)))
+            .put()
+            .uri("/api/inventory/reservations/{reservationId}/payment-window", "res-123")
+            .contentType(MediaType.APPLICATION_JSON)
+            .bodyValue(PaymentWindowRequest(orderId = orderId))
+            .exchange()
+            .expectStatus().isOk
+            .expectBody()
+            .jsonPath("$.reservationId").isEqualTo("res-123")
+            .jsonPath("$.status").isEqualTo("HELD")
+            .jsonPath("$.expiresAt").exists()
+
+        assertEquals("res-123", fakeService.lastWindowReservationId)
+        assertEquals(orderId, fakeService.lastWindowOrderId)
+    }
+
+    @Test
+    fun `startPaymentWindow maps an expired hold onto the shared error model`() {
+        fakeService.windowShouldThrow = ApiException(HttpStatus.CONFLICT, "RESERVATION_EXPIRED", "Reservation has expired")
+
+        webClient
+            .mutateWith(mockJwt().authorities(SimpleGrantedAuthority(EuroTransitAuthorities.SERVICE)))
+            .put()
+            .uri("/api/inventory/reservations/{reservationId}/payment-window", "res-123")
+            .contentType(MediaType.APPLICATION_JSON)
+            .bodyValue(PaymentWindowRequest(orderId = UUID.randomUUID()))
+            .exchange()
+            .expectStatus().isEqualTo(HttpStatus.CONFLICT)
+            .expectBody()
+            .jsonPath("$.code").isEqualTo("RESERVATION_EXPIRED")
+    }
+
+    @Test
+    fun `startPaymentWindow returns 403 Forbidden without ROLE_service`() {
+        webClient
+            .mutateWith(mockJwt().authorities(SimpleGrantedAuthority("ROLE_customer")))
+            .put()
+            .uri("/api/inventory/reservations/{reservationId}/payment-window", "res-123")
+            .contentType(MediaType.APPLICATION_JSON)
+            .bodyValue(PaymentWindowRequest(orderId = UUID.randomUUID()))
+            .exchange()
+            .expectStatus().isForbidden
+
+        assertNull(fakeService.lastWindowReservationId)
     }
 }

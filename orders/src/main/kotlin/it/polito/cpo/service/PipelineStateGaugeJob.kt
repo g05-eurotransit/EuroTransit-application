@@ -1,5 +1,6 @@
 package it.polito.cpo.service
 
+import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.MultiGauge
 import io.micrometer.core.instrument.Tags
@@ -9,6 +10,8 @@ import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Publishes how many orders sit in each non-terminal checkout phase, and how old the oldest one is.
@@ -33,6 +36,23 @@ class PipelineStateGaugeJob(
         .description("Orders currently in a non-terminal checkout phase")
         .register(meterRegistry)
 
+    // ADR-016. How many customer-hold orders sit past their T1 deadline and how far the oldest is past
+    // it: the T1 expiry job's lag. Separate from the two gauges above on purpose — HELD_AWAITING_PAYMENT
+    // is a customer reading a page, not a stuck pipeline, and must never feed the checkout-stuck alert,
+    // which takes the max of `oldest.age.seconds` over every state.
+    private val overdueHolds = AtomicLong(0)
+    private val overdueOldest = AtomicReference(0.0)
+
+    init {
+        Gauge.builder("orders.holds.overdue", overdueHolds) { it.get().toDouble() }
+            .description("Customer-hold orders still waiting after their payment deadline")
+            .register(meterRegistry)
+        Gauge.builder("orders.holds.overdue.oldest.seconds", overdueOldest) { it.get() }
+            .description("How far the oldest overdue customer hold is past its deadline")
+            .baseUnit("seconds")
+            .register(meterRegistry)
+    }
+
     private val oldestAge = MultiGauge.builder("orders.pipeline.oldest.age.seconds")
         .description("Age of the oldest order in each non-terminal checkout phase")
         .baseUnit("seconds")
@@ -50,7 +70,7 @@ class PipelineStateGaugeJob(
             // instead of gaps. A missing series and a series reading zero look the same on a graph
             // but not to an alert rule.
             inflight.register(
-                TRACKED.map { state ->
+                (TRACKED + OrderStatus.HELD_AWAITING_PAYMENT).map { state ->
                     MultiGauge.Row.of(Tags.of("state", state.name), byState[state.name]?.orderCount ?: 0L)
                 },
                 true,
@@ -61,6 +81,10 @@ class PipelineStateGaugeJob(
                 },
                 true,
             )
+
+            val overdue = orderService.countOverdueHolds()
+            overdueHolds.set(overdue.orderCount)
+            overdueOldest.set(overdue.oldestAgeSeconds)
         } catch (e: Exception) {
             // A gauge refresh must never take the service down; the previous values simply persist
             // until the next run.

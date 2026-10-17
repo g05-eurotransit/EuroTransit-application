@@ -11,6 +11,7 @@ import it.polito.cpo.client.InventoryClient
 import it.polito.cpo.client.InventoryRefusalCode
 import it.polito.cpo.client.OfferOutcome
 import it.polito.cpo.client.PaymentClient
+import it.polito.cpo.client.PaymentWindowOutcome
 import it.polito.cpo.client.RefundReservationOutcome
 import it.polito.cpo.client.ResolvedOffer
 import it.polito.cpo.client.ReversalOutcome
@@ -40,10 +41,12 @@ import it.polito.cpo.service.ReconciliationOperationsService
 import it.polito.cpo.service.ReconciliationService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.reactor.awaitSingle
 import kotlinx.coroutines.reactor.awaitSingleOrNull
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.micrometer.tracing.test.autoconfigure.AutoConfigureTracing
 import org.springframework.boot.test.context.SpringBootTest
@@ -74,6 +77,7 @@ import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.OffsetDateTime
 import java.time.ZoneId
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -83,6 +87,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -852,6 +857,46 @@ class CheckoutPipelineIntegrationTest {
         assertEquals(0, payment.authorizedOrderIds.count { it == orderId })
     }
 
+    /** A customer-hold order paid and exhausted past its hold; the window recorded or not. */
+    private suspend fun expiredCustomerHoldPaymentPending(tag: String, windowOpened: Boolean): UUID {
+        val user = "user-$tag-${UUID.randomUUID()}"
+        val orderId = orchestrator.checkout(request(token = null), "it-$tag-${UUID.randomUUID()}", user, null).orderId
+        seedState(orderId, OrderStatus.PAYMENT_PENDING, "res-$orderId")
+        seedHoldExpiry(orderId, OffsetDateTime.now().minusHours(2))
+        databaseClient.sql("UPDATE orders SET payment_window_opened = :w, payment_method_token = 'tok-123' WHERE id = :id")
+            .bind("w", windowOpened).bind("id", orderId).then().awaitSingleOrNull()
+        openIncident(orderId, ReconciliationKind.DELIVERY_EXHAUSTED)
+        return orderId
+    }
+
+    @Test
+    fun `an expired customer-hold order whose payment window never opened can be redriven, and fails unpaid`() = runBlocking {
+        // ADR-016: Inventory was down at the payment, so the window was never recorded and Payments was
+        // never called. Redriving asks for the window, Inventory refuses the expired hold, and the order
+        // fails with no money moved -- no abandonment, no provider check for a charge that cannot exist.
+        val orderId = expiredCustomerHoldPaymentPending("redrive-nowin", windowOpened = false)
+        inventory.refuseWindowWith[orderId] = InventoryRefusalCode.RESERVATION_EXPIRED
+
+        val accepted = operations.redrive(orderId, "redrive-nowin-$orderId", "ops-1")
+        assertEquals(OrderStatus.PAYMENT_PENDING, accepted.orderStatus)
+        relayLatestOrderPlaced(orderId)
+
+        assertEquals(OrderStatus.FAILED, awaitTerminal(orderId).status)
+        assertEquals(0, payment.authorizedOrderIds.count { it == orderId })
+        assertEquals(0, payment.refundedOrderIds.count { it == orderId })
+        assertTrue(openRecords(orderId).isEmpty(), "the exhausted delivery closes with the order")
+    }
+
+    @Test
+    fun `an expired customer-hold order whose window opened is still refused, it may have been charged`() = runBlocking {
+        val orderId = expiredCustomerHoldPaymentPending("redrive-win", windowOpened = true)
+
+        val ex = assertFailsWith<ApiException> { operations.redrive(orderId, "redrive-win-$orderId", "ops-1") }
+
+        assertEquals("RESERVATION_HOLD_EXPIRED", ex.code)
+        assertEquals(1, openRecords(orderId).size)
+    }
+
     @Test
     fun `a redrive of a PAYMENT_PENDING order whose hold is still live is accepted`() = runBlocking {
         // The negative half: the refusal is about an expired hold, not about PAYMENT_PENDING itself.
@@ -1221,8 +1266,93 @@ class CheckoutPipelineIntegrationTest {
         assertEquals(1, openRecords(orderId).size)
     }
 
+    // --- customer-hold flow (ADR-016) -------------------------------------------------------------
+
+    @Test
+    fun `customer-hold flow - held and parked, then paid, the window opened once, and CONFIRMED`() = runBlocking {
+        val user = "user-hold-${UUID.randomUUID()}"
+        val response = orchestrator.checkout(request(token = null), "it-hold-${UUID.randomUUID()}", user, "$user@example.com")
+        relayOrderPlaced(response.orderId)
+
+        val held = awaitStatus(response.orderId, OrderStatus.HELD_AWAITING_PAYMENT)
+        assertNotNull(held.reservationExpiresAt)
+        assertTrue(payment.authorizedOrderIds.none { it == response.orderId }, "nothing is paid before the customer pays")
+        assertNull(inventory.windowCalls["res-${response.orderId}"])
+
+        val paid = orchestrator.submitPayment(response.orderId, "tok-123", "it-pay-${UUID.randomUUID()}", user)
+        assertEquals(OrderStatus.PAYMENT_PENDING, paid.status)
+        assertEquals(2, outboxRows(response.orderId, "order-placed").size, "the payment writes its own durable trigger")
+        relayLatestOrderPlaced(response.orderId)
+
+        val order = awaitTerminal(response.orderId)
+        assertEquals(OrderStatus.CONFIRMED, order.status)
+        assertEquals(1, inventory.windowCalls["res-${response.orderId}"]?.get())
+        assertTrue(order.paymentWindowOpened)
+        assertNotNull(order.paymentSubmittedAt)
+        assertEquals(
+            inventory.windowDeadlines["res-${response.orderId}"]?.toInstant()?.truncatedTo(ChronoUnit.MILLIS),
+            order.reservationExpiresAt?.toInstant()?.truncatedTo(ChronoUnit.MILLIS),
+            "the stored deadline is T2 once the window opened",
+        )
+    }
+
+    @Test
+    fun `customer-hold flow - the database refuses a second hold for the same customer`() = runBlocking {
+        val user = "user-two-holds-${UUID.randomUUID()}"
+        val first = orchestrator.checkout(request(token = null), "it-h1-${UUID.randomUUID()}", user, null)
+
+        val ex = assertThrows<ApiException> {
+            orchestrator.checkout(request(token = null, seats = listOf("3C"), totalAmount = BigDecimal("100.00")), "it-h2-${UUID.randomUUID()}", user, null)
+        }
+        assertEquals("ACTIVE_HOLD_EXISTS", ex.code)
+        assertEquals(first.orderId, ex.details?.get("orderId"))
+
+        // The direct flow is untouched by the waiting hold, which is what keeps the load test working.
+        val direct = orchestrator.checkout(request(seats = listOf("4D"), totalAmount = BigDecimal("100.00")), "it-h3-${UUID.randomUUID()}", user, null)
+        assertEquals(OrderStatus.ACCEPTED, direct.status)
+    }
+
+    @Test
+    fun `customer-hold flow - the expiry job cancels a hold past T1 and releases it`() = runBlocking<Unit> {
+        val user = "user-expiry-${UUID.randomUUID()}"
+        val response = orchestrator.checkout(request(token = null), "it-exp-${UUID.randomUUID()}", user, null)
+        relayOrderPlaced(response.orderId)
+        awaitStatus(response.orderId, OrderStatus.HELD_AWAITING_PAYMENT)
+        databaseClient.sql("UPDATE orders SET reservation_expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE id = :id")
+            .bind("id", response.orderId).fetch().rowsUpdated().awaitSingle()
+
+        val refused = assertThrows<ApiException> {
+            orchestrator.submitPayment(response.orderId, "tok-123", "it-late-${UUID.randomUUID()}", user)
+        }
+        assertEquals("HOLD_EXPIRED", refused.code)
+
+        orchestrator.expireHolds()
+
+        assertEquals(OrderStatus.CANCELLED, orderRepository.findById(response.orderId)!!.status)
+        assertTrue("res-${response.orderId}" in inventory.releasedReservationIds)
+        // The customer is free to hold again.
+        orchestrator.checkout(request(token = null, seats = listOf("5E"), totalAmount = BigDecimal("100.00")), "it-again-${UUID.randomUUID()}", user, null)
+    }
+
+    @Test
+    fun `customer-hold flow - a refused payment window fails the order and Payments is never called`() = runBlocking {
+        val user = "user-window-${UUID.randomUUID()}"
+        val response = orchestrator.checkout(request(token = null), "it-win-${UUID.randomUUID()}", user, null)
+        relayOrderPlaced(response.orderId)
+        awaitStatus(response.orderId, OrderStatus.HELD_AWAITING_PAYMENT)
+        inventory.refuseWindowWith[response.orderId] = InventoryRefusalCode.RESERVATION_EXPIRED
+
+        orchestrator.submitPayment(response.orderId, "tok-123", "it-winpay-${UUID.randomUUID()}", user)
+        relayLatestOrderPlaced(response.orderId)
+
+        val order = awaitTerminal(response.orderId)
+        assertEquals(OrderStatus.FAILED, order.status)
+        assertTrue(payment.authorizedOrderIds.none { it == response.orderId })
+        assertTrue(payment.refundedOrderIds.none { it == response.orderId }, "no money moved, so nothing to reverse")
+    }
+
     private fun request(
-        token: String = "tok-123",
+        token: String? = "tok-123",
         travelDate: LocalDate = TRAVEL_DATE,
         seats: List<String> = listOf("1A", "1B"),
         // Two seats by default, so the line total is twice OFFER's per-seat price.
@@ -1475,6 +1605,15 @@ class CheckoutPipelineIntegrationTest {
         /** orderId -> a definitive refusal to answer the confirmation with. */
         val refuseConfirmWith = ConcurrentHashMap<UUID, InventoryRefusalCode>()
 
+        /** reservationId -> how many payment-window calls it received (ADR-016). */
+        val windowCalls = ConcurrentHashMap<String, AtomicInteger>()
+
+        /** orderId -> a definitive refusal to answer the payment window with. */
+        val refuseWindowWith = ConcurrentHashMap<UUID, InventoryRefusalCode>()
+
+        /** reservationId -> the T2 deadline, fixed by the first call as Inventory fixes it. */
+        val windowDeadlines = ConcurrentHashMap<String, OffsetDateTime>()
+
         override suspend fun reserveSeats(
             request: ReservationRequest,
             idempotencyKey: String,
@@ -1498,6 +1637,13 @@ class CheckoutPipelineIntegrationTest {
                 throw IOException("simulated connection reset after Inventory committed")
             }
             return ConfirmReservationOutcome.Confirmed(reservationId)
+        }
+
+        override suspend fun startPaymentWindow(reservationId: String, orderId: UUID): PaymentWindowOutcome {
+            windowCalls.computeIfAbsent(reservationId) { AtomicInteger() }.incrementAndGet()
+            refuseWindowWith[orderId]?.let { return PaymentWindowOutcome.Refused(it, "forced by test") }
+            val deadline = windowDeadlines.computeIfAbsent(reservationId) { OffsetDateTime.now().plusMinutes(10) }
+            return PaymentWindowOutcome.Opened(reservationId, deadline)
         }
 
         override suspend fun releaseSeats(reservationId: String, idempotencyKey: String) {
