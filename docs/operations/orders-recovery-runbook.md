@@ -7,6 +7,10 @@ open gate of the AKS experiments of 2026-10-12 (configuration #55): there, a Pay
 Inventory restart and a PostgreSQL failover each left accepted orders waiting on an operator, and they
 were recovered by replaying raw events rather than through this runbook.
 
+A [PostgreSQL statement-failure regression](reports/2026-10-postgres-recovery-regression.md) checks
+automatic Kafka recovery after the hold under the current policy. A fresh AKS failover acceptance
+test is still required to validate physical connection and CloudNativePG recovery.
+
 ## The policy
 
 **An unknown outcome is never turned into a decision.** A checkout or refund whose dependency does not
