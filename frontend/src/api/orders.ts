@@ -10,7 +10,11 @@ export type OrderStatus =
   | "CONFIRMED"
   | "FAILED"
   | "CANCELLED"
-  | "COMPENSATING";
+  | "COMPENSATING"
+  // The post-sale refund process (ADR-015), a separate durable pipeline from the checkout above:
+  // reachable only from CONFIRMED, and REFUNDING is where a stuck refund waits for an operator.
+  | "REFUNDING"
+  | "REFUNDED";
 
 /**
  * What "Continue" sends. Deliberately no payment token: without one, Orders holds the seats and waits
@@ -47,9 +51,67 @@ export interface OrderView {
   reservationExpiresAt?: string | null;
   /** The server's clock when it answered, so the countdown does not trust the browser's clock. */
   serverNow?: string | null;
-  offerId?: string | null;
   failureCode?: FailureCode | null;
   failureMessage?: string | null;
+  currency?: string;
+  /** The refund terms frozen at checkout. All null together when the order carries no offer. */
+  offerId?: string | null;
+  refundable?: boolean | null;
+  /** Null when not refundable, and also when refundable right up to departure. */
+  refundCutoffMinutesBeforeDeparture?: number | null;
+  /** The instant the cutoff counts back from, already composed with the departure station's zone. */
+  departureAt?: string | null;
+}
+
+/**
+ * Asks for a post-sale refund (ADR-015). Needs a fresh `Idempotency-Key` per attempt: replaying an
+ * accepted key returns the original answer even past the cutoff, while a new request past it is
+ * refused. Answers `202` with the order already `REFUNDING` — the reversal runs asynchronously.
+ */
+export function refundOrder(
+  orderId: string,
+  idempotencyKey: string,
+  correlationId: string,
+  signal?: AbortSignal,
+): Promise<OrderView> {
+  return apiFetch<OrderView>(`/orders/${encodeURIComponent(orderId)}/refund`, {
+    method: "POST",
+    auth: true,
+    idempotencyKey,
+    correlationId,
+    signal,
+  });
+}
+
+export type RefundWindow = { open: true; deadline: number } | { open: false; reason: string };
+
+/** "24 hours before departure", "5 minutes before departure", or departure itself. */
+export function cutoffLabel(minutes: number | null | undefined): string {
+  if (!minutes) return "departure";
+  if (minutes % 1440 === 0) return `${minutes / 1440} day${minutes === 1440 ? "" : "s"} before departure`;
+  if (minutes % 60 === 0) return `${minutes / 60} hour${minutes === 60 ? "" : "s"} before departure`;
+  return `${minutes} minute${minutes === 1 ? "" : "s"} before departure`;
+}
+
+/**
+ * Mirrors the server's four refusals so a customer reads the rule instead of meeting a 409.
+ * Eligibility is still decided server-side, against the Orders database clock.
+ */
+export function refundWindow(order: OrderView, now: number): RefundWindow {
+  if (order.status === "REFUNDING") return { open: false, reason: "A refund is already running." };
+  if (order.status === "REFUNDED") return { open: false, reason: "This order was refunded." };
+  if (order.status !== "CONFIRMED") return { open: false, reason: "Only a confirmed order can be refunded." };
+  // All three terms are null together on an order sold before the offer fields existed.
+  if (order.refundable == null || !order.departureAt) {
+    return { open: false, reason: "This order was sold without refund terms." };
+  }
+  if (!order.refundable) return { open: false, reason: "This fare is non-refundable." };
+  const deadline =
+    new Date(order.departureAt).getTime() - (order.refundCutoffMinutesBeforeDeparture ?? 0) * 60_000;
+  if (now >= deadline) {
+    return { open: false, reason: `The refund window closed ${cutoffLabel(order.refundCutoffMinutesBeforeDeparture)}.` };
+  }
+  return { open: true, deadline };
 }
 
 export interface ListOrdersResponse {
@@ -160,7 +222,12 @@ export function isPaymentUnderway(status: OrderStatus): boolean {
   );
 }
 
-/** Terminal states: polling can stop once one of these is reached. */
+/**
+ * Terminal states: polling can stop once one of these is reached. `REFUNDING` is deliberately not
+ * one — the reversal and the seat return are still outstanding, so the page keeps watching.
+ */
 export function isTerminal(status: OrderStatus): boolean {
-  return status === "CONFIRMED" || status === "FAILED" || status === "CANCELLED";
+  return (
+    status === "CONFIRMED" || status === "FAILED" || status === "CANCELLED" || status === "REFUNDED"
+  );
 }
