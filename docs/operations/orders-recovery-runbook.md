@@ -87,6 +87,12 @@ Most urgent first: incidents whose order still has a live seat hold, nearest dea
 those with no hold deadline, oldest first; then those past their hold. Each with `kind`, `orderState` (the phase that failed), `orderStatus` (where the order is
 now), `failureClass`, `attemptCount`, `createdAt` and the order's `reservationExpiresAt`. Work the one closest to its `reservationExpiresAt` first.
 
+The same list is in the UI at `/operations`, where an account with the `operations` realm role lands
+after sign-in: one row per incident, a live countdown on each seat hold, and a single button per row
+offering only the step-4 action for that `kind` and `orderStatus` — including the evidence reference
+that `settle` and `resolve` require. The `curl` calls below remain the fallback when the SPA is not
+reachable, and are what the operator commands do underneath.
+
 Orders in `HELD_AWAITING_PAYMENT` are never incidents on their own: a customer is reading the checkout
 page. Only `orders_holds_overdue` above zero for more than a minute means something is wrong — the T1
 expiry job is not running or cannot reach the database. The seat is not at risk (Inventory's sweep
