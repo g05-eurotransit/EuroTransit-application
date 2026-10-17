@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "react-oidc-context";
-import { Button, Card, Col, Form, Row, Spinner } from "react-bootstrap";
+import { Button, Card, Col, Form, Modal, Row, Spinner } from "react-bootstrap";
 import { loadStripe } from "@stripe/stripe-js";
 import {
   CardCvcElement,
@@ -57,7 +57,8 @@ const HOLD_WAIT_LIMIT_MS = 60_000;
 
 const SEATS_TAKEN_NOTICE = "Sorry, those seats were just taken. Please choose others.";
 const HOLD_FAILED_NOTICE = "We could not hold those seats. Please try again.";
-const TIME_RAN_OUT_NOTICE = "The time to pay for your seats ran out, so they were released. Please choose again.";
+// How long the "time's up" message stays on screen before the page goes back to the seats by itself.
+const TIME_UP_REDIRECT_SECONDS = 5;
 const NO_LONGER_ACTIVE_NOTICE = "That checkout is no longer active, so its seats were released. Please choose again.";
 
 let stripePromise: ReturnType<typeof loadStripe> | undefined;
@@ -175,6 +176,8 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
   const [error, setError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  // Seconds left before going back, while the "time's up" message is on screen; null when it is not.
+  const [timeUpSeconds, setTimeUpSeconds] = useState<number | null>(null);
   const leaving = useRef(false);
   const cancelInFlight = useRef(false);
   const cardComplete = completeFields.number && completeFields.expiry && completeFields.cvc;
@@ -228,13 +231,13 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
    * a status past the payment leads to the order page. One cancel at a time: Back and a countdown
    * reaching zero together must not fire two.
    */
-  async function cancelAndLeave(notice?: string) {
+  async function cancelThen(onReleased: () => void) {
     if (cancelInFlight.current || leaving.current) return;
     cancelInFlight.current = true;
     setCancelling(true);
     try {
       await cancelOrder(orderId);
-      leave(notice);
+      onReleased();
     } catch {
       try {
         const o = await getOrder(orderId);
@@ -242,7 +245,7 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
       } catch {
         // Cannot tell: the order is unpaid as far as this page knows, and the hold runs out by itself.
       }
-      leave(notice);
+      onReleased();
     } finally {
       cancelInFlight.current = false;
       setCancelling(false);
@@ -326,14 +329,33 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
   // Time is up: release the seats now (best effort — the server's expiry job would do it within
   // seconds) so the customer can hold again straight away, and go back to the seat map.
   useEffect(() => {
-    if (!held || !countdown.expired || submitting || leaving.current) return;
-    void cancelAndLeave(TIME_RAN_OUT_NOTICE);
+    if (!held || !countdown.expired || submitting || leaving.current || timeUpSeconds !== null) return;
+    void cancelThen(showTimeUp);
   }, [held, countdown.expired, submitting]);
+
+  /**
+   * Time is up and the seats are released: say so in the middle of the screen, then go back to the
+   * seat map by itself after a few seconds (or at once, from the button). Never shown when the payment
+   * turned out to have started — [cancelThen] goes to the order instead.
+   */
+  function showTimeUp() {
+    setTimeUpSeconds(TIME_UP_REDIRECT_SECONDS);
+  }
+
+  useEffect(() => {
+    if (timeUpSeconds === null) return;
+    if (timeUpSeconds <= 0) {
+      leave();
+      return;
+    }
+    const id = setTimeout(() => setTimeUpSeconds((s) => (s === null ? null : s - 1)), 1000);
+    return () => clearTimeout(id);
+  }, [timeUpSeconds]);
 
   function goBack() {
     // An explicit "back" is the customer giving the seats up (ADR-016). Leaving the page any other
     // way does not cancel: the hold simply runs out, and the seat page offers to resume it.
-    void cancelAndLeave();
+    void cancelThen(() => leave());
   }
 
   function fieldComplete(field: CardFieldName) {
@@ -373,9 +395,13 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
     } catch (e) {
       if (!(e instanceof ApiError)) {
         setError("Unexpected error");
-      } else if (e.code === "HOLD_EXPIRED" || e.code === "ORDER_NOT_PAYABLE") {
+      } else if (e.code === "HOLD_EXPIRED") {
+        // The same moment as the countdown reaching zero, seen from the server: release and say so.
         pendingAttempt.current = null;
-        leave(TIME_RAN_OUT_NOTICE);
+        await cancelThen(showTimeUp);
+      } else if (e.code === "ORDER_NOT_PAYABLE") {
+        pendingAttempt.current = null;
+        leave(NO_LONGER_ACTIVE_NOTICE);
       } else if (e.code === "PAYMENT_ALREADY_STARTED") {
         pendingAttempt.current = null;
         goToOrder();
@@ -533,6 +559,20 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
           </Row>
         </Form>
       )}
+
+      <Modal show={timeUpSeconds !== null} centered backdrop="static" keyboard={false} aria-labelledby="time-up-title">
+        <Modal.Body className="text-center p-4">
+          <i className="bi bi-clock-history text-primary" style={{ fontSize: "2.5rem" }} aria-hidden="true" />
+          <h2 id="time-up-title" className="fw-bold fs-4 mt-2">Time's up</h2>
+          <p className="text-secondary-emphasis mb-4">
+            Your seats have been released. You'll be taken back to seat selection in{" "}
+            {timeUpSeconds ?? 0} {timeUpSeconds === 1 ? "second" : "seconds"}.
+          </p>
+          <Button variant="primary" className="fw-semibold" onClick={() => leave()}>
+            Choose seats now
+          </Button>
+        </Modal.Body>
+      </Modal>
     </>
   );
 }

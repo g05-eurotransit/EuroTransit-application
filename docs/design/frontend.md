@@ -55,7 +55,8 @@ The checkout is two calls, minutes apart, and the seats are held between them.
     message.
 - **Pay now** creates the Stripe token and sends it to `POST /api/orders/{orderId}/payment`, then
   follows the order on `/orders/{orderId}` as before.
-  - `HOLD_EXPIRED` / `ORDER_NOT_PAYABLE` → back to the seats with "time ran out".
+  - `HOLD_EXPIRED` → the same "time's up" message as the countdown reaching zero (below);
+    `ORDER_NOT_PAYABLE` → back to the seats with a notice.
   - `PAYMENT_ALREADY_STARTED` (another tab paid) → the order page.
   - An unknown outcome (network, `5xx`) re-reads the order: if the payment got through, the page
     follows it; otherwise "try again" **resends the same key and the same Stripe token**. Orders
@@ -66,6 +67,8 @@ The checkout is two calls, minutes apart, and the seats are held between them.
   goes to it only when its status is past the payment; otherwise back to the seats.
 - **What releases the seats.** The page's own back button cancels the order. The countdown
   reaching zero also cancels it, so a new hold is possible at once instead of after the server's expiry job.
+  It then shows a **"Time's up"** message in the middle of the screen, over a backdrop that blocks the
+  form. After five seconds it goes back to the seat selection by itself; "Choose seats now" goes at once.
   Closing the tab, browser back or losing the network do **not**: browser exit signals are not
   reliable, so the hold simply runs out at T1.
 - **One hold per customer.** A second Continue while a hold is waiting gets `409 ACTIVE_HOLD_EXISTS`. The

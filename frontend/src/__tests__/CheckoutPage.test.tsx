@@ -132,7 +132,7 @@ describe("checkout payment step", () => {
     expect(vi.mocked(submitPayment).mock.calls[0].slice(0, 2)).toEqual(["o-1", "tok_visa"]);
   });
 
-  it("sends the customer back to the seats when the server says time ran out", async () => {
+  it("shows the time's-up message when the server says the time ran out at Pay", async () => {
     vi.mocked(getOrder).mockResolvedValue(order("HELD_AWAITING_PAYMENT"));
     vi.mocked(submitPayment).mockRejectedValue(new ApiError("conflict", 409, "m", "HOLD_EXPIRED"));
     renderCheckout();
@@ -141,7 +141,10 @@ describe("checkout payment step", () => {
     await waitFor(() => expect(pay).toBeEnabled());
     fireEvent.click(pay);
 
-    expect(await seatsNotice()).toMatch(/ran out/);
+    expect(await screen.findByText("Time's up")).toBeInTheDocument();
+    expect(cancelOrder).toHaveBeenCalledWith("o-1");
+    fireEvent.click(screen.getByRole("button", { name: "Choose seats now" }));
+    expect(await seatsNotice()).toBeUndefined();
   });
 
   it("follows the order when another tab already paid", async () => {
@@ -175,19 +178,36 @@ describe("checkout payment step", () => {
     expect(await seatsNotice()).toBeUndefined();
   });
 
-  it("releases the seats and goes back when the countdown reaches zero", async () => {
+  function expiredHold() {
     const now = new Date();
-    vi.mocked(getOrder).mockResolvedValue(
-      order("HELD_AWAITING_PAYMENT", {
-        reservationExpiresAt: new Date(now.getTime() - 1000).toISOString(),
-        serverNow: now.toISOString(),
-      }),
-    );
+    return order("HELD_AWAITING_PAYMENT", {
+      reservationExpiresAt: new Date(now.getTime() - 1000).toISOString(),
+      serverNow: now.toISOString(),
+    });
+  }
+
+  it("at zero releases the seats, says so in the middle of the screen, and goes back by itself", async () => {
+    vi.mocked(getOrder).mockResolvedValue(expiredHold());
     renderCheckout();
 
-    expect(await seatsNotice()).toMatch(/ran out/);
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Time's up");
+    expect(dialog).toHaveTextContent(/taken back to seat selection in 5 seconds/);
     expect(cancelOrder).toHaveBeenCalledWith("o-1");
     expect(submitPayment).not.toHaveBeenCalled();
+
+    // Five seconds later, with nobody touching anything.
+    expect(await screen.findByTestId("seats-state", {}, { timeout: 7000 })).toBeInTheDocument();
+    expect(await seatsNotice()).toBeUndefined();
+  }, 10_000);
+
+  it("the time's-up button goes back at once", async () => {
+    vi.mocked(getOrder).mockResolvedValue(expiredHold());
+    renderCheckout();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Choose seats now" }));
+
+    expect(await screen.findByTestId("seats-state")).toBeInTheDocument();
   });
 
   it("resumes an order opened without the seat page's state", async () => {
@@ -271,6 +291,7 @@ describe("checkout payment step", () => {
   });
 
   it("never says the seats were released when another tab paid before the countdown ran out", async () => {
+    // Also: no time's-up message at all, only the order page (asserted at the end).
     const now = new Date();
     vi.mocked(getOrder)
       .mockResolvedValueOnce(
@@ -285,6 +306,7 @@ describe("checkout payment step", () => {
 
     expect(await screen.findByText("order page o-1")).toBeInTheDocument();
     expect(screen.queryByTestId("seats-state")).not.toBeInTheDocument();
+    expect(screen.queryByText("Time's up")).not.toBeInTheDocument();
   });
 
   it("keeps waiting for the hold through a network blip", async () => {
@@ -304,7 +326,7 @@ describe("checkout payment step", () => {
     expect(await seatsNotice()).toMatch(/could not hold those seats/);
   });
 
-  it("a refused cancel on an order the expiry job already closed still goes back with 'time ran out'", async () => {
+  it("a refused cancel on an order the expiry job already closed still shows time's up", async () => {
     // 409 ORDER_NOT_CANCELLABLE is not proof of a payment: the job may simply have cancelled it first.
     const now = new Date();
     vi.mocked(getOrder)
@@ -318,7 +340,7 @@ describe("checkout payment step", () => {
     vi.mocked(cancelOrder).mockRejectedValue(new ApiError("conflict", 409, "m", "ORDER_NOT_CANCELLABLE"));
     renderCheckout();
 
-    expect(await seatsNotice()).toMatch(/ran out/);
+    expect(await screen.findByText("Time's up")).toBeInTheDocument();
     expect(screen.queryByText("order page o-1")).not.toBeInTheDocument();
   });
 
