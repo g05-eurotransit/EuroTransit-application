@@ -60,9 +60,10 @@ The checkout is two calls, minutes apart, and the seats are held between them.
   - An unknown outcome (network, `5xx`) re-reads the order: if the payment got through, the page
     follows it; otherwise "try again" **resends the same key and the same Stripe token**. Orders
     fingerprints the token, so a fresh token under the old key would be refused rather than replayed.
-- **Before saying "seats released"** the page checks that it really released them. A cancel answered
-  `409 ORDER_NOT_CANCELLABLE` means the payment already started (another tab, a lost response), and the
-  page goes to the order instead.
+- **Before saying "seats released"** the page checks that it really released them. A refused cancel is
+  not proof of a payment. `409 ORDER_NOT_CANCELLABLE` answers both a payment that got in first (another
+  tab, a lost response) and an order the expiry job already cancelled. So the page re-reads the order and
+  goes to it only when its status is past the payment; otherwise back to the seats.
 - **What releases the seats.** The page's own back button cancels the order. The countdown
   reaching zero also cancels it, so a new hold is possible at once instead of after the server's expiry job.
   Closing the tab, browser back or losing the network do **not**: browser exit signals are not

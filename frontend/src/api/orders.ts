@@ -146,6 +146,20 @@ export function getSeatAvailability(
   return apiFetch<SeatAvailabilityView>(`/orders/seat-availability?${params}`, { auth: true, signal });
 }
 
+/**
+ * Whether the payment of a customer-hold order has started or finished. Asked after a cancel answered
+ * 409 ORDER_NOT_CANCELLABLE, because that one answer covers two different things: a payment that got
+ * in first, and an order that is already cancelled (the expiry job) or failed.
+ */
+export function isPaymentUnderway(status: OrderStatus): boolean {
+  return (
+    status === "PAYMENT_PENDING" ||
+    status === "CONFIRMING_INVENTORY" ||
+    status === "COMPENSATING" ||
+    status === "CONFIRMED"
+  );
+}
+
 /** Terminal states: polling can stop once one of these is reached. */
 export function isTerminal(status: OrderStatus): boolean {
   return status === "CONFIRMED" || status === "FAILED" || status === "CANCELLED";

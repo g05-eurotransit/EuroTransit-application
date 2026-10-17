@@ -174,7 +174,9 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
   });
   const [error, setError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const leaving = useRef(false);
+  const cancelInFlight = useRef(false);
   const cardComplete = completeFields.number && completeFields.expiry && completeFields.cvc;
   const held = order?.status === "HELD_AWAITING_PAYMENT";
   const countdown = useCountdown(order?.reservationExpiresAt ?? null, held, clockOffsetMs);
@@ -212,21 +214,28 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
 
   /** Follows the order to its own page: the payment has started, from here or from another tab. */
   function goToOrder() {
+    if (leaving.current) return;
     leaving.current = true;
     navigate(`/orders/${encodeURIComponent(orderId)}`, { replace: true });
   }
 
   /**
    * Gives the seats up and goes back — unless the payment has already started, in which case the
-   * customer is taken to the order instead of being told the seats were released. `cancel` answers
-   * 409 ORDER_NOT_CANCELLABLE exactly when that happened; any other failure re-reads the order to know.
+   * customer is taken to the order instead of being told the seats were released.
+   *
+   * A refused cancel is not proof of a payment: 409 ORDER_NOT_CANCELLABLE also answers an order the
+   * expiry job already cancelled, or a second click on Back. So any failure re-reads the order, and only
+   * a status past the payment leads to the order page. One cancel at a time: Back and a countdown
+   * reaching zero together must not fire two.
    */
   async function cancelAndLeave(notice?: string) {
+    if (cancelInFlight.current || leaving.current) return;
+    cancelInFlight.current = true;
+    setCancelling(true);
     try {
       await cancelOrder(orderId);
       leave(notice);
-    } catch (e) {
-      if (e instanceof ApiError && e.code === "ORDER_NOT_CANCELLABLE") return goToOrder();
+    } catch {
       try {
         const o = await getOrder(orderId);
         if (!BEFORE_PAYMENT.has(o.status)) return goToOrder();
@@ -234,6 +243,9 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
         // Cannot tell: the order is unpaid as far as this page knows, and the hold runs out by itself.
       }
       leave(notice);
+    } finally {
+      cancelInFlight.current = false;
+      setCancelling(false);
     }
   }
 
@@ -274,6 +286,10 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
           if (stop || ac.signal.aborted) return;
           if (e instanceof ApiError && e.kind === "not_found") {
             setError("This checkout could not be found.");
+            return;
+          }
+          if (e instanceof ApiError && (e.kind === "unauthenticated" || e.kind === "forbidden")) {
+            setError("Your session has expired. Please sign in again.");
             return;
           }
           // A real network blip or a 5xx: say so, and keep trying.
@@ -391,7 +407,7 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
               className="rounded-circle p-0 d-flex align-items-center justify-content-center flex-shrink-0"
               style={{ width: 40, height: 40 }}
               aria-label="Go back"
-              disabled={submitting}
+              disabled={submitting || cancelling}
               onClick={() => void goBack()}
             >
               <i className="bi bi-arrow-left" aria-hidden="true" />

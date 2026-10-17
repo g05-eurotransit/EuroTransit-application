@@ -1,15 +1,24 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { cancelOrder, createHold, getSeatAvailability } from "../api/orders";
+import { cancelOrder, createHold, getOrder, getSeatAvailability, type OrderView } from "../api/orders";
 import { ApiError } from "../api/client";
 import { SeatSelectionPage } from "../pages/SeatSelectionPage";
 
-vi.mock("../api/orders", () => ({
+vi.mock("../api/orders", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/orders")>()),
   getSeatAvailability: vi.fn(),
   createHold: vi.fn(),
   cancelOrder: vi.fn(),
+  getOrder: vi.fn(),
 }));
+
+function orderIn(status: OrderView["status"]): OrderView {
+  return {
+    orderId: "o-old", userId: "alice", status, routeId: "R1", seats: ["2A"],
+    travelDate: "2026-10-07", totalAmount: 24.9, createdAt: "2026-10-07T10:00:00",
+  };
+}
 
 function CheckoutProbe() {
   const { state, search } = useLocation();
@@ -163,6 +172,7 @@ describe("seat selection", () => {
       new ApiError("conflict", 409, "m", "ACTIVE_HOLD_EXISTS", undefined, { orderId: "o-old" }),
     );
     vi.mocked(cancelOrder).mockRejectedValue(new ApiError("conflict", 409, "m", "ORDER_NOT_CANCELLABLE"));
+    vi.mocked(getOrder).mockResolvedValue(orderIn("PAYMENT_PENDING"));
     renderSeats();
     await pick("1A");
 
@@ -171,5 +181,21 @@ describe("seat selection", () => {
 
     expect(await screen.findByText(/already being paid/)).toBeInTheDocument();
     expect(createHold).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries on when the other checkout had simply expired, not been paid", async () => {
+    vi.mocked(createHold)
+      .mockRejectedValueOnce(new ApiError("conflict", 409, "m", "ACTIVE_HOLD_EXISTS", undefined, { orderId: "o-old" }))
+      .mockResolvedValueOnce({ orderId: "o-new", status: "ACCEPTED" });
+    vi.mocked(cancelOrder).mockRejectedValue(new ApiError("conflict", 409, "m", "ORDER_NOT_CANCELLABLE"));
+    vi.mocked(getOrder).mockResolvedValue(orderIn("CANCELLED"));
+    renderSeats();
+    await pick("1A");
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel it and continue" }));
+
+    expect((await screen.findByTestId("checkout-search")).textContent).toBe("?orderId=o-new");
+    expect(screen.queryByText(/already being paid/)).not.toBeInTheDocument();
   });
 });

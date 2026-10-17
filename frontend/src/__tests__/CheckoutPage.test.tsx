@@ -257,7 +257,9 @@ describe("checkout payment step", () => {
   });
 
   it("goes to the order, not the seat map, when back finds the payment already started", async () => {
-    vi.mocked(getOrder).mockResolvedValue(order("HELD_AWAITING_PAYMENT"));
+    vi.mocked(getOrder)
+      .mockResolvedValueOnce(order("HELD_AWAITING_PAYMENT"))
+      .mockResolvedValue(order("PAYMENT_PENDING"));
     vi.mocked(cancelOrder).mockRejectedValue(new ApiError("conflict", 409, "m", "ORDER_NOT_CANCELLABLE"));
     renderCheckout();
     await screen.findByRole("button", { name: "Pay now" });
@@ -270,12 +272,14 @@ describe("checkout payment step", () => {
 
   it("never says the seats were released when another tab paid before the countdown ran out", async () => {
     const now = new Date();
-    vi.mocked(getOrder).mockResolvedValue(
-      order("HELD_AWAITING_PAYMENT", {
-        reservationExpiresAt: new Date(now.getTime() - 1000).toISOString(),
-        serverNow: now.toISOString(),
-      }),
-    );
+    vi.mocked(getOrder)
+      .mockResolvedValueOnce(
+        order("HELD_AWAITING_PAYMENT", {
+          reservationExpiresAt: new Date(now.getTime() - 1000).toISOString(),
+          serverNow: now.toISOString(),
+        }),
+      )
+      .mockResolvedValue(order("PAYMENT_PENDING"));
     vi.mocked(cancelOrder).mockRejectedValue(new ApiError("conflict", 409, "m", "ORDER_NOT_CANCELLABLE"));
     renderCheckout();
 
@@ -298,5 +302,50 @@ describe("checkout payment step", () => {
     renderCheckout();
 
     expect(await seatsNotice()).toMatch(/could not hold those seats/);
+  });
+
+  it("a refused cancel on an order the expiry job already closed still goes back with 'time ran out'", async () => {
+    // 409 ORDER_NOT_CANCELLABLE is not proof of a payment: the job may simply have cancelled it first.
+    const now = new Date();
+    vi.mocked(getOrder)
+      .mockResolvedValueOnce(
+        order("HELD_AWAITING_PAYMENT", {
+          reservationExpiresAt: new Date(now.getTime() - 1000).toISOString(),
+          serverNow: now.toISOString(),
+        }),
+      )
+      .mockResolvedValue(order("CANCELLED"));
+    vi.mocked(cancelOrder).mockRejectedValue(new ApiError("conflict", 409, "m", "ORDER_NOT_CANCELLABLE"));
+    renderCheckout();
+
+    expect(await seatsNotice()).toMatch(/ran out/);
+    expect(screen.queryByText("order page o-1")).not.toBeInTheDocument();
+  });
+
+  it("a double click on back cancels once and stays on the seat map", async () => {
+    vi.mocked(getOrder).mockResolvedValue(order("HELD_AWAITING_PAYMENT"));
+    let release: () => void = () => {};
+    vi.mocked(cancelOrder).mockImplementation(
+      () => new Promise((resolve) => { release = () => resolve(order("CANCELLED")); }),
+    );
+    renderCheckout();
+    await screen.findByRole("button", { name: "Pay now" });
+
+    const back = screen.getByRole("button", { name: "Go back" });
+    fireEvent.click(back);
+    fireEvent.click(back);
+    release();
+
+    await screen.findByTestId("seats-state");
+    expect(cancelOrder).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("order page o-1")).not.toBeInTheDocument();
+  });
+
+  it("stops waiting with a clear message when the session has expired", async () => {
+    vi.mocked(getOrder).mockRejectedValue(new ApiError("unauthenticated", 401, "expired"));
+    renderCheckout();
+
+    expect(await screen.findByText(/session has expired/i)).toBeInTheDocument();
+    expect(getOrder).toHaveBeenCalledTimes(1);
   });
 });

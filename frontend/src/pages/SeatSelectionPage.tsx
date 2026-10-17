@@ -3,7 +3,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { Alert, Button, Card, Col, Row, Spinner } from "react-bootstrap";
 import { BackButton } from "../components/BackButton";
 import { OrderSummaryCard } from "../components/OrderSummaryCard";
-import { cancelOrder, createHold, getSeatAvailability, type SeatView } from "../api/orders";
+import { cancelOrder, createHold, getOrder, getSeatAvailability, isPaymentUnderway, type SeatView } from "../api/orders";
 import { ApiError, newId } from "../api/client";
 
 interface OfferState {
@@ -190,13 +190,24 @@ export function SeatSelectionPage() {
       await cancelOrder(activeHoldOrderId);
     } catch (e) {
       if (e instanceof ApiError && e.code === "ORDER_NOT_CANCELLABLE") {
-        // Its payment started in the meantime: booking these seats too would be a second purchase the
-        // customer did not ask for. Say so instead of carrying on.
-        setActiveHoldOrderId(null);
-        setHoldError("Your other checkout is already being paid. Check My orders before booking again.");
-        return;
-      }
-      if (!(e instanceof ApiError && e.kind === "not_found")) {
+        // The same answer covers a payment that started meanwhile and an order that simply expired.
+        // Only the first must stop us: booking these seats too would be a second purchase.
+        let underway: boolean | null = null;
+        try {
+          underway = isPaymentUnderway((await getOrder(activeHoldOrderId)).status);
+        } catch {
+          // Unknown: ask the customer to try again rather than guess.
+        }
+        if (underway === null) {
+          setHoldError("We could not cancel your other checkout. Please try again.");
+          return;
+        }
+        if (underway) {
+          setActiveHoldOrderId(null);
+          setHoldError("Your other checkout is already being paid. Check My orders before booking again.");
+          return;
+        }
+      } else if (!(e instanceof ApiError && e.kind === "not_found")) {
         setHoldError("We could not cancel your other checkout. Please try again.");
         return;
       }
