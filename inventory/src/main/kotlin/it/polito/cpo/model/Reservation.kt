@@ -21,7 +21,11 @@ data class Reservation(
     val status: String,
     val expiresAt: OffsetDateTime,
     val createdAt: OffsetDateTime? = null,
-    
+    // When the one-time T2 payment window was opened (ADR-016), by the database clock. Null until
+    // then, and forever for a direct-flow reservation. Its presence is what stops a replay from
+    // extending the hold a second time.
+    val paymentWindowStartedAt: OffsetDateTime? = null,
+
     @Transient
     var isNewRecord: Boolean = true
 ) : Persistable<String> {
@@ -33,7 +37,8 @@ data class Reservation(
         travelDate: LocalDate,
         status: String,
         expiresAt: OffsetDateTime,
-        createdAt: OffsetDateTime?
+        createdAt: OffsetDateTime?,
+        paymentWindowStartedAt: OffsetDateTime?
     ) : this(
         reservationId = reservationId,
         orderId = orderId,
@@ -42,6 +47,7 @@ data class Reservation(
         status = status,
         expiresAt = expiresAt,
         createdAt = createdAt,
+        paymentWindowStartedAt = paymentWindowStartedAt,
         isNewRecord = false
     )
 

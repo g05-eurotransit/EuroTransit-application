@@ -33,6 +33,12 @@ data class ReservationResponse(
     val expiresAt: OffsetDateTime
 )
 
+// orders -> inventory : PUT /api/inventory/reservations/{reservationId}/payment-window (ADR-016).
+// No Idempotency-Key: the reservation identity and its stored window make it idempotent.
+data class PaymentWindowRequest(
+    val orderId: UUID
+)
+
 data class ReservationRefundRequest(
     val orderId: UUID
 )

@@ -755,4 +755,147 @@ class ReservationServiceIntegrationTest : BaseIntegrationTest() {
         
         assertEquals("SOLD", getSeatStatus(routeId, seatId))
     }
+
+    // --- payment window (ADR-016) ---------------------------------------------------------------
+    //
+    // Deadlines are placed relative to the database clock with SQL, never with the JVM clock and
+    // never with a sleep: the database clock is the only one these decisions read.
+
+    /** A held seat and its HELD reservation whose deadline is `CURRENT_TIMESTAMP + offset`. */
+    private suspend fun heldReservation(name: String, deadlineOffset: String): Pair<String, UUID> {
+        val routeId = "route-$name"
+        val reservationId = "res-$name"
+        val orderId = UUID.randomUUID()
+        insertSeat(routeId, LocalDate.now(), "seat-$name", "AVAILABLE")
+        seatRepository.holdSeats(routeId, LocalDate.now(), listOf("seat-$name"), reservationId)
+        reservationRepository.save(
+            Reservation(
+                reservationId = reservationId,
+                orderId = orderId,
+                routeId = routeId,
+                travelDate = LocalDate.now(),
+                status = "HELD",
+                expiresAt = OffsetDateTime.now(ZoneOffset.UTC).plusMinutes(10),
+                isNewRecord = true,
+            )
+        )
+        databaseClient.sql("UPDATE reservations SET expires_at = CURRENT_TIMESTAMP + CAST(:offset AS INTERVAL) WHERE reservation_id = :id")
+            .bind("offset", deadlineOffset)
+            .bind("id", reservationId)
+            .fetch().rowsUpdated().awaitSingleOrNull()
+        return reservationId to orderId
+    }
+
+    /** Seconds between the window's start and the deadline it set, computed by the database. */
+    private suspend fun windowLengthSeconds(reservationId: String): Double? =
+        databaseClient.sql(
+            "SELECT EXTRACT(EPOCH FROM (expires_at - payment_window_started_at)) AS len FROM reservations WHERE reservation_id = :id"
+        ).bind("id", reservationId).fetch().first().awaitSingleOrNull()?.get("len")?.toString()?.toDouble()
+
+    @Test
+    fun `startPaymentWindow persists a ten-minute window from the database clock and leaves the seat HELD`() = runBlocking {
+        val (reservationId, orderId) = heldReservation("pw-open", "1 minute")
+
+        val response = reservationService.startPaymentWindow(reservationId, orderId)
+
+        assertEquals(ReservationStatus.HELD, response.status)
+        val stored = reservationRepository.findById(reservationId)!!
+        assertEquals("HELD", stored.status)
+        assertNotNull(stored.paymentWindowStartedAt)
+        assertEquals(response.expiresAt.toInstant(), stored.expiresAt.toInstant())
+        assertEquals(600.0, windowLengthSeconds(reservationId))
+        assertEquals("HELD", getSeatStatus("route-pw-open", "seat-pw-open"))
+    }
+
+    @Test
+    fun `startPaymentWindow replay against PostgreSQL returns the same deadline`() = runBlocking {
+        val (reservationId, orderId) = heldReservation("pw-replay", "5 minutes")
+
+        val first = reservationService.startPaymentWindow(reservationId, orderId)
+        val replay = reservationService.startPaymentWindow(reservationId, orderId)
+
+        assertEquals(first.expiresAt.toInstant(), replay.expiresAt.toInstant())
+        assertEquals(600.0, windowLengthSeconds(reservationId))
+    }
+
+    @Test
+    fun `startPaymentWindow just past T1 expires the reservation and frees the seat in the same transaction`() = runBlocking {
+        val (reservationId, orderId) = heldReservation("pw-late", "-1 millisecond")
+
+        val exception = assertThrows<ApiException> { reservationService.startPaymentWindow(reservationId, orderId) }
+
+        assertEquals("RESERVATION_EXPIRED", exception.code)
+        val stored = reservationRepository.findById(reservationId)!!
+        assertEquals("EXPIRED", stored.status)
+        assertNull(stored.paymentWindowStartedAt)
+        assertEquals("AVAILABLE", getSeatStatus("route-pw-late", "seat-pw-late"))
+    }
+
+    @Test
+    fun `two concurrent payment windows open it once and agree on the deadline`() = runBlocking {
+        val (reservationId, orderId) = heldReservation("pw-twice", "5 minutes")
+
+        val responses = coroutineScope {
+            List(2) { async(Dispatchers.IO) { reservationService.startPaymentWindow(reservationId, orderId) } }.awaitAll()
+        }
+
+        assertEquals(responses[0].expiresAt.toInstant(), responses[1].expiresAt.toInstant())
+        assertEquals(1.0, meterRegistry.counter("inventory.holds.payment_window", "result", "opened").count())
+        assertEquals(1.0, meterRegistry.counter("inventory.holds.payment_window", "result", "replayed").count())
+        assertEquals(600.0, windowLengthSeconds(reservationId))
+    }
+
+    @Test
+    fun `payment window racing the sweep on an expired hold never revives it`() = runBlocking {
+        val (reservationId, orderId) = heldReservation("pw-sweep", "-1 second")
+
+        val windowResult = coroutineScope {
+            val window = async(Dispatchers.IO) {
+                runCatching { reservationService.startPaymentWindow(reservationId, orderId) }
+            }
+            async(Dispatchers.IO) { inventoryMaintenanceService.sweepExpiredReservations() }.await()
+            window.await()
+        }
+
+        assertEquals("RESERVATION_EXPIRED", (windowResult.exceptionOrNull() as? ApiException)?.code)
+        assertEquals("EXPIRED", reservationRepository.findById(reservationId)?.status)
+        assertEquals("AVAILABLE", getSeatStatus("route-pw-sweep", "seat-pw-sweep"))
+    }
+
+    @Test
+    fun `payment window racing a release ends CANCELLED with the seat free`() = runBlocking {
+        val (reservationId, orderId) = heldReservation("pw-release", "5 minutes")
+
+        val windowResult = coroutineScope {
+            val window = async(Dispatchers.IO) {
+                runCatching { reservationService.startPaymentWindow(reservationId, orderId) }
+            }
+            async(Dispatchers.IO) { reservationService.releaseReservation(reservationId) }.await()
+            window.await()
+        }
+
+        // Either order is legitimate: the window opened and the release then cancelled the hold, or the
+        // release won and the window was refused. What must never happen is a HELD reservation left
+        // behind a release, or a window opened on a cancelled one.
+        windowResult.exceptionOrNull()?.let { assertEquals("RESERVATION_CANCELLED", (it as ApiException).code) }
+        assertEquals("CANCELLED", reservationRepository.findById(reservationId)?.status)
+        assertEquals("AVAILABLE", getSeatStatus("route-pw-release", "seat-pw-release"))
+    }
+
+    @Test
+    fun `payment window racing a confirmation never unsells the seat`() = runBlocking {
+        val (reservationId, orderId) = heldReservation("pw-confirm", "5 minutes")
+
+        val windowResult = coroutineScope {
+            val window = async(Dispatchers.IO) {
+                runCatching { reservationService.startPaymentWindow(reservationId, orderId) }
+            }
+            async(Dispatchers.IO) { reservationService.confirmReservation(reservationId, orderId) }.await()
+            window.await()
+        }
+
+        windowResult.exceptionOrNull()?.let { assertEquals("RESERVATION_NOT_HELD", (it as ApiException).code) }
+        assertEquals("CONFIRMED", reservationRepository.findById(reservationId)?.status)
+        assertEquals("SOLD", getSeatStatus("route-pw-confirm", "seat-pw-confirm"))
+    }
 }
