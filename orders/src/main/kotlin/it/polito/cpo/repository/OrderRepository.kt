@@ -360,6 +360,10 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
      *
      * `created_at` is `TIMESTAMP WITHOUT TIME ZONE`, so its age is computed against `LOCALTIMESTAMP`;
      * comparing it with `CURRENT_TIMESTAMP` would silently offset every age by the session time zone.
+     * `HELD_AWAITING_PAYMENT` (ADR-016) is selected for its count only — the active customer holds.
+     * Its age is computed like any other row's and then not published: `PipelineStateGaugeJob`
+     * registers the age gauge for the pipeline phases alone, because that gauge feeds the
+     * checkout-stuck alert and a customer reading the checkout page is not a stuck pipeline.
      * A customer-hold order (ADR-016) is measured from `payment_submitted_at` instead: before that
      * the customer was reading the checkout page, which is up to ten minutes nobody should be paged
      * for. Like `refund_requested_at` it is `TIMESTAMPTZ`, compared against `CURRENT_TIMESTAMP`.
@@ -382,7 +386,7 @@ interface OrderRepository : CoroutineCrudRepository<Order, UUID> {
                    END
                ), 0) AS oldest_age_seconds
           FROM orders
-         WHERE status IN ('PAYMENT_PENDING', 'CONFIRMING_INVENTORY', 'COMPENSATING', 'REFUNDING')
+         WHERE status IN ('HELD_AWAITING_PAYMENT', 'PAYMENT_PENDING', 'CONFIRMING_INVENTORY', 'COMPENSATING', 'REFUNDING')
          GROUP BY status
         """,
     )
