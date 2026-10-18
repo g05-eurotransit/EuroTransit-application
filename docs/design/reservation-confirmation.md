@@ -4,9 +4,9 @@ Orders commits accepted work before processing it through Kafka. Inventory owns 
 
 ## Checkout flows
 
-![Customer-hold and direct checkout sequence](../diagrams/checkout/checkout.svg)
+[![Customer-hold and direct checkout sequence](../diagrams/checkout/checkout.svg)](https://g05-eurotransit.github.io/EuroTransit-application/checkout/checkout.html)
 
-[Full-size sequence](../diagrams/checkout/checkout.svg) · [Open interactive diagram](https://g05-eurotransit.github.io/EuroTransit-application/checkout/checkout.html) · [Interactive HTML](../diagrams/checkout/checkout.html)
+[Full-size sequence](../diagrams/checkout/checkout.svg) · [Open interactive diagram](https://g05-eurotransit.github.io/EuroTransit-application/checkout/checkout.html)
 
 | Flow | Before authorization | Deadline |
 | --- | --- | --- |
@@ -215,6 +215,10 @@ Payments retries definitive declines using a provider key suffixed with its reco
 
 ## Verification and accepted limits
 
-The integration suites cover reservation concurrency, replay, lost confirmation response, crash before Orders commit, payment/cancel/expiry races, T2 replay, reversal outcomes, commercial refund and reconciliation. The [DoD](../capstone-dod.md) records acceptance; [cluster evidence](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/reliability/chaos-experiment-reports.md) records actual faults and recovery.
+The integration suites cover reservation concurrency, replay, lost confirmation response, crash before Orders commit, payment/cancel/expiry races, T2 replay, reversal outcomes, commercial refund and reconciliation. The [DoD](../capstone-dod.md) records acceptance; [cluster evidence](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/verification/README.md) records actual faults and recovery.
 
 This is not a distributed ACID transaction. Seat confirmation and provider effects can precede the next Orders commit. Safety depends on atomic local transitions, stable identities, outboxes and explicit unknown-outcome handling. Provider attempts recorded only after their response remain a [known gap](../operations/orders-recovery-runbook.md#known-gaps). No short fault run certifies a rolling production SLO.
+
+## Integration order
+
+Roll out Inventory and Orders support for customer holds before enabling tokenless requests in the frontend or another client. Mixed older Orders versions cannot safely interpret the waiting state. Match canary images to the metric families required by the [delivery gates](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/operations/progressive-delivery.md).

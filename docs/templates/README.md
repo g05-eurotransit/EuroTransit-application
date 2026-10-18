@@ -2,23 +2,21 @@
 
 Write in English. Give the answer first, followed by the information needed to use it and the evidence needed to check it. Choose a template below and remove its authoring comments and unused sections before publishing.
 
-## Choose a template
+## Choose a structure
 
-| Reader's question | Template |
+| Reader needs | Template |
 | --- | --- |
-| Where should I start? | [Section index](section-index-template.md) |
-| How does the system fit together? | [Architecture](architecture-template.md) |
-| What behavior or contract must hold? | [Specification](specification-template.md) |
-| Why was this approach chosen? | [Architecture decision](decision-template.md) |
-| What runs in each environment? | [Deployment / platform reference](deployment-template.md) |
-| How do I perform or recover an operation? | [Runbook](runbook-template.md) |
-| What did this test demonstrate? | [Verification report](verification-report-template.md) |
-| What failed and what needs to change? | [Postmortem](postmortem-template.md) |
-| What prevents acceptance or release? | [Readiness / DoD](readiness-template.md) |
-| What work remains and in what order? | [Work plan](work-plan-template.md) |
-| What may an actor do, and how is it checked? | [Governance](governance-template.md) |
+| Behavior, architecture or platform reference | [Specification/reference](specification-template.md) |
+| Rationale and alternatives | [Decision](decision-template.md) |
+| A repeatable operation | [Runbook](runbook-template.md) |
+| A bounded verification result | [Report](verification-report-template.md) |
+| Incident analysis and corrective work | [Postmortem](postmortem-template.md) |
 
-Completed examples: [microservice architecture](../design/architecture.md) and [Kind / AKS deployment](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/platform/deployment.md).
+Navigation belongs in the root README; keep a dedicated results index when it adds verdicts and scope. Readiness maps criteria to evidence and open work. Governance names actors, permissions, enforcement and failure impact. A short work plan can be a table in the document that owns its decisions; do not create a page for every authoring variant.
+
+## Navigation
+
+Keep root READMEs to an introduction, a quick start and links to the main reference and macrosections. Section indexes own the detailed document lists. Group related verification reports by environment and theme, retaining separate methods, verdicts and evidence for each experiment.
 
 ## Structure and prose
 
@@ -38,11 +36,11 @@ Omit editorial dates, decision timelines, session handovers, and historical test
 | Checkout states, invariants, compensation, recovery policy | Application domain specifications | Explain their own interaction with the policy |
 | Architectural rationale and alternatives | Application decisions | Link to the rationale |
 | SLO targets and SLI semantics | Application SLO specification | Map signals to implementation artifacts |
-| Kubernetes, GitOps, ingress, secrets, monitoring wiring | Configuration platform/delivery references | Link to manifests and procedures |
+| Kubernetes, GitOps, ingress, secrets, monitoring wiring | Configuration platform references | Link to manifests and procedures |
 | Cluster procedures and operational verification | Configuration runbooks/reports | Link to the procedure or bounded result |
-| Local application procedures and code regression tests | Application operations/tests | Keep local results distinct from cluster proof |
+| Local application procedures and code regression tests | Application development/verification | Keep local results distinct from cluster proof |
 
-This directory is the shared template collection for both sibling repositories. Do not copy it into configuration. Use repository-relative Markdown links within a repository and full GitHub links across repositories. A code-formatted path alone is not a navigable reference.
+This directory is the shared template collection for both sibling repositories. Do not copy it into configuration. Use repository-relative Markdown links within a repository and full GitHub links to `main` across repositories. Validate the coordinated working trees when a cross-repository destination is introduced in the same change; those links become live after both changes merge. Immutable evidence links retain their recorded revision. A code-formatted path alone is not a navigable reference.
 
 A specification defines a rule once. An overview describes responsibilities and links to that rule. A decision explains the choice without restating the contract. A plan records remaining work. A readiness document maps acceptance criteria to evidence; it does not redefine their thresholds.
 
@@ -59,6 +57,8 @@ Use the specification template with the table that fits the subject; omit unrela
 | Domain/state model | Invariant, permitted transitions, authority, concurrency, unknown-outcome handling |
 | Security | Resource/action, allowed identity, enforcement point, ownership check, default denial |
 | SLO | Objective, SLI numerator/denominator or duration, target, window, measurement source |
+| Architecture | Components, responsibilities, interactions, trust/persistence boundaries, diagram and source revision |
+| Deployment | Effective environments, controller ownership, topology, constraints and source manifests |
 
 Security references name the actual enforcement point. Observability references link SLOs to metric names, queries, alerts, dashboards, and their deployment artifacts without repeating targets in several documents.
 
@@ -74,15 +74,13 @@ Link sanitized, portable evidence when available. Mark restricted evidence as un
 
 Use Archify for architecture, deployment, checkout sequences, state transitions, or GitOps flows when the picture answers a concrete technical question. A short checklist or a simple instruction does not need a diagram.
 
-Keep editable JSON, standalone HTML, and its canonical SVG export together under `docs/diagrams/<topic>/`, with stable filenames and no dates. Embed the SVG as a Markdown image using a relative path so readers see it directly on GitHub. Provide a full-size SVG link, a GitHub Pages link to the interactive viewer, and an optional HTML download. GitHub's file viewer does not run the HTML application. Export the SVG through Archify's canonical export, with automatic light/dark themes and no scripts or external dependencies.
+Version editable JSON, its standalone HTML and canonical SVG export together under `docs/diagrams/<topic>/`, using stable names. Embed the SVG as a relative Markdown image wrapped in a link to its hosted interactive viewer: `[![Microservice architecture](../diagrams/microservices/architecture.svg)](https://g05-eurotransit.github.io/EuroTransit-application/microservices/architecture.html)`. Clicking the preview must open the interactive diagram. The Pages workflow uploads committed HTML; removing viewers requires a separate replacement generation/publishing pipeline.
 
-Keep each diagram's abstraction level clear, label protocols and asynchronous relationships, and distinguish configured topology from a proposal or live observation. Verify components and relationships against code or manifests at the recorded Git revision. An architectural summary is a view of those sources, not a second contract.
-
-Run Archify `finalize` with repository evidence and complete its browser checks. Send receipts and captures to a local review directory outside published docs. The tool requires delivery metadata beside the HTML; keep that local sidecar ignored by Git. Regenerate it before checking a fresh checkout. Inspect light/dark captures before claiming visual review, including the SVG embedded as an image at documentation width. Update the JSON, regenerate HTML, and re-export SVG together when the represented implementation changes.
+Keep the abstraction level clear, protocols labelled and configured topology separate from live evidence. Verify relationships at the recorded Git revision. An architecture view is not a second contract. When a diagram changes, run Archify `finalize` with repository evidence and browser checks, export its canonical SVG and inspect light/dark captures at documentation width. Keep delivery sidecars, receipts and captures outside published documentation. Update JSON, HTML and SVG together.
 
 ## Publishing interactive diagrams
 
-Each repository publishes its HTML diagrams from `main` with `.github/workflows/diagrams-pages.yml`. The workflow stages only HTML files from `docs/diagrams/`, preserving their relative paths, and serves `docs/diagrams/index.html` at the site root. Add new diagrams to that index and link their hosted viewer beside the SVG preview.
+Each repository publishes its HTML diagrams from `main` with `.github/workflows/diagrams-pages.yml`. The workflow stages only HTML files from `docs/diagrams/`, preserving their relative paths, and serves `docs/diagrams/index.html` at the site root. Add new diagrams to that index and make each SVG preview link directly to its hosted viewer.
 
 The sites are [application diagrams](https://g05-eurotransit.github.io/EuroTransit-application/) and [configuration diagrams](https://g05-eurotransit.github.io/EuroTransit-configuration/).
 

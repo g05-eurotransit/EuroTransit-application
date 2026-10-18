@@ -4,9 +4,9 @@ EuroTransit exposes a React storefront and the public Catalog, Orders and Notifi
 
 ## System view
 
-![EuroTransit microservices: public APIs, synchronous checkout decisions, owned databases, and asynchronous outbox delivery](../diagrams/microservices/architecture.svg)
+[![EuroTransit microservices: public APIs, synchronous checkout decisions, owned databases, and asynchronous outbox delivery](../diagrams/microservices/architecture.svg)](https://g05-eurotransit.github.io/EuroTransit-application/microservices/architecture.html)
 
-[Open the full-size SVG](../diagrams/microservices/architecture.svg) · [Open interactive diagram](https://g05-eurotransit.github.io/EuroTransit-application/microservices/architecture.html) · [Download the interactive HTML](../diagrams/microservices/architecture.html)
+[Open the full-size SVG](../diagrams/microservices/architecture.svg) · [Open interactive diagram](https://g05-eurotransit.github.io/EuroTransit-application/microservices/architecture.html)
 
 The diagram shows runtime responsibilities and the main checkout interactions, including Orders' outbox relay. It describes repository code; it is not a live-cluster observation. Inventory and Payments also produce outbox events; their relay paths are omitted from this checkout-focused view. Physical placement belongs to the [deployment view](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/platform/deployment.md).
 
@@ -38,5 +38,5 @@ Notification consumption is asynchronous and does not participate in the confirm
 
 - [API and event contracts](api-design.md) define endpoints, event consumers and authorization.
 - [Reservation confirmation](reservation-confirmation.md) owns checkout states, invariants, and compensation rules. [Architecture decisions](architecture-decisions.md) owns the rationale.
-- [SLOs and SLIs](../operations/slo-observability.md) define objectives; [observability conventions](observability-conventions.md) define instrumentation conventions.
+- [SLOs and SLIs](slo.md) define objectives; [observability conventions](../development/instrumentation.md) define instrumentation conventions.
 - [Deployment](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/platform/deployment.md) describes environment configuration, ingress, persistence topology, and operational limitations.

@@ -8,7 +8,7 @@ Use the operator's authenticated GitHub identity so actions remain attributable.
 
 Agents must not initiate cluster authentication or obtain cluster credentials or secret material. A necessary cluster read uses the operator's already-authenticated CLI and read-only access. Sandbox/placeholder configuration must stay outside tracked plaintext secrets. The broader, explicitly authorized fault-experiment exception and its actual permissions are recorded in the configuration [threat model](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/governance/agent-threat-model.md); it is not evidence of least privilege.
 
-CI credentials are scoped to build/publish and configuration updates. They must not grant cluster access. The [delivery topology](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/delivery/gitops-topology.md) owns the automation's actual write path.
+CI credentials are scoped to build/publish and configuration updates. They must not grant cluster access. The [delivery topology](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/platform/gitops.md) owns the automation's actual write path.
 
 ## Review boundary
 
@@ -31,3 +31,15 @@ A merged configuration change can remove resources through pruning, undo a manua
 - Reconcile the local environment before making statements about shared branches; use the repository task runner where provided.
 
 The [agent log](../agent-log.md) records concrete mistakes and corrections. The [documentation guide](../templates/README.md) defines writing and cross-repository ownership.
+
+## Slice ownership
+
+Each owner covers application code, deployment inputs, tests, telemetry and operational evidence for the slice. Contract changes require agreement with affected owners.
+
+| Person | Slice |
+| --- | --- |
+| 1 | Coordination, public contracts, gateway/security, identity and shared CI/release conventions |
+| 2 | Orders, checkout state, database, lifecycle and canary |
+| 3 | Inventory, reservation consistency, migrations and failover inputs |
+| 4 | Payments, provider sandbox, money-path resilience and latency experiments |
+| 5 | Frontend, Catalog, Notifications, blue/green and shared observability/demo evidence |

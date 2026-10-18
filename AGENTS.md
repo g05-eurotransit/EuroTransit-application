@@ -9,3 +9,6 @@
 - When updating documentation, always evaluate both repositories and keep them aligned: application docs own behavior/contracts/team planning, while configuration docs own Kubernetes, GitOps, ingress, secrets, observability, and operational proof.
 
 - Use the [documentation guide](docs/templates/README.md) for structure, templates, ownership and GitHub diagram previews.
+
+- Start documentation reviews from freshly fetched remote `main` in both repositories.
+- Reusable workflows: [cross-repository documentation](.agents/skills/eurotransit-cross-repo-docs/SKILL.md) and [Kotlin coroutine pipelines](.agents/skills/kotlin-coroutines-webflux-pipeline/SKILL.md). Read a workflow only when its task applies.

@@ -1,15 +1,12 @@
 # Design
 
-The [architecture](architecture.md) explains runtime responsibilities. Use the references below for the authoritative contract or rationale.
+Start with [architecture](architecture.md) for service responsibilities and interactions.
 
-| Question | Reference |
-| --- | --- |
-| What may a caller send or receive? | [API and event contracts](api-design.md) |
-| How do checkout, refund and recovery preserve correctness? | [Lifecycle and invariants](reservation-confirmation.md) |
-| Why were these choices made? | [Architecture decisions](architecture-decisions.md) |
-| How does the customer or operator UI behave? | [Frontend](frontend.md) |
-| How do I authenticate locally? | [Local authentication](local-auth.md) |
-| How are services configured? | [Runtime conventions](conventions.md) |
-| What do services log, measure and propagate? | [Observability conventions](observability-conventions.md) |
+- [API and event contracts](api-design.md)
+- [Checkout lifecycle and recovery](reservation-confirmation.md)
+- [Architecture decisions](architecture-decisions.md)
+- [Frontend](frontend.md)
+- [Runtime lifecycle](runtime-lifecycle.md)
+- [Checkout SLOs and SLIs](slo.md)
 
-Deployment and trust-boundary wiring are described in the [configuration repository](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/platform/deployment.md).
+[Acceptance criteria](../capstone-dod.md) track completion; [verification](../verification/README.md) records tested behavior.

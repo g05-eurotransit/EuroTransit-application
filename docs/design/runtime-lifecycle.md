@@ -1,14 +1,14 @@
 # Orders: Shutdown, Failure Domain and Replay
 
 Orders stops new admission, finishes the current Kafka record and leaves unstarted work for redelivery. The mechanism below is supported by code and Compose drills; see
-[the shutdown report](reports/orders-shutdown-local.md). Kubernetes observations are recorded separately in the [cluster report](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/reliability/kind-orders-shutdown.md).
+[the shutdown report](../verification/orders-local.md). Kubernetes observations are recorded separately in the [cluster report](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/verification/kind/orders-shutdown.md).
 
 ## Where work runs
 
 | Work | Runs on | Bounded by |
 | --- | --- | --- |
 | HTTP: checkout accept, cancel, refund request, reconciliation operations | Reactor Netty, suspending controllers | Catalog client budget; one acceptance transaction |
-| `order-placed` → checkout pipeline | the `orders` consumer thread, `runBlocking` (`OrderPlacedEventListener.kt`) | [Checkout retry policy](../design/reservation-confirmation.md#retry-and-reconciliation) |
+| `order-placed` → checkout pipeline | the `orders` consumer thread, `runBlocking` (`OrderPlacedEventListener.kt`) | [Checkout retry policy](reservation-confirmation.md#retry-and-reconciliation) |
 | `refund-requested` → refund pipeline | its own consumer thread, `runBlocking` (`RefundRequestedEventListener.kt`) | same |
 | `order-placed-dlt`, `refund-requested-dlt` → incidents | their own consumer threads, group `orders-dlt` | unbounded back-off until recorded (`KafkaConfiguration.kt`) |
 | `@Scheduled` jobs (gauges, reconciliation metrics, idempotency cleanup, hold expiry) | the scheduler thread, `runBlocking` | bounded reads, idempotent cleanup or state compare-and-set |
@@ -79,7 +79,7 @@ Orders makes no call to Notifications. `notification-requested` is a row written
 the same transaction that commits `CONFIRMED` or `FAILED`, and Debezium relays it (ADR-011). With
 Notifications down the event waits in Kafka and the checkout completes; when it returns, its consumer
 (group `notifications`) resumes from its committed offset (ADR-004). Proven in
-[the Notifications outage report](reports/notifications-outage-local.md).
+[the Notifications outage report](../verification/notifications-local.md).
 
 What Notifications keeps is its own: its read model is in memory, so the history `GET
 /api/notifications` returns starts again at every restart : see the report.

@@ -168,4 +168,4 @@ Events carry `eventId`, `eventType`, `schemaVersion`, `occurredAt`, `correlation
 
 Errors use `code`, `message`, `correlationId`, and optional structured `details`. Expected classes are `400` invalid input, `401` unauthenticated, `403` disallowed role, `404` absent or hidden resource, `409` state/idempotency conflict, `422` business refusal, and `503` unavailable dependency. Actual payment status mapping is defined by its controller; callers must distinguish business refusal from unknown outcome.
 
-[Observability conventions](observability-conventions.md) own logging, metric and trace propagation. [Architecture decisions](architecture-decisions.md) explain the design choices.
+[Observability conventions](../development/instrumentation.md) own logging, metric and trace propagation. [Architecture decisions](architecture-decisions.md) explain the design choices.

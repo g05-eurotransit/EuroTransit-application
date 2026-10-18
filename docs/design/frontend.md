@@ -61,4 +61,4 @@ Commercial refunds use frozen offer terms exposed by Orders. A successful accept
 
 ## Browser boundary
 
-React escapes text; do not introduce untrusted HTML rendering. Runtime configuration is publicly retrievable and contains no secret. Client-side validation improves feedback but never replaces server validation, ownership or refund eligibility checks. See [frontend source](../../frontend/src) for routes and API consumers, and [local setup](../operations/local-dev-setup.md) for execution.
+React escapes text; do not introduce untrusted HTML rendering. Runtime configuration is publicly retrievable and contains no secret. Client-side validation improves feedback but never replaces server validation, ownership or refund eligibility checks. See [frontend source](../../frontend/src) for routes and API consumers, and [local setup](../development/local.md) for execution.

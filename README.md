@@ -1,30 +1,28 @@
 # EuroTransit Marketplace
 
-EuroTransit sells train tickets through a React storefront and five Kotlin/Spring WebFlux services. Orders coordinates seat holds, sandbox payments, confirmation, refunds, and asynchronous notifications.
+EuroTransit sells train tickets through a React storefront and five Kotlin/Spring WebFlux services. Orders coordinates seat holds, sandbox payments, confirmation, refunds and asynchronous notifications.
 
-![Microservice architecture](docs/diagrams/microservices/architecture.svg)
+[![Microservice architecture](docs/diagrams/microservices/architecture.svg)](https://g05-eurotransit.github.io/EuroTransit-application/microservices/architecture.html)
+
+Start with the [system architecture](docs/design/architecture.md).
 
 ## Run locally
 
-Prerequisites: Docker with Compose, JDK 21, and `just`. The Gradle wrapper builds the backend; frontend tooling is declared in [frontend/package.json](frontend/package.json).
+With Docker/Compose, JDK 21 and Just installed:
 
 ```bash
 just compose-build
 just compose-up
-just build
 ```
 
-`compose-up` starts the stack and registers all three Debezium outbox connectors. Open the storefront at `http://localhost`. Follow [local setup](docs/operations/local-dev-setup.md) for identity, configuration, diagnostics, and shutdown.
+Open `http://localhost`. See [development](docs/development/README.md) for setup and test identities.
 
-## Find the right document
+## Documentation
 
-| Need | Start here |
-| --- | --- |
-| Understand the services | [Architecture](docs/design/architecture.md) |
-| Integrate an API or event | [Contracts](docs/design/api-design.md) |
-| Understand checkout correctness | [Lifecycle and recovery](docs/design/reservation-confirmation.md) |
-| Run or recover an order | [Operations](docs/operations/README.md) |
-| Review acceptance and evidence | [Definition of Done](docs/capstone-dod.md) |
-| Navigate all documentation | [Documentation](docs/README.md) |
+- [Design](docs/design/README.md): service contracts, checkout behavior and decisions.
+- [Development](docs/development/README.md): local setup, conventions and instrumentation.
+- [Orders recovery](docs/operations/orders-recovery-runbook.md): inspect incidents and recover unresolved work.
+- [Verification](docs/verification/README.md): local test results and fault strategy.
+- [Acceptance](docs/capstone-dod.md): project criteria and remaining work.
 
-Kubernetes, GitOps, cluster procedures, and operational experiments live in [EuroTransit Configuration](https://github.com/g05-eurotransit/EuroTransit-configuration). Documentation follows the [shared writing guide](docs/templates/README.md).
+Cluster deployment, operational procedures and cluster evidence live in [configuration](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/README.md).

@@ -27,7 +27,7 @@ per-delivery timer `orders_checkout_duration_seconds` gains the value `held_awai
 ## Recovery Objectives
 
 These recovery objectives are proposed and await team confirmation. They are not an adopted failover RTO. The policy and the operator steps are in
-[orders-recovery-runbook.md](orders-recovery-runbook.md).
+[orders-recovery-runbook.md](../operations/orders-recovery-runbook.md).
 
 | Objective | Target | Measured by |
 | --- | --- | --- |
@@ -47,6 +47,6 @@ A shorter `for` is proposed to the configuration repository.
 
 Use terminal outcome counters and the end-to-end histogram for completed checkout signals; report acceptance duration separately. Define the valid-attempt population before claiming success-rate compliance, including treatment of expected business refusals, pending work and ingress rejection. No short baseline or fault experiment establishes a rolling 30-day SLO.
 
-A checkout trace should connect public ingress, Orders acceptance, Inventory hold/payment window/confirmation, payment provider work and Kafka publication/consumption. [Instrumentation conventions](../design/observability-conventions.md) own metric names, correlation and trace propagation. Trace IDs in logs do not establish that a queryable trace backend exists.
+A checkout trace should connect public ingress, Orders acceptance, Inventory hold/payment window/confirmation, payment provider work and Kafka publication/consumption. [Instrumentation conventions](../development/instrumentation.md) own metric names, correlation and trace propagation. Trace IDs in logs do not establish that a queryable trace backend exists.
 
-The [cluster evidence index](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/reliability/chaos-experiment-reports.md) records measured recovery, while [readiness](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/delivery/readiness.md) records outstanding SLI mapping and tracing gaps. Recovery observations remain useful when no prior numeric RTO was adopted; do not infer compliance or invent a retrospective target.
+The [cluster evidence index](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/verification/README.md) records measured recovery, while [readiness](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/readiness.md) records outstanding SLI mapping and tracing gaps. Recovery observations remain useful when no prior numeric RTO was adopted; do not infer compliance or invent a retrospective target.

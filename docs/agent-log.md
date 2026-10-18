@@ -13,7 +13,7 @@ This log is intentionally required by the assignment. It records concrete cases 
 
 - **Agent output:** An alert fired on high CPU usage for Orders.
 - **Why it was wrong:** The assignment requires symptom-based alerts tied to SLOs. CPU alone does not prove user-visible failure.
-- **How the team caught it:** SLO review against `operations/slo-observability.md`.
+- **How the team caught it:** SLO review against `design/slo.md`.
 - **Correction:** Replace with checkout success-rate burn and checkout latency alerts. Keep CPU on dashboards for diagnosis.
 
 ## Case 3: Non-Idempotent Kafka Consumer
@@ -42,7 +42,7 @@ This log is intentionally required by the assignment. It records concrete cases 
 - **Agent output:** Created `catalog/src/test/resources/application.yaml` as a full config file.
 - **Why it was wrong:** Gradle puts test resources ahead of main resources on the test classpath, so this file completely replaced (not merged with) `src/main/resources/application.yaml` : `spring.application.name` and `server.port` disappeared, and Spring failed to resolve `${spring.application.name}` in a metrics tag, throwing `PlaceholderResolutionException` during context startup.
 - **How the team detected it:** `./gradlew :catalog:test` failed to load the Spring context; stack trace pointed at placeholder resolution, not at the test logic.
-- **Correction:** Renamed the file to `application-test.yaml` and activated it explicitly via `@ActiveProfiles("test")`, so it layers on top of the main config instead of replacing it. Documented the pitfall in `docs/design/observability-conventions.md` so other owners don't repeat it.
+- **Correction:** Renamed the file to `application-test.yaml` and activated it explicitly via `@ActiveProfiles("test")`, so it layers on top of the main config instead of replacing it. Documented the pitfall in `docs/development/instrumentation.md` so other owners don't repeat it.
 
 ## Case 7: Missing @AutoConfigureMetrics in Prometheus Endpoint Test
 

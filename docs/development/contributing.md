@@ -17,7 +17,7 @@ Each money-path service owns its schema migrations; applied Flyway versions are 
 
 ## Health and lifecycle
 
-[Observability conventions](observability-conventions.md#health-probes) own probe semantics. Readiness uses the configured availability state; do not assume it tests database or Kafka connectivity. A healthy process and a usable checkout path are separate observations. [Shutdown](../operations/orders-shutdown-and-replay.md) describes drain and replay; configuration owns Kubernetes grace/preStop budgets.
+[Observability conventions](instrumentation.md#health-probes) own probe semantics. Readiness uses the configured availability state; do not assume it tests database or Kafka connectivity. A healthy process and a usable checkout path are separate observations. [Shutdown](../design/runtime-lifecycle.md) describes drain and replay; configuration owns Kubernetes grace/preStop budgets.
 
 ## Secrets and images
 
