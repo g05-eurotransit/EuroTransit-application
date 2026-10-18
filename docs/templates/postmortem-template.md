@@ -1,45 +1,31 @@
-# Blameless Postmortem Template
+# [Failure scenario] postmortem
 
-## Incident Summary
+<!-- The team owns the causal analysis and conclusions. Describe system conditions without blame. -->
+[User-visible impact, duration, and current recovery state in one short paragraph.]
 
-- **Date/time:**
-- **Injected failure:**
-- **User-visible impact:**
-- **Detected by:**
-- **Duration:**
+## Cause and contributing conditions
 
-## Steady State Before Injection
+[Injected fault or initiating failure, causal mechanism, and relevant environment/revisions. State uncertainty where evidence is incomplete.]
 
-Describe the SLO/SLI values and dashboard signals before the failure.
+## Observed sequence
 
-## Timeline
-
-| Time | Event |
+<!-- State the steady-state baseline and link the SLO/SLI definitions. Use relative elapsed times. -->
+| Elapsed time | Event and evidence |
 | --- | --- |
-| T+0 | Failure injected. |
-| T+ | Alert fired. |
-| T+ | Diagnosis made. |
-| T+ | Mitigation applied. |
-| T+ | System recovered. |
+| Before injection | [Baseline health and measurements] |
+| T+0 | [Fault or incident begins] |
+| T+[duration] | [Detection, diagnosis, mitigation, or recovery, with evidence] |
 
-## What Happened
+## Controls and gaps
 
-Explain the technical sequence using traces, logs, metrics, and Kubernetes events.
+[What contained the failure, what failed or surprised the team, and why. Distinguish mitigation from a permanent fix.]
 
-## What Worked
+## Follow-up actions
 
-List controls that contained the failure, such as circuit breakers, readiness, retries, PDBs, or idempotency.
-
-## What Failed or Surprised Us
-
-List incorrect assumptions, missing dashboards, noisy alerts, unsafe defaults, or agent-generated mistakes.
-
-## Follow-Up Actions
-
-| Action | Owner | Due Date | Status |
+| Action | Owner | Completion criterion / evidence | Status |
 | --- | --- | --- | --- |
-|  |  |  |  |
+| [Concrete change arising from the cause or gap] | [Responsible role] | [Verifiable outcome] | [Open / complete] |
 
-## Lessons Learned
+## Evidence
 
-Document what the team will change in design, implementation, delivery, observability, or agent governance.
+[Link the execution report and sanitized logs, traces, metrics, or events supporting the analysis.]
