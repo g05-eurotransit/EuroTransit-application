@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "react-oidc-context";
-import { Button, Card, Col, Form, Modal, Row, Spinner } from "react-bootstrap";
+import { Button, Col, Form, Modal, Row, Spinner } from "react-bootstrap";
 import { loadStripe } from "@stripe/stripe-js";
 import {
   CardCvcElement,
@@ -15,8 +15,10 @@ import { cancelOrder, getOrder, submitPayment, type OrderView } from "../api/ord
 import { getRoute, listOffers } from "../api/catalog";
 import { ApiError, newId } from "../api/client";
 import { getRuntimeConfig } from "../config/runtimeConfig";
-import { OrderSummaryCard } from "../components/OrderSummaryCard";
+import { OrderSummaryCard } from "../components/ticket/OrderSummaryCard";
+import { HoldBar } from "../components/ticket/HoldClock";
 import { clockOffsetFrom, useCountdown } from "../hooks/useCountdown";
+import { money } from "../utils/format";
 
 /** What the seat page hands over: the offer it was showing, the chosen seats and the held order. */
 interface CheckoutState {
@@ -48,6 +50,10 @@ interface Summary {
   seats: string[];
   totalAmount: number;
   currency: string;
+  /** Per seat, so the summary can show where a two-seat total comes from. */
+  unitPrice?: number;
+  /** The refund terms of the fare: this is what paying accepts. */
+  conditions?: string;
 }
 
 const HOLD_POLL_MS = 1000;
@@ -133,6 +139,8 @@ function summaryFromState(offer: CheckoutState): Summary {
     seats: offer.seats,
     totalAmount: offer.totalAmount,
     currency: offer.currency,
+    unitPrice: offer.price,
+    conditions: offer.conditions,
   };
 }
 
@@ -154,6 +162,8 @@ async function summaryFromOrder(order: OrderView, signal: AbortSignal): Promise<
     seats: order.seats,
     totalAmount: order.totalAmount,
     currency: offer?.currency ?? "EUR",
+    unitPrice: offer?.price,
+    conditions: offer?.conditions,
   };
 }
 
@@ -425,7 +435,7 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
 
   return (
     <>
-      <div className="mb-4 pb-3 border-bottom d-flex flex-wrap justify-content-between align-items-center gap-3">
+      <div className="mb-4 d-flex flex-wrap justify-content-between align-items-center gap-3">
         <div>
           <div className="d-flex align-items-center gap-3">
             <Button
@@ -438,24 +448,20 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
             >
               <i className="bi bi-arrow-left" aria-hidden="true" />
             </Button>
-            <h1 className="fw-bold mb-1">Checkout</h1>
+            <h1 className="fw-bold mb-0">Checkout</h1>
           </div>
-          <p
-            className="text-uppercase text-secondary-emphasis small fw-semibold mb-0"
-            style={{ marginLeft: "3.5rem" }}
-          >
-            Complete the details to confirm your trip.
-          </p>
         </div>
-        {held && countdown.label && (
-          <div className="bg-primary text-white rounded-3 px-3 py-2 text-center" role="timer" aria-live="off">
-            <div className="text-uppercase" style={{ fontSize: "0.6rem", letterSpacing: "0.08em" }}>
-              Seats held for
-            </div>
-            <div className="fw-bold fs-5 lh-1">{countdown.label}</div>
-          </div>
-        )}
       </div>
+
+      {/* A constraint on the whole page, so it runs the full width of it. */}
+      {held && summary && (
+        <HoldBar
+          expiresAt={order?.reservationExpiresAt ?? null}
+          clockOffsetMs={clockOffsetMs}
+          active={held}
+          seats={summary.seats}
+        />
+      )}
 
       {error && <p className="text-danger">{error}</p>}
 
@@ -469,41 +475,47 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
       {held && (
         <Form onSubmit={onSubmit}>
           <Row className="g-4">
-            <Col lg={7} className="d-flex flex-column gap-4">
-              <Card className="border-0 shadow-sm">
-                <Card.Body>
-                  <div className="d-flex align-items-center gap-3 mb-3">
-                    <div
-                      className="bg-light text-primary rounded-circle d-flex align-items-center justify-content-center"
-                      style={{ width: 40, height: 40 }}
-                    >
-                      <i className="bi bi-person-fill" aria-hidden="true" />
-                    </div>
-                    <h2 className="fw-bold fs-4 mb-0">Booking</h2>
-                  </div>
-                  <p className="text-secondary-emphasis mb-0">
-                    Booking as <strong>{auth.user?.profile.email ?? auth.user?.profile.preferred_username}</strong>.
-                    Your tickets will be sent to this address.
-                  </p>
-                </Card.Body>
-              </Card>
+            <Col lg={7}>
+              {/* One surface, two blocks: there is one thing to complete. */}
+              <div className="et-surface">
+                <div className="p-3 p-sm-4">
+                  {/* Filled and locked: this part of the form is already done by signing in. */}
+                  <h2 className="fw-bold fs-5 mb-3">Booking as</h2>
+                  <Row className="g-3">
+                    <Col xs={12} sm={5}>
+                      <Form.Group controlId="booking-name">
+                        <Form.Label className="small text-secondary-emphasis fw-semibold">
+                          Name
+                        </Form.Label>
+                        <Form.Control
+                          className="bg-body-tertiary"
+                          value={
+                            auth.user?.profile.name ?? auth.user?.profile.preferred_username ?? "—"
+                          }
+                          readOnly
+                        />
+                      </Form.Group>
+                    </Col>
+                    <Col xs={12} sm={7}>
+                      <Form.Group controlId="booking-email">
+                        <Form.Label className="small text-secondary-emphasis fw-semibold">
+                          Email
+                        </Form.Label>
+                        <Form.Control
+                          className="bg-body-tertiary"
+                          type="email"
+                          value={auth.user?.profile.email ?? "—"}
+                          readOnly
+                        />
+                      </Form.Group>
+                    </Col>
+                  </Row>
+                </div>
 
-              <Card className="border-0 shadow-sm">
-                <Card.Body>
-                  <div className="d-flex align-items-center gap-3 mb-3">
-                    <div
-                      className="bg-light text-primary rounded-circle d-flex align-items-center justify-content-center"
-                      style={{ width: 40, height: 40 }}
-                    >
-                      <i className="bi bi-credit-card-fill" aria-hidden="true" />
-                    </div>
-                    <h2 className="fw-bold fs-4 mb-0">Payment method</h2>
-                  </div>
+                <div className="p-3 p-sm-4 border-top">
+                  <h2 className="fw-bold fs-5 mb-1">Card</h2>
                   <p className="text-secondary-emphasis small">
-                    Sandbox environment (Stripe test mode) — use{" "}
-                    <code>4242 4242 4242 4242</code> for a successful payment, or{" "}
-                    <code>4000 0000 0000 0002</code> for a decline. Any future expiry date and any
-                    3-digit CVC work.
+                    No card detail passes through our servers: the three fields below are Stripe's.
                   </p>
                   <Form.Group className="mb-3">
                     <Form.Label className="small text-secondary-emphasis fw-semibold">
@@ -533,8 +545,16 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
                       </Form.Group>
                     </Col>
                   </Row>
-                </Card.Body>
-              </Card>
+
+                  {/* Under the fields, not above: the job of this page is to get a number typed in. */}
+                  <p className="text-secondary-emphasis small mt-3 mb-0">
+                    Sandbox environment (Stripe test mode) — use{" "}
+                    <code>4242 4242 4242 4242</code> for a successful payment, or{" "}
+                    <code>4000 0000 0000 0002</code> for a decline. Any future expiry date and any
+                    3-digit CVC work.
+                  </p>
+                </div>
+              </div>
             </Col>
 
             <Col lg={5}>
@@ -548,11 +568,23 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
                   fareClass={summary.fareClass}
                   travelDate={summary.travelDate}
                   seats={summary.seats}
+                  unitPrice={summary.unitPrice}
+                  conditions={summary.conditions}
                   totalAmount={summary.totalAmount}
                   currency={summary.currency}
-                  actionLabel={submitting ? "Placing order…" : "Pay now"}
+                  totalLabel="To pay"
+                  actionLabel={
+                    submitting ? "Placing order…" : `Pay ${money(summary.totalAmount, summary.currency)}`
+                  }
                   actionDisabled={submitting || !stripe || !cardComplete}
                   actionType="submit"
+                  note={
+                    <>
+                      The {summary.seats.length === 1 ? "seat is" : "seats are"} already yours: you
+                      are paying to keep {summary.seats.length === 1 ? "it" : "them"}. Charged
+                      immediately.
+                    </>
+                  }
                 />
               )}
             </Col>
@@ -561,15 +593,26 @@ function CheckoutForm({ orderId, offer }: { orderId: string; offer: CheckoutStat
       )}
 
       <Modal show={timeUpSeconds !== null} centered backdrop="static" keyboard={false} aria-labelledby="time-up-title">
-        <Modal.Body className="text-center p-4">
-          <i className="bi bi-clock-history text-primary" style={{ fontSize: "2.5rem" }} aria-hidden="true" />
-          <h2 id="time-up-title" className="fw-bold fs-4 mt-2">Time's up</h2>
-          <p className="text-secondary-emphasis mb-4">
-            Your seats have been released. You'll be taken back to seat selection in{" "}
-            {timeUpSeconds ?? 0} {timeUpSeconds === 1 ? "second" : "seconds"}.
+        <Modal.Body className="p-4">
+          <div className="et-hold et-hold--dead mb-3">
+            <span className="et-hold__clock">
+              <i className="bi bi-clock-history" aria-hidden="true" />
+              <span className="et-hold__n">0:00</span>
+            </span>
+            <span className="et-hold__tx">
+              <b id="time-up-title">The hold on your seats has expired.</b>
+              Ten minutes have passed since you confirmed. Nothing was charged and the card was
+              never contacted.
+            </span>
+          </div>
+          <p className="text-secondary-emphasis small mb-3">
+            The seats went back on sale. We will take you back to the seat map in{" "}
+            {timeUpSeconds ?? 0} {timeUpSeconds === 1 ? "second" : "seconds"} — the price is the one
+            you saw.
           </p>
-          <Button variant="primary" className="fw-semibold" onClick={() => leave()}>
-            Choose seats now
+          <Button variant="primary" className="fw-semibold w-100" onClick={() => leave()}>
+            <i className="bi bi-person-check me-2" aria-hidden="true" />
+            Back to seat selection
           </Button>
         </Modal.Body>
       </Modal>

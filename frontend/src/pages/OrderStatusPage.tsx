@@ -1,41 +1,27 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
-import { Alert, Badge, Button, Card, Modal, Spinner } from "react-bootstrap";
+import { Alert, Badge, Button, Modal, Spinner } from "react-bootstrap";
 import {
   cutoffLabel,
   getOrder,
   isTerminal,
   refundOrder,
   refundWindow,
-  type OrderStatus,
   type OrderView,
 } from "../api/orders";
 import { newId } from "../api/client";
 import { useIsOperator } from "../auth/roles";
-import { getRoute, type Route } from "../api/catalog";
+import { getRoute, listOffers, type Route } from "../api/catalog";
 import { ApiError } from "../api/client";
-import { OrderStepper, stepIndexOf } from "../components/OrderStepper";
-
-const CURRENCY = "EUR";
-
-/** A refund deadline: the day and the time, in the reader's own zone. */
-function formatDeadline(ms: number): string {
-  return new Date(ms).toLocaleString(undefined, {
-    day: "numeric",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function formatDate(iso: string): string {
-  return new Date(`${iso}T00:00:00`).toLocaleDateString(undefined, {
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  });
-}
+import { OrderStepper, stepIndexOf } from "../components/ticket/OrderStepper";
+import { BackButton } from "../components/controls/BackButton";
+import { TripBand } from "../components/ticket/TripBand";
+import { TicketStub } from "../components/ticket/TicketStub";
+import { HoldPill } from "../components/ticket/HoldClock";
+import { statusLabel } from "../status/labels";
+import { clockOffsetFrom } from "../hooks/useCountdown";
+import { formatInstant, formatTravelDate } from "../utils/dates";
+import { money, shortRef } from "../utils/format";
 
 /** The refund refusals (api-design.md), in a customer's words. */
 const REFUND_REFUSAL_COPY: Record<string, string> = {
@@ -80,21 +66,6 @@ const POLL_STOPPED_COPY: Record<PollStopReason, string> = {
     "on its own. The order may still be resolving — refresh to check its latest status.",
 };
 
-const STATUS_VARIANT: Record<OrderStatus, string> = {
-  CONFIRMED: "success",
-  FAILED: "danger",
-  CANCELLED: "danger",
-  ACCEPTED: "warning",
-  RESERVING: "warning",
-  HELD_AWAITING_PAYMENT: "warning",
-  PAYMENT_PENDING: "warning",
-  CONFIRMING_INVENTORY: "warning",
-  COMPENSATING: "accent",
-  REFUNDING: "accent",
-  REFUNDED: "secondary",
-};
-
-
 /** What the tickets list sets when it links here, so this page can tell the two arrivals apart. */
 interface OrderStatusNavState {
   fromTickets?: boolean;
@@ -108,6 +79,8 @@ export function OrderStatusPage() {
   const [order, setOrder] = useState<OrderView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [route, setRoute] = useState<Route | null>(null);
+  // The class belongs to the offer, not to the order, so it takes one more read.
+  const [fareClass, setFareClass] = useState<string | null>(null);
   const [lastKnownStepIndex, setLastKnownStepIndex] = useState(0);
   const [stopReason, setStopReason] = useState<PollStopReason | null>(null);
   const [rechecking, setRechecking] = useState(false);
@@ -168,6 +141,18 @@ export function OrderStatusPage() {
     return () => ac.abort();
   }, [order?.routeId]);
 
+  useEffect(() => {
+    if (!order?.offerId) return;
+    const ac = new AbortController();
+    listOffers(ac.signal)
+      .then((offers) => {
+        const offer = offers.find((o) => o.offerId === order.offerId);
+        if (offer && !ac.signal.aborted) setFareClass(offer.fareClass);
+      })
+      .catch(() => {}); // the ticket reads correctly without it
+    return () => ac.abort();
+  }, [order?.offerId]);
+
   async function recheck() {
     if (!orderId || rechecking) return;
     setRechecking(true);
@@ -219,141 +204,152 @@ export function OrderStatusPage() {
   // this sits open still shows its button. The server refuses it, and the refusal is displayed.
   const refund = refundWindow(order, Date.now());
 
+  const label = statusLabel(order.status);
+  const held = order.status === "HELD_AWAITING_PAYMENT";
+  const pollStalled =
+    !isTerminal(order.status) && order.status !== "COMPENSATING" && stopReason !== null;
+  const footerNotices = held || pollStalled || order.status === "FAILED";
+  // Where the arrow goes, named after where it lands.
+  // "To pay" on a refunded or failed order would ask for money nobody owes.
+  const amountLabel =
+    order.status === "CONFIRMED"
+      ? "Paid"
+      : order.status === "REFUNDED"
+        ? "Refunded"
+        : order.status === "REFUNDING"
+          ? "Refunding"
+          : order.status === "FAILED" || order.status === "CANCELLED"
+            ? "Order total"
+            : "To pay";
+  const back = isOperator
+    ? { to: "/operations", label: "Back to reconciliation" }
+    : fromTickets
+      ? { to: "/orders", label: "Back to my tickets" }
+      : { to: "/", label: "Back to departures" };
+
   return (
     <div className="mx-auto" style={{ maxWidth: 640 }}>
-      <h1 className="fw-bold mb-4">Order</h1>
-      <Card className="border-0 shadow-sm">
-        <Card.Body className="p-4">
-          <div className="d-flex justify-content-between align-items-center mb-5">
-            <div className="text-secondary-emphasis small">Order #{order.orderId}</div>
-            <div className="d-flex align-items-center gap-3">
-              <Badge bg={STATUS_VARIANT[order.status]} className="fs-6">
-                {order.status}
-              </Badge>
-            </div>
-          </div>
 
-          <OrderStepper status={order.status} lastKnownStepIndex={lastKnownStepIndex} />
-
-          <div className="d-flex flex-column gap-3 mb-4">
-            <div>
-              <div className="text-uppercase text-secondary-emphasis small fw-semibold">Route</div>
-              <div className="fs-5 fw-bold text-dark">
-                {route ? `${route.origin} → ${route.destination}` : order.routeId}
-              </div>
-            </div>
-            <div>
-              <div className="text-uppercase text-secondary-emphasis small fw-semibold">Travel date</div>
-              <div className="fs-5 fw-bold text-dark">{formatDate(order.travelDate)}</div>
-            </div>
-            <div>
-              <div className="text-uppercase text-secondary-emphasis small fw-semibold">Seats</div>
-              <div className="fs-5 fw-bold text-dark">{order.seats.join(", ")}</div>
-            </div>
-            <div>
-              <div className="text-uppercase text-secondary-emphasis small fw-semibold">Total</div>
-              <div className="fs-5 fw-bold text-dark">
-                {order.totalAmount.toFixed(2)} {order.currency ?? CURRENCY}
-              </div>
-            </div>
-          </div>
-
-          {order.status === "HELD_AWAITING_PAYMENT" && (
-            <Alert variant="warning" className="d-flex flex-wrap align-items-center gap-3 mb-3">
-              <div className="flex-grow-1">Your seats are held and waiting for your payment.</div>
-              <Link
-                to={`/checkout?orderId=${encodeURIComponent(order.orderId)}`}
-                className="btn btn-primary btn-sm fw-semibold"
-              >
-                Complete payment
-              </Link>
-            </Alert>
-          )}
-          {!isTerminal(order.status) && order.status !== "COMPENSATING" && stopReason && (
-            <Alert variant="warning" className="mb-0">
-              <div className="d-flex align-items-start gap-2 mb-2">
-                <i className="bi bi-clock-history fs-5" aria-hidden="true" />
-                <div>{POLL_STOPPED_COPY[stopReason]}</div>
-              </div>
-              <Button
-                variant="outline-dark"
-                size="sm"
-                disabled={rechecking}
-                onClick={() => void recheck()}
-              >
-                <i className="bi bi-arrow-clockwise me-2" aria-hidden="true" />
-                Refresh
-              </Button>
-            </Alert>
-          )}
-          {order.status === "COMPENSATING" && (
-            <Alert variant="accent" className="d-flex align-items-center gap-2 mb-0">
-              <i className="bi bi-hourglass-split fs-5" aria-hidden="true" />
-              <div>
-                We are resolving the payment for this order. This can take a few minutes — no
-                further action is needed from you.
-              </div>
-            </Alert>
-          )}
-          {order.status === "CONFIRMED" && (
-            <>
-              <Alert variant="success" className="mb-3 fw-semibold">
-                Your booking is confirmed.
-              </Alert>
-              {fromTickets && refundError && (
-                <Alert variant="danger" className="mb-3" role="alert">
-                  {refundError}
-                </Alert>
-              )}
-              <div className="d-flex flex-wrap justify-content-between align-items-center gap-2">
-                <div className="text-secondary-emphasis small">
-                  {refund.open
-                    ? `Refundable until ${cutoffLabel(order.refundCutoffMinutesBeforeDeparture)} — ${formatDeadline(refund.deadline)}.`
-                    : refund.reason}
-                </div>
-                {fromTickets && refund.open && (
-                  <Button
-                    variant="outline-danger"
-                    className="fw-semibold"
-                    onClick={() => setConfirmingRefund(true)}
-                  >
-                    Refund this ticket
-                  </Button>
-                )}
-              </div>
-            </>
-          )}
-          {order.status === "REFUNDING" && (
-            <Alert variant="accent" className="d-flex align-items-center gap-2 mb-0">
-              <i className="bi bi-arrow-counterclockwise fs-5" aria-hidden="true" />
-              <div>
-                Refund in progress: the money is returned first, then the seat goes back on sale.
-              </div>
-            </Alert>
-          )}
-          {order.status === "REFUNDED" && (
-            <Alert variant="secondary" className="mb-0 fw-semibold">
-              This ticket was refunded.
-            </Alert>
-          )}
-          {order.status === "FAILED" && (
-            <Alert variant="danger" className="mb-0">
-              {(order.failureCode && FAILURE_COPY[order.failureCode]) ?? GENERIC_FAILURE_COPY}
-            </Alert>
-          )}
-          {order.status === "CANCELLED" && (
-            <Alert variant="danger" className="mb-0">
-              This order was cancelled.
-            </Alert>
-          )}
-        </Card.Body>
-      </Card>
-      <div className="text-center mt-3">
-        <Link to={isOperator ? "/operations" : "/"} className="btn btn-primary fw-semibold">
-          <i className="bi bi-arrow-left me-2" aria-hidden="true" />
-          {isOperator ? "Back to reconciliation" : "Back to routes"}
-        </Link>
+      <div className="d-flex align-items-center gap-3 mb-4">
+        <BackButton to={back.to} label={back.label} />
+        <h1 className="fw-bold mb-0">Order</h1>
       </div>
+
+      {/* One surface: band, stepper, facts and stub are parts of one ticket. */}
+      <div className="et-surface">
+        <div className="d-flex flex-wrap justify-content-between align-items-center gap-2 px-3 py-2">
+          <span className="et-mono small text-secondary-emphasis">#{shortRef(order.orderId)}</span>
+          <span className="d-flex align-items-center gap-2">
+            {held && (
+              <HoldPill
+                expiresAt={order.reservationExpiresAt ?? null}
+                clockOffsetMs={clockOffsetFrom(order.serverNow)}
+                active
+              />
+            )}
+            <Badge bg={label.bg} text={label.text} className="fs-6">
+              {label.label}
+            </Badge>
+          </span>
+        </div>
+
+        {route && (
+          <TripBand
+            origin={route.origin}
+            destination={route.destination}
+            departureTime={route.departureTime}
+            arrivalTime={route.arrivalTime}
+            travelTime={route.travelTime}
+            service={fareClass ? `${route.trainType} · ${fareClass}` : route.trainType}
+            dead={order.status === "FAILED" || order.status === "CANCELLED"}
+          />
+        )}
+
+        <OrderStepper status={order.status} lastKnownStepIndex={lastKnownStepIndex} />
+
+        {/* FAILED says why further down, in its own words. */}
+        {label.sentence && order.status !== "FAILED" && (
+          <p className="px-3 pt-3 mb-0 small text-secondary-emphasis">{label.sentence}</p>
+        )}
+
+        <div className="d-flex flex-wrap gap-4 px-3 py-3">
+          <div>
+            <span className="et-lab">Travel date</span>
+            <div className="fw-bold">{formatTravelDate(order.travelDate)}</div>
+          </div>
+          <div>
+            <span className="et-lab">Route</span>
+            <div className="fw-bold">
+              {route ? `${route.origin} → ${route.destination}` : order.routeId}
+            </div>
+          </div>
+          <div>
+            <span className="et-lab">{amountLabel}</span>
+            <div className="fw-bold et-money fs-5">{money(order.totalAmount, order.currency)}</div>
+          </div>
+        </div>
+
+
+        <TicketStub status={order.status} seats={order.seats} orderId={order.orderId} />
+
+        {/* Only when it has something to say: an empty one ends the card with stray padding. */}
+        {footerNotices && (
+          <div className="px-3 pb-3 d-flex flex-column gap-3">
+            {held && (
+              <Alert variant="warning" className="d-flex flex-wrap align-items-center gap-3 mb-0">
+                <div className="flex-grow-1">Your seats are held and waiting for your payment.</div>
+                <Link
+                  to={`/checkout?orderId=${encodeURIComponent(order.orderId)}`}
+                  className="btn btn-primary btn-sm fw-semibold"
+                >
+                  Complete payment
+                </Link>
+              </Alert>
+            )}
+            {pollStalled && (
+              <Alert variant="warning" className="mb-0">
+                <div className="d-flex align-items-start gap-2 mb-2">
+                  <i className="bi bi-clock-history fs-5" aria-hidden="true" />
+                  <div>{POLL_STOPPED_COPY[stopReason!]}</div>
+                </div>
+                <Button variant="outline-dark" size="sm" disabled={rechecking} onClick={() => void recheck()}>
+                  <i className="bi bi-arrow-clockwise me-2" aria-hidden="true" />
+                  Refresh
+                </Button>
+              </Alert>
+            )}
+            {order.status === "FAILED" && (
+              <Alert variant="danger" className="mb-0">
+                {(order.failureCode && FAILURE_COPY[order.failureCode]) ?? GENERIC_FAILURE_COPY}
+              </Alert>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Outside the card: an action *on* the ticket, not printed on its own paper. Quiet,
+          because it is rare and irreversible — the red belongs to the dialog that follows. */}
+      {order.status === "CONFIRMED" && (
+        <div className="mt-3">
+          {fromTickets && refundError && (
+            <Alert variant="danger" role="alert">
+              {refundError}
+            </Alert>
+          )}
+          <div className="d-flex flex-wrap justify-content-between align-items-center gap-2 px-1">
+            <span className="text-secondary-emphasis small">
+              {refund.open
+                ? `Refundable until ${cutoffLabel(order.refundCutoffMinutesBeforeDeparture)} — ${formatInstant(refund.deadline)}.`
+                : refund.reason}
+            </span>
+            {fromTickets && refund.open && (
+              <button type="button" className="et-refund" onClick={() => setConfirmingRefund(true)}>
+                Refund this ticket
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       <Modal show={confirmingRefund} onHide={() => setConfirmingRefund(false)} centered>
         <Modal.Header closeButton>
@@ -361,8 +357,8 @@ export function OrderStatusPage() {
         </Modal.Header>
         <Modal.Body>
           <p className="mb-0">
-            {order.totalAmount.toFixed(2)} {order.currency ?? CURRENCY} goes back to the original
-            payment method. The seat returns to sale and the ticket is void.
+            {money(order.totalAmount, order.currency)} goes back to the original payment method.
+            The seat returns to sale and the ticket is void.
           </p>
         </Modal.Body>
         <Modal.Footer>

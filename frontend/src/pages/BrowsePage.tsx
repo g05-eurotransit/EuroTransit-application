@@ -1,34 +1,23 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Card, Collapse, Form, Stack } from "react-bootstrap";
+import { Button, Collapse } from "react-bootstrap";
 import { listRoutes, listOffers, type Route, type Offer } from "../api/catalog";
 import { ApiError } from "../api/client";
-import { DateStrip } from "../components/DateStrip";
+import { DateStrip } from "../components/controls/DateStrip";
+import { MonthPicker } from "../components/controls/MonthPicker";
+import { DAY_CODES, addDays, toISODate } from "../utils/dates";
+import { arrivesNextDay, durationMinutes, formatDuration, hhmm, money } from "../utils/format";
 
 type SortKey = "departure" | "price" | "duration";
 
-function durationMinutes(iso: string): number {
-  const match = /^PT(?:(\d+)H)?(?:(\d+)M)?$/.exec(iso);
-  const hours = Number(match?.[1] ?? 0);
-  const minutes = Number(match?.[2] ?? 0);
-  return hours * 60 + minutes;
-}
+const SORTS: { key: SortKey; label: string }[] = [
+  { key: "departure", label: "Time" },
+  { key: "price", label: "Price" },
+  { key: "duration", label: "Duration" },
+];
 
-function formatDuration(iso: string): string {
-  const total = durationMinutes(iso);
-  const h = Math.floor(total / 60);
-  const m = total % 60;
-  return m ? `${h}h ${m}m` : `${h}h`;
-}
-
-const DAY_CODES = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
-
-function toISODate(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
+/** How far ahead "the next day with a train" is worth looking before giving up. */
+const NEXT_RUNNING_DAY_LIMIT = 30;
 
 export function BrowsePage() {
   const [routes, setRoutes] = useState<Route[]>([]);
@@ -79,6 +68,24 @@ export function BrowsePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routes, offers, sortBy, selectedDate]);
 
+  /** A weekday nothing runs on is closed in the calendar rather than being an empty page. */
+  const isDayAvailable = useCallback(
+    (date: Date) => {
+      if (routes.length === 0) return true;
+      return routes.some((r) => r.operatingDays.includes(DAY_CODES[date.getDay()]));
+    },
+    [routes],
+  );
+
+  /** The soonest day after this one that has a service, for the empty state's one useful action. */
+  const nextRunningDay = useMemo(() => {
+    for (let i = 1; i <= NEXT_RUNNING_DAY_LIMIT; i++) {
+      const day = addDays(selectedDate, i);
+      if (isDayAvailable(day)) return day;
+    }
+    return null;
+  }, [selectedDate, isDayAvailable]);
+
   function selectOffer(route: Route, offer: Offer) {
     navigate("/checkout/seats", {
       state: {
@@ -99,111 +106,143 @@ export function BrowsePage() {
   }
 
   return (
-    <div className="mx-auto" style={{ maxWidth: 920 }}>
-      <div className="d-flex flex-wrap justify-content-between align-items-end mb-4 pb-3 border-bottom">
+    // A column of times: past ~860px the rows hollow out in the middle.
+    <div className="mx-auto" style={{ maxWidth: 860 }}>
+      <div className="d-flex flex-wrap justify-content-between align-items-end gap-3 mb-4">
         <div>
-          <h1 className="fw-bold mb-1">Available routes</h1>
-          {error && <p className="text-danger mb-0">{error}</p>}
+          <h1 className="fw-bold mb-2">Departures</h1>
+          <div className="d-flex flex-wrap align-items-center gap-3">
+            <MonthPicker selected={selectedDate} onSelect={setSelectedDate} isDayAvailable={isDayAvailable} />
+            <span className="text-secondary-emphasis small">
+              {sortedRoutes.length} {sortedRoutes.length === 1 ? "train" : "trains"}
+            </span>
+          </div>
+          {error && <p className="text-danger mb-0 mt-2">{error}</p>}
         </div>
-        <Form.Group className="d-flex align-items-center gap-2">
-          <Form.Label className="mb-0 small text-secondary-emphasis fw-semibold">Sort by</Form.Label>
-          <Form.Select
-            size="sm"
-            style={{ width: "auto" }}
-            value={sortBy}
-            onChange={(e) => setSortBy(e.target.value as SortKey)}
-          >
-            <option value="departure">Departure time</option>
-            <option value="price">Lowest price</option>
-            <option value="duration">Duration</option>
-          </Form.Select>
-        </Form.Group>
+        <div className="d-flex align-items-center gap-2">
+          <span className="et-lab">Sort by</span>
+          <div className="et-seg" role="group" aria-label="Sort by">
+            {SORTS.map((s) => (
+              <button
+                key={s.key}
+                type="button"
+                className={`et-seg__btn${sortBy === s.key ? " is-on" : ""}`}
+                aria-pressed={sortBy === s.key}
+                onClick={() => setSortBy(s.key)}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
 
       <DateStrip selected={selectedDate} onSelect={setSelectedDate} />
 
       {routes.length > 0 && sortedRoutes.length === 0 && (
-        <p className="text-secondary-emphasis text-center py-4">
-          No routes operate on this day. Try a different date.
-        </p>
+        <div className="et-surface">
+          <div className="et-edge">
+            <div className="et-edge__ic">
+              <i className="bi bi-train-front" aria-hidden="true" />
+            </div>
+            <h2>No trains on this day</h2>
+            <p>Nothing runs on the date you picked. The timetable is not the same every day of the week.</p>
+            {nextRunningDay && (
+              <Button size="sm" className="fw-semibold" onClick={() => setSelectedDate(nextRunningDay)}>
+                Go to{" "}
+                {nextRunningDay.toLocaleDateString(undefined, {
+                  weekday: "long",
+                  day: "numeric",
+                  month: "short",
+                })}
+              </Button>
+            )}
+          </div>
+        </div>
       )}
 
-      <Stack gap={3}>
-        {sortedRoutes.map((r) => (
-          <Card key={r.routeId} className="shadow-sm border-0 border-bottom">
-            <Card.Body>
-              <div className="d-flex flex-wrap justify-content-between align-items-center gap-3">
-                <div className="d-flex flex-wrap align-items-center gap-3 gap-lg-5">
-                  <div className="text-start" style={{ width: 180 }}>
-                    <div className="fs-4 fw-bold">{r.departureTime.slice(0, 5)}</div>
-                    <div className="text-uppercase text-secondary-emphasis fw-semibold">{r.origin}</div>
-                  </div>
-                  <div className="text-start" style={{ width: 130 }}>
-                    <i className="bi bi-train-front fs-4 d-block text-accent" aria-hidden="true" />
-                    <div className="small text-dark">
-                      {formatDuration(r.travelTime)} · {r.trainType}
+      {/* Separate rows 8px apart: distinct objects to pick from, without a gap to cross. */}
+      {sortedRoutes.length > 0 && (
+        <div className="d-flex flex-column gap-2">
+          {sortedRoutes.map((r) => {
+            const fares = offersByRoute(r.routeId);
+            const cheapest = cheapestPrice(r.routeId);
+            const open = expandedRouteId === r.routeId;
+            return (
+              <div key={r.routeId} className="et-surface et-surface--quiet">
+                <div className="et-route">
+                  <div className="et-route__legs">
+                    <div>
+                      <div className="et-route__t">{hhmm(r.departureTime)}</div>
+                      <div className="et-route__st">{r.origin}</div>
+                    </div>
+                    <div className="et-route__mid" aria-hidden="true">
+                      <span className="small text-secondary-emphasis fw-semibold et-num">
+                        {formatDuration(r.travelTime)}
+                      </span>
+                      <span className="et-route__wire" />
+                      <span className="et-lab">{r.trainType}</span>
+                    </div>
+                    <div className="et-route__end">
+                      <div className="et-route__t">{hhmm(r.arrivalTime)}</div>
+                      <div className="et-route__st">{r.destination}</div>
+                      {arrivesNextDay(r.departureTime, r.arrivalTime) && (
+                        <div className="et-lab text-secondary mt-1">arrives +1 day</div>
+                      )}
                     </div>
                   </div>
-                  <div className="text-start" style={{ width: 180 }}>
-                    <div className="fs-4 fw-bold">{r.arrivalTime.slice(0, 5)}</div>
-                    <div className="text-uppercase text-secondary-emphasis fw-semibold">{r.destination}</div>
+
+                  <div className="et-route__price">
+                    <span className="et-lab">From</span>
+                    <strong>{money(cheapest, fares[0]?.currency)}</strong>
                   </div>
+
+                  <Button
+                    variant="outline-primary"
+                    className="rounded-3 p-0 d-flex align-items-center justify-content-center flex-shrink-0"
+                    style={{ width: 36, height: 36 }}
+                    aria-label={open ? "Hide fares" : "Show fares"}
+                    aria-expanded={open}
+                    onClick={() =>
+                      setExpandedRouteId((current) => (current === r.routeId ? null : r.routeId))
+                    }
+                  >
+                    <i className={`bi ${open ? "bi-chevron-up" : "bi-chevron-down"}`} aria-hidden="true" />
+                  </Button>
                 </div>
 
-                <div className="text-start">
-                  <div className="text-uppercase text-secondary-emphasis small fw-semibold">From</div>
-                  <div className="fs-4 fw-bold text-accent text-nowrap">
-                    {cheapestPrice(r.routeId).toFixed(2)} {offersByRoute(r.routeId)[0]?.currency}
-                  </div>
-                </div>
-
-                <Button
-                  variant="outline-primary"
-                  className="rounded-circle p-0 d-flex align-items-center justify-content-center flex-shrink-0"
-                  style={{ width: 40, height: 40 }}
-                  aria-label="Show fares"
-                  onClick={() =>
-                    setExpandedRouteId((current) => (current === r.routeId ? null : r.routeId))
-                  }
-                >
-                  <i
-                    className={`bi ${expandedRouteId === r.routeId ? "bi-chevron-up" : "bi-chevron-down"}`}
-                    aria-hidden="true"
-                  />
-                </Button>
-              </div>
-
-              <Collapse in={expandedRouteId === r.routeId}>
-                <div>
-                  <Stack gap={2} className="border-top pt-3 mt-3">
-                    {offersByRoute(r.routeId).map((o) => (
-                      <div
-                        key={o.offerId}
-                        className="d-flex justify-content-between align-items-center border rounded-2 px-3 py-2"
-                      >
-                        <div>
-                          <div className="fw-bold text-uppercase">{o.fareClass}</div>
-                          <div className="text-secondary-emphasis" style={{ fontSize: "0.9rem" }}>
-                            {o.conditions}
+                <Collapse in={open}>
+                  <div>
+                    <div className="et-fares">
+                      {fares.map((o) => (
+                        <div
+                          key={o.offerId}
+                          // Marks the fare the row's "From" price refers to — pointless when it
+                        // is the only fare on the route.
+                        className={`et-fare${
+                          fares.length > 1 && o.price === cheapest ? " et-fare--best" : ""
+                        }`}
+                        >
+                          <div>
+                            <div className="et-fare__cls">{o.fareClass}</div>
+                            <div className="et-fare__cond">{o.conditions}</div>
+                          </div>
+                          <div className="et-fare__right">
+                            <span className="et-fare__amt">{money(o.price, o.currency)}</span>
+                            <Button size="sm" className="fw-semibold" onClick={() => selectOffer(r, o)}>
+                              Select
+                            </Button>
                           </div>
                         </div>
-                        <div className="d-flex align-items-center gap-3">
-                          <span className="fw-bold text-accent fs-5">
-                            {o.price.toFixed(2)} {o.currency}
-                          </span>
-                          <Button className="fw-semibold" onClick={() => selectOffer(r, o)}>
-                            Buy
-                          </Button>
-                        </div>
-                      </div>
-                    ))}
-                  </Stack>
-                </div>
-              </Collapse>
-            </Card.Body>
-          </Card>
-        ))}
-      </Stack>
+                      ))}
+                    </div>
+                  </div>
+                </Collapse>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
