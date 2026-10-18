@@ -1,4 +1,4 @@
-# [Behavior or contract]
+# [Behavior, architecture or platform reference]
 
 <!-- State the current rule and its applicability. Label proposals explicitly. -->
 [Rule and scope in one short paragraph.]
@@ -26,3 +26,5 @@
 
 <!-- Optional: reference rationale and implementation; do not restate their contents. -->
 [Authoritative links.]
+
+<!-- For architecture/deployment, use the guide’s component/environment tables, include a sourced SVG and identify configured versus observed state. Remove unused contract sections. -->

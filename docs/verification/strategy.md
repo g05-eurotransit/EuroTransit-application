@@ -1,6 +1,6 @@
 # Fault experiment design
 
-Use bounded faults to test a stated hypothesis, measure customer impact and recovery, and independently check business effects. Record a failed hypothesis as a finding with corrective work. The [report template](../templates/verification-report-template.md) defines the report shape; configuration owns [execution procedures and results](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/reliability/chaos-experiment-reports.md).
+Use bounded faults to test a stated hypothesis, measure customer impact and recovery, and independently check business effects. Record a failed hypothesis as a finding with corrective work. The [report template](../templates/verification-report-template.md) defines the report shape; configuration owns [execution procedures and results](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/verification/README.md).
 
 ## Required fault families
 
@@ -14,10 +14,10 @@ Use bounded faults to test a stated hypothesis, measure customer impact and reco
 
 For each run, declare steady state, injection duration, workload, cleanup and evidence scope before injecting. A worker-container stop and a process freeze are different faults; a local multi-node cluster does not establish physical-host or AZ tolerance. Distinguish failed client deadlines from eventual correctness and distinguish promotion/read recovery from checkout recovery.
 
-[SLOs and recovery objectives](slo-observability.md) own targets and their adoption status. Compare observed recovery with an applicable team-declared RTO when claiming compliance; do not choose a retrospective target to make a run pass. Missing RTO/SLO assessment does not erase an experiment's measured impact or recovery.
+[SLOs and recovery objectives](../design/slo.md) own targets and their adoption status. Compare observed recovery with an applicable team-declared RTO when claiming compliance; do not choose a retrospective target to make a run pass. Missing RTO/SLO assessment does not erase an experiment's measured impact or recovery.
 
 ## Additional refund diagnostic
 
 A definitive Inventory seat-return refusal after successful payment reversal must leave the order `REFUNDING` with `SEAT_RETURN_FAILURE`, not falsely complete it. Verify seat state, incident visibility and safe redrive after correction. A Pod kill produces an unknown outcome and does not test this refusal. This is a separate post-sale diagnostic, not an additional fault family required by the base assignment.
 
-The [lifecycle specification](../design/reservation-confirmation.md) owns invariants, retry budgets, DLT behavior and reversal-key semantics. Use the [operator runbook](orders-recovery-runbook.md) for recovery actions and `GET /api/orders/reconciliation` for incident discovery. No injected fault authorizes arbitrary business-row repair.
+The [lifecycle specification](../design/reservation-confirmation.md) owns invariants, retry budgets, DLT behavior and reversal-key semantics. Use the [operator runbook](../operations/orders-recovery-runbook.md) for recovery actions and `GET /api/orders/reconciliation` for incident discovery. No injected fault authorizes arbitrary business-row repair.

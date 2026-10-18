@@ -49,4 +49,4 @@ Notifications owner as #131.
 - Kafka retains the events and Notifications catches up from its committed offset on restart.
 - Its read model starts empty at each restart : a contract question for Notifications, #131.
 
-The current [API contract](../../design/api-design.md#notifications) explicitly documents the process-local implementation and leaves durable history tracked in #131. This report does not establish that issue as resolved.
+The current [API contract](../design/api-design.md#notifications) explicitly documents the process-local implementation and leaves durable history tracked in #131. This report does not establish that issue as resolved.

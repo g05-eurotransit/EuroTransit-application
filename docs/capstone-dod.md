@@ -41,7 +41,7 @@ This is the project acceptance checklist. Checked items retain the recorded owne
 - [ ] Orders canary is demonstrated with metric-gated promote/abort.
 - [ ] Catalog blue/green is demonstrated with fast rollback.
 - [x] The team explains why rolling and all-at-once are not used for the critical path.
-- [x] Checkout latency and success-rate SLOs are defined in `operations/slo-observability.md`.
+- [x] Checkout latency and success-rate SLOs are defined in `design/slo.md`.
 - [ ] RED dashboards, infrastructure USE/Golden Signals dashboards, and symptom-based alerts are live.
 - [x] A single order can be traced through gateway, Orders, Inventory, Payments, and Kafka stages.
 
@@ -60,7 +60,7 @@ This is the project acceptance checklist. Checked items retain the recorded owne
 
 ## 6. Chaos Experiments
 
-- [x] The chaos plan in `operations/chaos-experiments.md` is complete.
+- [x] The chaos plan in `verification/strategy.md` is complete.
 - [x] Latency injection into Payments proves the Orders circuit breaker opens and Catalog remains healthy.
 - [x] Inventory pod kill mid-hold proves idempotency and no oversell/double-charge.
 - [ ] Node or AZ-style disruption proves PDBs/topology spread protect the critical path.
@@ -83,7 +83,41 @@ This is the project acceptance checklist. Checked items retain the recorded owne
 
 ## Acceptance sources
 
-- [Contracts](design/api-design.md), [lifecycle](design/reservation-confirmation.md), [decisions](design/architecture-decisions.md) and [SLOs](operations/slo-observability.md) own the rules.
-- [Local reports](operations/reports/README.md) and the [cluster experiment index](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/reliability/chaos-experiment-reports.md) own observations and their limits.
-- [Configuration readiness](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/delivery/readiness.md) records environment gaps.
+- [Contracts](design/api-design.md), [lifecycle](design/reservation-confirmation.md), [decisions](design/architecture-decisions.md) and [SLOs](design/slo.md) own the rules.
+- [Local reports](verification/README.md) and the [cluster experiment index](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/verification/README.md) own observations and their limits.
+- [Configuration readiness](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/readiness.md) records environment gaps.
 - [Agent governance](governance/agent-governance.md) and [agent log](agent-log.md) provide permission/review policy and concrete corrections.
+
+## Remaining acceptance work
+
+Use linked issues for current ownership and status. This table adds no acceptance criteria.
+
+| Workstream | Remaining decision or verification | Reference |
+| --- | --- | --- |
+| Payments | Persist an attempt before the provider call and make unknown results discoverable by order | [#142](https://github.com/g05-eurotransit/EuroTransit-application/issues/142) |
+| Notifications | Decide durable customer history versus explicitly best-effort API/product expectations | [#131](https://github.com/g05-eurotransit/EuroTransit-application/issues/131) |
+| Overload | Retain the verified ingress refusal/recovery scope; do not infer a global backlog capacity guarantee | [Cluster evidence](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/verification/README.md) |
+| Delivery and observability | Reconcile actual dashboard/alert signals, tracing deployment and a GitOps release of a new application version | [Configuration readiness](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/readiness.md) |
+| Final delivery | Team review of decisions, hypotheses, acceptance, postmortem, permissions and recorded demonstration | [DoD](capstone-dod.md) |
+
+## Recorded demonstration
+
+This is a recording plan, not a completed demo or a fabricated video link.
+Record after the [configuration readiness gates](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/readiness.md) close.
+
+| Time | Show | Required evidence |
+| --- | --- | --- |
+| 0:00 to 0:40 | Running system, five services, single ingress, GitOps revision and immutable images | Actual cluster and Argo state; explain any temporary controller pause |
+| 0:40 to 1:20 | Checkout RED/end-to-end view and one trace | Real confirmed order, terminal SLI, gateway/service/Kafka spans |
+| 1:20 to 2:20 | Orders canary exposure, gate decision, promote and abort recovery | Candidate hash, Traefik weight, AnalysisRun samples and stable route |
+| 2:20 to 3:10 | Catalog blue/green preview, switch and rollback | Distinct revisions, preview check, active route and retained old revision |
+| 3:10 to 4:20 | One bounded fault, symptom alert and recovery | Actual fault interval, firing alert, user-visible impact and cleanup |
+| 4:20 to 5:00 | Invariants and recovery trade-offs | Independent provider audit, one-seat crash proof, factual failed-availability finding |
+
+Historical alert evidence from the recorded run is available in the observability
+report; label it as replayed evidence with its source run/revision. A historical screenshot
+must not be presented as an alert firing live during the recording.
+
+Before release, commit the real recording URL and revisions here, keep provider
+identifiers/credentials out of the recording and complete team review of the
+hypotheses/postmortem. The recording URL is still pending.

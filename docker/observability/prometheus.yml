@@ -5,7 +5,7 @@ scrape_configs:
   # Each service is listed twice, because both local workflows are supported and exactly one of
   # the two answers at a time:
   #   - compose runs the services on the internal network at :8080 and publishes no host ports;
-  #   - the bare-metal IDE workflow documented in docs/design/observability-conventions.md runs
+  #   - the bare-metal IDE workflow documented in docs/development/local.md runs
   #     them on host ports 8081-8085, reached from this container via host.docker.internal.
   # Whichever is not running shows as DOWN on the Targets page. That is expected here, not a fault.
   #

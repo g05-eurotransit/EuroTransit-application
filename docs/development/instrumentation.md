@@ -2,7 +2,7 @@
 
 These conventions make every EuroTransit service observable the same way: one correlation id per request flow, structured JSON logs, RED metrics with histogram buckets, OTLP traces, and Kubernetes-ready health probes. Catalog is the reference implementation; the shared code lives in the `:observability` Gradle module.
 
-## Adoption Checklist (3 actions per service)
+## Service adoption
 
 1. Add the shared module to your service build file:
 
@@ -12,7 +12,7 @@ These conventions make every EuroTransit service observable the same way: one co
    }
    ```
 
-   Because the module shares the `it.polito.cpo` root package, its components are picked up by component scan automatically. **This activates the correlation-id filter and the global error handler in your service** : your error responses switch to the shared `{code, message, correlationId}` model.
+   Because the module shares the `it.polito.cpo` root package, its components are picked up by component scan automatically. This activates the correlation-id filter and global error handler: your error responses switch to the shared `{code, message, correlationId}` model.
 
 2. Copy the configuration block below into your `application.yaml`, changing nothing but what is service-specific (`spring.application.name` and `server.port` stay as you already have them):
 
@@ -126,14 +126,14 @@ What is deliberately **not** a line: a redelivery of an order already terminal (
 - Errors: `sum(rate(http_server_requests_seconds_count{application="catalog", status=~"5.."}[5m]))`
 - Duration p95: `histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{application="orders", uri="/api/orders"}[5m])))`
 
-HTTP RED queries measure HTTP handling. Checkout outcomes and accepted-payment-to-terminal latency use the business metrics defined in [SLOs and SLIs](../operations/slo-observability.md); do not substitute acceptance or polling duration for completion. Register bounded business metrics through the injected `MeterRegistry`.
+HTTP RED queries measure HTTP handling. Checkout outcomes and accepted-payment-to-terminal latency use the business metrics defined in [SLOs and SLIs](../design/slo.md); do not substitute acceptance or polling duration for completion. Register bounded business metrics through the injected `MeterRegistry`.
 
 ## Tracing
 
 - Export: OTLP HTTP to Tempo (`http://localhost:4318/v1/traces` locally; the cluster endpoint will be set per environment in the configuration repository).
 - Property names are the Spring Boot 4 canonical ones (`management.opentelemetry.tracing.export.otlp.endpoint`); the Boot 3 `management.otlp.tracing.*` names are deprecated aliases.
 - Sampling is 1.0 for development; production sampling is decided with the SLO owner before the demo.
-- View traces in Grafana (`localhost:3000` → Explore → Tempo → search `service.name`).
+- View local traces through the [local telemetry tools](local.md#local-observability-stack).
 - **Set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` explicitly for every service in compose.** The
   `application.yaml` default is `localhost:4318`, which inside a container is the container itself,
   so the spans are produced and dropped and nothing reports an error. Catalog was missing from
@@ -147,11 +147,11 @@ HTTP RED queries measure HTTP handling. Checkout outcomes and accepted-payment-t
 
 ## Prometheus Scraping and the Security Baseline
 
-The shared security baseline permits `/actuator/prometheus` together with the Kubernetes health endpoints. Other Actuator endpoints remain denied by the `anyExchange().denyAll()` catch-all. The route is reachable by Prometheus on the internal service network, but no Traefik route forwards `/actuator/**` to an application service; backend routes match only `/api/**`. See `docs/operations/slo-observability.md` for the operational boundary.
+The shared security baseline permits `/actuator/prometheus` together with the Kubernetes health endpoints. Other Actuator endpoints remain denied by the `anyExchange().denyAll()` catch-all. The route is reachable by Prometheus on the internal service network, but no Traefik route forwards `/actuator/**` to an application service; backend routes match only `/api/**`. See `docs/design/slo.md` for the operational boundary.
 
 ## Event and trace propagation
 
-Shared DTOs in [money-path-contracts](../../money-path-contracts/src/main/kotlin/it/polito/cpo/contracts/events/OrderEvents.kt) define the event envelope; the [API contract](api-design.md) owns producers and consumers. Business publication uses transactional outboxes, not a direct Kafka send after the database commit.
+Shared DTOs in [money-path-contracts](../../money-path-contracts/src/main/kotlin/it/polito/cpo/contracts/events/OrderEvents.kt) define the event envelope; the [API contract](../design/api-design.md) owns producers and consumers. Business publication uses transactional outboxes, not a direct Kafka send after the database commit.
 
 Orders' `OrderOutbox` creates a short producer span and stores W3C `traceparent` on each outbox row. The Orders connector maps it to a Kafka header, and listeners resume the consumer observation through `PipelineReactorContext`. Inventory and Payments outboxes still lack this trace-context path. A configured connector header mapping does not establish an exported cluster trace; see [cluster monitoring](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/platform/observability.md).
 
@@ -164,23 +164,3 @@ Orders' `OrderOutbox` creates a short producer span and stores W3C `traceparent`
 
 Throw `ApiException(status, code, message)` from `it.polito.cpo.observability` for business failures; `GlobalErrorHandler` renders the frozen error body and logs it with the correlation id. Codes are SCREAMING_SNAKE_CASE (`ROUTE_NOT_FOUND`, `IDEMPOTENCY_CONFLICT`, …) per `docs/design/api-design.md`.
 
-## Local Observability Stack
-
-`docker compose up -d prometheus grafana tempo`:
-
-| Tool | URL | Purpose |
-| --- | --- | --- |
-| Prometheus | http://localhost:9090 | scrapes `/actuator/prometheus` on ports 8081 to 8085 every 5s |
-| Grafana | http://localhost:3000 | anonymous admin; Prometheus + Tempo pre-provisioned |
-| Tempo | http://localhost:3200 | OTLP trace ingest on 4318 |
-
-Prometheus reaches services running on your host via `host.docker.internal` (works on macOS/Windows; on Linux it is mapped through `extra_hosts: host-gateway`).
-
-### Scrape Labels and Dashboard Compatibility
-
-Local Grafana dashboards (provisioned from `docker/observability/grafana/provisioning/dashboards/`) query Prometheus metrics using cluster-aligned selectors such as `{namespace="eurotransit", app="<service>"}`.
-
-To make these dashboards work locally without divergent PromQL queries, `docker/observability/prometheus.yml` statically decorates every local scrape target (both container `:8080` and host `8081-8085`) with `namespace: eurotransit` and `app: <service>`, mirroring the labels attached by Kubernetes `ServiceMonitor` resources in the cluster.
-
-> [!WARNING]
-> Do not strip or rename `namespace` or `app` labels in `docker/observability/prometheus.yml`. Removing them will silently break panel queries across all local Grafana dashboards, resulting in `No Data`.
