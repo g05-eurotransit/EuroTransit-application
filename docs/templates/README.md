@@ -74,11 +74,26 @@ Link sanitized, portable evidence when available. Mark restricted evidence as un
 
 Use Archify for architecture, deployment, checkout sequences, state transitions, or GitOps flows when the picture answers a concrete technical question. A short checklist or a simple instruction does not need a diagram.
 
-Keep editable JSON, standalone HTML, and its canonical SVG export together under `docs/diagrams/<topic>/`, with stable filenames and no dates. Embed the SVG as a Markdown image using a relative path so readers see it directly on GitHub. Provide a full-size SVG link and an optional HTML download for browser interaction; GitHub's file viewer does not run the HTML application. Export the SVG through Archify's canonical export, with automatic light/dark themes and no scripts or external dependencies.
+Keep editable JSON, standalone HTML, and its canonical SVG export together under `docs/diagrams/<topic>/`, with stable filenames and no dates. Embed the SVG as a Markdown image using a relative path so readers see it directly on GitHub. Provide a full-size SVG link, a GitHub Pages link to the interactive viewer, and an optional HTML download. GitHub's file viewer does not run the HTML application. Export the SVG through Archify's canonical export, with automatic light/dark themes and no scripts or external dependencies.
 
 Keep each diagram's abstraction level clear, label protocols and asynchronous relationships, and distinguish configured topology from a proposal or live observation. Verify components and relationships against code or manifests at the recorded Git revision. An architectural summary is a view of those sources, not a second contract.
 
 Run Archify `finalize` with repository evidence and complete its browser checks. Send receipts and captures to a local review directory outside published docs. The tool requires delivery metadata beside the HTML; keep that local sidecar ignored by Git. Regenerate it before checking a fresh checkout. Inspect light/dark captures before claiming visual review, including the SVG embedded as an image at documentation width. Update the JSON, regenerate HTML, and re-export SVG together when the represented implementation changes.
+
+## Publishing interactive diagrams
+
+Each repository publishes its HTML diagrams from `main` with `.github/workflows/diagrams-pages.yml`. The workflow stages only HTML files from `docs/diagrams/`, preserving their relative paths, and serves `docs/diagrams/index.html` at the site root. Add new diagrams to that index and link their hosted viewer beside the SVG preview.
+
+The sites are [application diagrams](https://g05-eurotransit.github.io/EuroTransit-application/) and [configuration diagrams](https://g05-eurotransit.github.io/EuroTransit-configuration/).
+
+To enable hosting in each repository:
+
+1. Open **Settings > Pages** and set **Build and deployment > Source** to **GitHub Actions**.
+2. Merge the workflow and index into `main`.
+3. In **Settings > Environments > github-pages**, check that deployment branch rules allow `main`.
+4. Open **Actions > Publish diagrams** and check the deployment result. To retry without changing files, use **Run workflow** with branch `main`.
+
+Subsequent HTML or workflow changes on `main` publish automatically. The workflow uploads the committed HTML directly; diagram generation and verification remain part of authoring. See [GitHub's custom workflow documentation](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages).
 
 ## Before publishing
 

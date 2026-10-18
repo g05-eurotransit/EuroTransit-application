@@ -6,7 +6,7 @@ Orders commits accepted work before processing it through Kafka. Inventory owns 
 
 ![Customer-hold and direct checkout sequence](../diagrams/checkout/checkout.svg)
 
-[Full-size sequence](../diagrams/checkout/checkout.svg) · [Interactive HTML](../diagrams/checkout/checkout.html)
+[Full-size sequence](../diagrams/checkout/checkout.svg) · [Open interactive diagram](https://g05-eurotransit.github.io/EuroTransit-application/checkout/checkout.html) · [Interactive HTML](../diagrams/checkout/checkout.html)
 
 | Flow | Before authorization | Deadline |
 | --- | --- | --- |
