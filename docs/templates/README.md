@@ -14,6 +14,10 @@ Write in English. Give the answer first, followed by the information needed to u
 
 Navigation belongs in the root README; keep a dedicated results index when it adds verdicts and scope. Readiness maps criteria to evidence and open work. Governance names actors, permissions, enforcement and failure impact. A short work plan can be a table in the document that owns its decisions; do not create a page for every authoring variant.
 
+## Navigation
+
+Keep root READMEs to an introduction, a quick start and links to the main reference and macrosections. Section indexes own the detailed document lists. Group related verification reports by environment and theme, retaining separate methods, verdicts and evidence for each experiment.
+
 ## Structure and prose
 
 Open with one short paragraph stating the behavior, decision, outcome, or operation. Include a material limitation there if it changes the answer. Then explain the rules or steps; put source references and supporting detail last. A section should add information the reader needs.
@@ -70,7 +74,7 @@ Link sanitized, portable evidence when available. Mark restricted evidence as un
 
 Use Archify for architecture, deployment, checkout sequences, state transitions, or GitOps flows when the picture answers a concrete technical question. A short checklist or a simple instruction does not need a diagram.
 
-Version editable JSON, its standalone HTML and canonical SVG export together under `docs/diagrams/<topic>/`, using stable names. Embed the SVG as a relative Markdown image wrapped in a link to its hosted interactive viewer: `[![Diagram description](../diagrams/topic/diagram.svg)](https://g05-eurotransit.github.io/REPOSITORY/topic/diagram.html)`. Clicking the preview must open the interactive diagram. The Pages workflow uploads committed HTML; removing viewers requires a separate replacement generation/publishing pipeline.
+Version editable JSON, its standalone HTML and canonical SVG export together under `docs/diagrams/<topic>/`, using stable names. Embed the SVG as a relative Markdown image wrapped in a link to its hosted interactive viewer: `[![Microservice architecture](../diagrams/microservices/architecture.svg)](https://g05-eurotransit.github.io/EuroTransit-application/microservices/architecture.html)`. Clicking the preview must open the interactive diagram. The Pages workflow uploads committed HTML; removing viewers requires a separate replacement generation/publishing pipeline.
 
 Keep the abstraction level clear, protocols labelled and configured topology separate from live evidence. Verify relationships at the recorded Git revision. An architecture view is not a second contract. When a diagram changes, run Archify `finalize` with repository evidence and browser checks, export its canonical SVG and inspect light/dark captures at documentation width. Keep delivery sidecars, receipts and captures outside published documentation. Update JSON, HTML and SVG together.
 
