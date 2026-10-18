@@ -233,7 +233,13 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
       ended; the sixth was abandoned through the runbook and its charge refunded. The Stripe audit found no
       unmatched charge. *Limit:* the load client's own verdict failed on its deadline (three orders not yet
       terminal), which the report keeps as recorded.
-- [ ] Inventory pod kill mid-hold proves idempotency and no oversell/double-charge.
+- [x] Inventory pod kill mid-hold proves idempotency and no oversell/double-charge.
+      *Checked by the Orders owner, 2026-10-18 (AKS run of 2026-10-16, configuration #60,
+      `docs/reliability/inventory-kill-2026-10-16.md`):* five buyers competed for one seat while the
+      Inventory pod was force-deleted mid-hold; the result was one confirmed purchase, one reservation and,
+      per the independent Stripe audit, exactly one charge with none unmatched. The orders converged
+      **automatically** in 73 s with no incident (on 2026-10-12 they had needed an operator replay).
+      *Limit:* the load client's own verdict failed on its deadline, as recorded in the report.
 - [ ] Node or AZ-style disruption proves PDBs/topology spread protect the critical path.
 - [ ] Kafka disruption proves the async pipeline recovers without lost or duplicated business effects.
 - [ ] CloudNativePG primary failover records checkout impact and observed RTO.
