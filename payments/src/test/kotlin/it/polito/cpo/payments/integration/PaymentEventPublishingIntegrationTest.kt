@@ -96,8 +96,13 @@ class PaymentEventPublishingIntegrationTest {
         @Bean
         @Primary
         fun paymentProviderDouble(): IPaymentProvider = object : IPaymentProvider {
-            override suspend fun authorize(amount: BigDecimal, currency: String, paymentMethodToken: String, idempotencyKey: String) =
-                ProviderAuthorizationResult(success = true, providerReference = "it_ref_123")
+            override suspend fun authorize(
+                orderId: String,
+                amount: BigDecimal,
+                currency: String,
+                paymentMethodToken: String,
+                idempotencyKey: String,
+            ) = ProviderAuthorizationResult(success = true, providerReference = "it_ref_123")
 
             override suspend fun refund(providerReference: String, amount: BigDecimal?, idempotencyKey: String) =
                 ProviderRefundResult(success = true, refundReference = "it_refund_123")

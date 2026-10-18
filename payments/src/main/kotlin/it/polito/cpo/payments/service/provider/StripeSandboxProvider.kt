@@ -53,6 +53,7 @@ class StripeSandboxProvider(
     private val bulkhead = bulkheadRegistry.bulkhead("stripe")
 
     override suspend fun authorize(
+        orderId: String,
         amount: BigDecimal,
         currency: String,
         paymentMethodToken: String,
@@ -65,6 +66,7 @@ class StripeSandboxProvider(
         formData.add("amount", amount.multiply(BigDecimal(100)).toLong().toString())
         formData.add("currency", currency.lowercase())
         formData.add("source", paymentMethodToken)
+        formData.add("metadata[order_id]", orderId)
         // capture defaults to true: authorize and charge in one call
 
         return webClient.post()
