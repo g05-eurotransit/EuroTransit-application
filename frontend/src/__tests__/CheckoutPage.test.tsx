@@ -15,7 +15,7 @@ vi.mock("@stripe/stripe-js", () => ({ loadStripe: vi.fn(() => Promise.resolve(nu
 
 const createToken = vi.fn();
 vi.mock("@stripe/react-stripe-js", () => {
-  // Each card field reports itself complete as soon as it mounts, so "Pay now" can be enabled.
+  // Each card field reports itself complete as soon as it mounts, so the Pay button can be enabled.
   function Field({ onChange }: { onChange?: (e: { complete: boolean }) => void }) {
     useEffect(() => onChange?.({ complete: true }), []);
     return null;
@@ -107,9 +107,9 @@ describe("checkout payment step", () => {
     renderCheckout();
 
     expect(await screen.findByText(/Holding your seats/)).toBeInTheDocument();
-    expect(await screen.findByText("Seats held for", {}, { timeout: 3000 })).toBeInTheDocument();
+    expect(await screen.findByText(/held for you/, {}, { timeout: 3000 })).toBeInTheDocument();
     expect(screen.getByRole("timer").textContent).toMatch(/[89]:\d\d/);
-    expect(screen.getByRole("button", { name: "Pay now" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Pay / })).toBeInTheDocument();
   });
 
   it("goes back to the seat map when the seats were taken", async () => {
@@ -124,7 +124,7 @@ describe("checkout payment step", () => {
     vi.mocked(submitPayment).mockResolvedValue({ orderId: "o-1", status: "PAYMENT_PENDING" });
     renderCheckout();
 
-    const pay = await screen.findByRole("button", { name: "Pay now" });
+    const pay = await screen.findByRole("button", { name: /^Pay / });
     await waitFor(() => expect(pay).toBeEnabled());
     fireEvent.click(pay);
 
@@ -137,13 +137,13 @@ describe("checkout payment step", () => {
     vi.mocked(submitPayment).mockRejectedValue(new ApiError("conflict", 409, "m", "HOLD_EXPIRED"));
     renderCheckout();
 
-    const pay = await screen.findByRole("button", { name: "Pay now" });
+    const pay = await screen.findByRole("button", { name: /^Pay / });
     await waitFor(() => expect(pay).toBeEnabled());
     fireEvent.click(pay);
 
-    expect(await screen.findByText("Time's up")).toBeInTheDocument();
+    expect(await screen.findByText(/hold on your seats has expired/)).toBeInTheDocument();
     expect(cancelOrder).toHaveBeenCalledWith("o-1");
-    fireEvent.click(screen.getByRole("button", { name: "Choose seats now" }));
+    fireEvent.click(screen.getByRole("button", { name: /Back to seat selection/ }));
     expect(await seatsNotice()).toBeUndefined();
   });
 
@@ -152,7 +152,7 @@ describe("checkout payment step", () => {
     vi.mocked(submitPayment).mockRejectedValue(new ApiError("conflict", 409, "m", "PAYMENT_ALREADY_STARTED"));
     renderCheckout();
 
-    const pay = await screen.findByRole("button", { name: "Pay now" });
+    const pay = await screen.findByRole("button", { name: /^Pay / });
     await waitFor(() => expect(pay).toBeEnabled());
     fireEvent.click(pay);
 
@@ -169,7 +169,7 @@ describe("checkout payment step", () => {
   it("cancels the order when the customer goes back", async () => {
     vi.mocked(getOrder).mockResolvedValue(order("HELD_AWAITING_PAYMENT"));
     renderCheckout();
-    await screen.findByRole("button", { name: "Pay now" });
+    await screen.findByRole("button", { name: /^Pay / });
 
     fireEvent.click(screen.getByRole("button", { name: "Go back" }));
 
@@ -191,8 +191,8 @@ describe("checkout payment step", () => {
     renderCheckout();
 
     const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveTextContent("Time's up");
-    expect(dialog).toHaveTextContent(/taken back to seat selection in 5 seconds/);
+    expect(dialog).toHaveTextContent(/hold on your seats has expired/);
+    expect(dialog).toHaveTextContent(/back to the seat map in 5 seconds/);
     expect(cancelOrder).toHaveBeenCalledWith("o-1");
     expect(submitPayment).not.toHaveBeenCalled();
 
@@ -205,7 +205,7 @@ describe("checkout payment step", () => {
     vi.mocked(getOrder).mockResolvedValue(expiredHold());
     renderCheckout();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Choose seats now" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Back to seat selection/ }));
 
     expect(await screen.findByTestId("seats-state")).toBeInTheDocument();
   });
@@ -221,14 +221,14 @@ describe("checkout payment step", () => {
     ]);
     renderCheckout(null);
 
-    expect(await screen.findByRole("button", { name: "Pay now" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /^Pay / })).toBeInTheDocument();
     expect(await screen.findByText(/Torino/)).toBeInTheDocument();
   });
 
   // --- review findings ---------------------------------------------------------------------------
 
   async function clickPay() {
-    const pay = await screen.findByRole("button", { name: "Pay now" });
+    const pay = await screen.findByRole("button", { name: /^Pay / });
     await waitFor(() => expect(pay).toBeEnabled());
     fireEvent.click(pay);
   }
@@ -282,7 +282,7 @@ describe("checkout payment step", () => {
       .mockResolvedValue(order("PAYMENT_PENDING"));
     vi.mocked(cancelOrder).mockRejectedValue(new ApiError("conflict", 409, "m", "ORDER_NOT_CANCELLABLE"));
     renderCheckout();
-    await screen.findByRole("button", { name: "Pay now" });
+    await screen.findByRole("button", { name: /^Pay / });
 
     fireEvent.click(screen.getByRole("button", { name: "Go back" }));
 
@@ -306,7 +306,7 @@ describe("checkout payment step", () => {
 
     expect(await screen.findByText("order page o-1")).toBeInTheDocument();
     expect(screen.queryByTestId("seats-state")).not.toBeInTheDocument();
-    expect(screen.queryByText("Time's up")).not.toBeInTheDocument();
+    expect(screen.queryByText(/hold on your seats has expired/)).not.toBeInTheDocument();
   });
 
   it("keeps waiting for the hold through a network blip", async () => {
@@ -316,7 +316,7 @@ describe("checkout payment step", () => {
     renderCheckout();
 
     expect(await screen.findByText(/connection problem/i)).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "Pay now" }, { timeout: 3000 })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /^Pay / }, { timeout: 3000 })).toBeInTheDocument();
   });
 
   it("does not blame other buyers when the hold failed for another reason", async () => {
@@ -340,7 +340,7 @@ describe("checkout payment step", () => {
     vi.mocked(cancelOrder).mockRejectedValue(new ApiError("conflict", 409, "m", "ORDER_NOT_CANCELLABLE"));
     renderCheckout();
 
-    expect(await screen.findByText("Time's up")).toBeInTheDocument();
+    expect(await screen.findByText(/hold on your seats has expired/)).toBeInTheDocument();
     expect(screen.queryByText("order page o-1")).not.toBeInTheDocument();
   });
 
@@ -351,7 +351,7 @@ describe("checkout payment step", () => {
       () => new Promise((resolve) => { release = () => resolve(order("CANCELLED")); }),
     );
     renderCheckout();
-    await screen.findByRole("button", { name: "Pay now" });
+    await screen.findByRole("button", { name: /^Pay / });
 
     const back = screen.getByRole("button", { name: "Go back" });
     fireEvent.click(back);

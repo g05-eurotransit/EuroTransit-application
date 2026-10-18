@@ -118,7 +118,8 @@ describe("the operations console", () => {
 
       // Reloaded straight away, but the row stays locked: the pipeline is still working.
       await waitFor(() => expect(listOpenIncidents).toHaveBeenCalledTimes(2));
-      expect(await screen.findByRole("button", { name: "Working…" })).toBeDisabled();
+      expect(await screen.findByText("Waiting for the pipeline…")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Redrive" })).not.toBeInTheDocument();
 
       // Advancing the timers also fires the table's one-second clock: every tick is a state update.
       await act(async () => {
@@ -208,7 +209,7 @@ describe("the operations console", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByRole("button", { name: "Resolve" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Resolve…" })).toBeInTheDocument();
     expect(screen.queryByText("hold expired")).not.toBeInTheDocument();
   });
 
@@ -225,7 +226,7 @@ describe("the operations console", () => {
         </MemoryRouter>,
       );
 
-      await screen.findByRole("button", { name: "Settle" });
+      await screen.findByRole("button", { name: "Settle…" });
       await act(async () => {
         await vi.advanceTimersByTimeAsync(31_000);
       });
@@ -233,7 +234,7 @@ describe("the operations console", () => {
 
       // With the evidence dialog open the list must hold still: the row behind it is the one the
       // operator is answering about.
-      fireEvent.click(screen.getByRole("button", { name: "Settle" }));
+      fireEvent.click(screen.getByRole("button", { name: "Settle…" }));
       await screen.findByRole("dialog");
       await act(async () => {
         await vi.advanceTimersByTimeAsync(61_000);
@@ -260,7 +261,7 @@ describe("the operations console", () => {
       </MemoryRouter>,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Settle" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Settle…" }));
     // The row button and the modal's confirm share a label, so the modal is queried on its own.
     const dialog = within(await screen.findByRole("dialog"));
     expect(dialog.getByRole("button", { name: "Settle" })).toBeDisabled();
