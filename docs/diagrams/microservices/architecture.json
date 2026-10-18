@@ -9,9 +9,9 @@
     "quality_profile": "showcase",
     "visual_preset": "blueprint",
     "repository": {
-      "url": "git@github.com:g05-eurotransit/EuroTransit-application.git",
-      "revision": "e2a70d1d46070bd63e287353f3effac0f4d84976",
-      "link_mode": "local-only"
+      "url": "https://github.com/g05-eurotransit/EuroTransit-application",
+      "revision": "13626841f9cacd80f355d8b8f43cde266ea6fb71",
+      "link_mode": "web"
     }
   },
   "components": [
@@ -31,8 +31,8 @@
       "sources": [
         {
           "path": "frontend/src/api/client.ts",
-          "line": 66,
-          "end_line": 85
+          "line": 68,
+          "end_line": 87
         },
         {
           "path": "frontend/src/auth/oidcConfig.ts",
@@ -62,13 +62,13 @@
       "sources": [
         {
           "path": "docker-compose.yml",
-          "line": 313,
-          "end_line": 330
+          "line": 331,
+          "end_line": 348
         },
         {
           "path": "orders/src/main/resources/application.yaml",
-          "line": 24,
-          "end_line": 41
+          "line": 29,
+          "end_line": 46
         }
       ]
     },
@@ -89,17 +89,17 @@
         {
           "path": "docker-compose.yml",
           "line": 7,
-          "end_line": 46
+          "end_line": 51
         },
         {
           "path": "docker-compose.yml",
-          "line": 85,
-          "end_line": 91
+          "line": 90,
+          "end_line": 96
         },
         {
           "path": "docker-compose.yml",
-          "line": 146,
-          "end_line": 182
+          "line": 151,
+          "end_line": 187
         }
       ]
     },
@@ -145,18 +145,18 @@
       "sources": [
         {
           "path": "orders/src/main/kotlin/it/polito/cpo/service/CheckoutOrchestrator.kt",
-          "line": 117,
-          "end_line": 280
+          "line": 358,
+          "end_line": 418
         },
         {
           "path": "orders/src/main/kotlin/it/polito/cpo/service/CheckoutOrchestrator.kt",
-          "line": 392,
-          "end_line": 625
+          "line": 740,
+          "end_line": 818
         },
         {
-          "path": "orders/src/main/kotlin/it/polito/cpo/event/OrderPlacedEventListener.kt",
-          "line": 31,
-          "end_line": 58
+          "path": "orders/src/main/kotlin/it/polito/cpo/service/CheckoutOrchestrator.kt",
+          "line": 845,
+          "end_line": 954
         }
       ]
     },
@@ -166,7 +166,7 @@
       "label": "Inventory",
       "sublabel": "Seat consistency boundary",
       "pos": [
-        40,
+        620,
         430
       ],
       "size": [
@@ -176,8 +176,8 @@
       "sources": [
         {
           "path": "inventory/src/main/kotlin/it/polito/cpo/service/ReservationService.kt",
-          "line": 33,
-          "end_line": 95
+          "line": 34,
+          "end_line": 100
         },
         {
           "path": "inventory/src/main/resources/application.yaml",
@@ -208,7 +208,7 @@
         {
           "path": "payments/src/main/kotlin/it/polito/cpo/payments/service/provider/StripeSandboxProvider.kt",
           "line": 55,
-          "end_line": 77
+          "end_line": 79
         }
       ]
     },
@@ -229,7 +229,7 @@
         {
           "path": "payments/src/main/kotlin/it/polito/cpo/payments/service/provider/StripeSandboxProvider.kt",
           "line": 27,
-          "end_line": 77
+          "end_line": 79
         }
       ]
     },
@@ -249,13 +249,13 @@
       "sources": [
         {
           "path": "docker-compose.yml",
-          "line": 60,
-          "end_line": 78
+          "line": 65,
+          "end_line": 83
         },
         {
           "path": "docker-compose.yml",
-          "line": 100,
-          "end_line": 142
+          "line": 105,
+          "end_line": 147
         }
       ]
     },
@@ -276,7 +276,7 @@
         {
           "path": "scripts/init-local-debezium.sh",
           "line": 108,
-          "end_line": 133
+          "end_line": 138
         }
       ]
     },
@@ -296,8 +296,8 @@
       "sources": [
         {
           "path": "orders/src/main/kotlin/it/polito/cpo/event/OrderPlacedEventListener.kt",
-          "line": 31,
-          "end_line": 58
+          "line": 32,
+          "end_line": 60
         },
         {
           "path": "notifications/src/main/kotlin/it/polito/cpo/event/NotificationRequestedEventListener.kt",
@@ -471,8 +471,9 @@
       "dot": "cyan",
       "title": "Checkout authority",
       "items": [
-        "Orders accepts and persists before Kafka processing.",
-        "Inventory confirms the sale before Orders confirms checkout."
+        "Orders parks customer holds until payment submission.",
+        "Direct checkout carries a token and skips that waiting stage.",
+        "Inventory commits the sale before Orders confirms checkout."
       ]
     },
     {

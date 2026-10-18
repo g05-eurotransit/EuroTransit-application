@@ -1,0 +1,291 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "EuroTransit checkout: customer hold and direct flow",
+    "output": "docs/diagrams/checkout/checkout.html",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/g05-eurotransit/EuroTransit-application",
+      "revision": "13626841f9cacd80f355d8b8f43cde266ea6fb71",
+      "link_mode": "web"
+    },
+    "legend": {
+      "entries": {
+        "dashed": {
+          "label": "Outbox / Kafka"
+        },
+        "security": {
+          "label": "Owner command"
+        }
+      }
+    }
+  },
+  "participants": [
+    {
+      "id": "customer",
+      "type": "external",
+      "label": "Customer",
+      "sources": [
+        {
+          "path": "orders/src/main/kotlin/it/polito/cpo/controller/OrderController.kt",
+          "line": 1,
+          "end_line": 115
+        }
+      ]
+    },
+    {
+      "id": "orders",
+      "type": "backend",
+      "label": "Orders",
+      "sources": [
+        {
+          "path": "orders/src/main/kotlin/it/polito/cpo/service/CheckoutOrchestrator.kt",
+          "line": 358,
+          "end_line": 418
+        },
+        {
+          "path": "orders/src/main/kotlin/it/polito/cpo/service/CheckoutOrchestrator.kt",
+          "line": 740,
+          "end_line": 818
+        },
+        {
+          "path": "orders/src/main/kotlin/it/polito/cpo/service/CheckoutOrchestrator.kt",
+          "line": 845,
+          "end_line": 954
+        }
+      ]
+    },
+    {
+      "id": "inventory",
+      "type": "backend",
+      "label": "Inventory",
+      "sources": [
+        {
+          "path": "inventory/src/main/kotlin/it/polito/cpo/service/ReservationService.kt",
+          "line": 186,
+          "end_line": 253
+        },
+        {
+          "path": "inventory/src/main/kotlin/it/polito/cpo/service/ReservationService.kt",
+          "line": 269,
+          "end_line": 324
+        }
+      ]
+    },
+    {
+      "id": "payments",
+      "type": "backend",
+      "label": "Payments",
+      "sources": [
+        {
+          "path": "orders/src/main/kotlin/it/polito/cpo/service/CheckoutOrchestrator.kt",
+          "line": 845,
+          "end_line": 895
+        }
+      ]
+    },
+    {
+      "id": "kafka",
+      "type": "messagebus",
+      "label": "Outbox / Kafka",
+      "sources": [
+        {
+          "path": "orders/src/main/kotlin/it/polito/cpo/event/OrderPlacedEventListener.kt",
+          "line": 15,
+          "end_line": 58
+        },
+        {
+          "path": "orders/src/main/kotlin/it/polito/cpo/service/CheckoutOrchestrator.kt",
+          "line": 927,
+          "end_line": 954
+        }
+      ]
+    },
+    {
+      "id": "notifications",
+      "type": "backend",
+      "label": "Notifications",
+      "sources": [
+        {
+          "path": "notifications/src/main/kotlin/it/polito/cpo/event/NotificationRequestedEventListener.kt",
+          "line": 19,
+          "end_line": 78
+        }
+      ]
+    }
+  ],
+  "messages": [
+    {
+      "id": "step-1",
+      "from": "customer",
+      "to": "orders",
+      "y": 165,
+      "label": "Checkout",
+      "variant": "emphasis",
+      "note": "Owner JWT; token optional. Commit order + outbox atomically."
+    },
+    {
+      "id": "step-2",
+      "from": "orders",
+      "to": "customer",
+      "y": 235,
+      "label": "202 ACCEPTED",
+      "variant": "return"
+    },
+    {
+      "id": "step-3",
+      "from": "orders",
+      "to": "kafka",
+      "y": 275,
+      "label": "Outbox relay",
+      "variant": "dashed",
+      "note": "Debezium publishes committed order-placed."
+    },
+    {
+      "id": "step-4",
+      "from": "kafka",
+      "to": "orders",
+      "y": 345,
+      "label": "order-placed",
+      "variant": "dashed"
+    },
+    {
+      "id": "step-5",
+      "from": "orders",
+      "to": "inventory",
+      "y": 385,
+      "label": "Hold seats",
+      "variant": "emphasis"
+    },
+    {
+      "id": "step-6",
+      "from": "inventory",
+      "to": "orders",
+      "y": 425,
+      "label": "HELD + T1 deadline",
+      "variant": "return"
+    },
+    {
+      "id": "step-7",
+      "from": "customer",
+      "to": "orders",
+      "y": 505,
+      "label": "Submit payment [hold flow]",
+      "variant": "security",
+      "note": "HELD_AWAITING_PAYMENT parks. Owner command commits token + event."
+    },
+    {
+      "id": "step-8",
+      "from": "orders",
+      "to": "kafka",
+      "y": 585,
+      "label": "Payment outbox relay",
+      "variant": "dashed"
+    },
+    {
+      "id": "step-9",
+      "from": "kafka",
+      "to": "orders",
+      "y": 625,
+      "label": "order-placed",
+      "variant": "dashed"
+    },
+    {
+      "id": "step-10",
+      "from": "orders",
+      "to": "inventory",
+      "y": 665,
+      "label": "Open T2 [hold flow]",
+      "variant": "emphasis",
+      "note": "Direct checkout skips waiting, resubmission and T2."
+    },
+    {
+      "id": "step-11",
+      "from": "inventory",
+      "to": "orders",
+      "y": 745,
+      "label": "Deadline or refusal",
+      "variant": "return",
+      "note": "Inventory checks T1; Orders persists T2 before authorization."
+    },
+    {
+      "id": "step-12",
+      "from": "orders",
+      "to": "payments",
+      "y": 835,
+      "label": "Authorize original key",
+      "variant": "emphasis"
+    },
+    {
+      "id": "step-13",
+      "from": "payments",
+      "to": "orders",
+      "y": 875,
+      "label": "Authorized",
+      "variant": "return"
+    },
+    {
+      "id": "step-14",
+      "from": "orders",
+      "to": "inventory",
+      "y": 915,
+      "label": "Confirm sale",
+      "variant": "emphasis"
+    },
+    {
+      "id": "step-15",
+      "from": "inventory",
+      "to": "orders",
+      "y": 955,
+      "label": "CONFIRMED / SOLD",
+      "variant": "return"
+    },
+    {
+      "id": "step-16",
+      "from": "orders",
+      "to": "kafka",
+      "y": 1005,
+      "label": "Final outbox relay",
+      "variant": "dashed",
+      "note": "Orders commits confirmation + events after Inventory sale."
+    },
+    {
+      "id": "step-17",
+      "from": "kafka",
+      "to": "notifications",
+      "y": 1085,
+      "label": "notification-requested",
+      "variant": "dashed",
+      "note": "Consumption is independent of checkout confirmation."
+    },
+    {
+      "id": "step-18",
+      "from": "customer",
+      "to": "orders",
+      "y": 1165,
+      "label": "Read current order",
+      "variant": "default"
+    },
+    {
+      "id": "step-19",
+      "from": "orders",
+      "to": "customer",
+      "y": 1205,
+      "label": "CONFIRMED",
+      "variant": "return"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "amber",
+      "title": "Failure boundary",
+      "items": [
+        "Unknown outcomes retain the durable phase and original idempotency key.",
+        "Definitive confirmation refusal enters reversal before hold release.",
+        "This sequence shows successful sale; the lifecycle specification owns recovery."
+      ]
+    }
+  ]
+}

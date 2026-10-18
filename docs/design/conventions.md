@@ -1,66 +1,24 @@
-# Deployment and Secret Conventions
+# Runtime conventions
 
-This document outlines the standard deployment and configuration conventions for all EuroTransit Marketplace services. Adhering to these rules ensures that our GitOps delivery, observability, and local development environments remain consistent and secure.
+Services use environment-based configuration, framework health endpoints and immutable release identities. Deployment-specific names and secret provisioning belong to the [configuration reference](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/platform/deployment.md).
 
-## 1. Network and Ports
+## Configuration inputs
 
-- **Container Port:** Every Spring Boot service must expose its HTTP API on port `8080` internally.
-- **Routing:** No service exposes ports directly to the host network in production. All external traffic must route through the API Gateway (Traefik).
-- **Inter-Service Calls:** Services communicate with each other using internal Kubernetes DNS names (e.g., `http://inventory:8080`) or Docker Compose service names locally.
+| Concern | Inputs and behavior |
+| --- | --- |
+| HTTP | Cluster containers use port 8080; standalone defaults can differ. Internal calls use service DNS. Public routing belongs to Traefik. |
+| Profiles | Kubernetes sets `SPRING_PROFILES_ACTIVE=cluster`; inspect Compose for local overrides. The `dev` profile can select local substitutes and is not cluster proof. |
+| PostgreSQL | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` compose both R2DBC runtime and JDBC/Flyway startup URLs |
+| Kafka | `SPRING_KAFKA_BOOTSTRAP_SERVERS`, as read by each service's application configuration |
+| OIDC | `SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI` and `SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI` must describe the same issuer even when network URLs differ |
+| Orders service identity | `ORDERS_SERVICE_TOKEN_URI`, `ORDERS_SERVICE_CLIENT_ID`, `ORDERS_SERVICE_CLIENT_SECRET` |
 
-## 2. Health Probes (Liveness & Readiness)
+Each money-path service owns its schema migrations; applied Flyway versions are never edited or reordered. Demo seed belongs outside versioned schema migrations. A development volume containing retired seed migrations may need an explicitly destructive reset; never apply that procedure to shared business data.
 
-We use Spring Boot Actuator for health endpoints.
+## Health and lifecycle
 
-- **Paths:**
-  - Readiness: `/actuator/health/readiness`
-  - Liveness: `/actuator/health/liveness`
-- **Liveness Rule:** Liveness probes **must only** check if the JVM process is responsive. They **must not** check downstream dependencies (e.g., PostgreSQL or Kafka). Failing a liveness probe causes a pod restart, which can worsen an outage if the root cause is a database overload.
-- **Readiness Rule:** Readiness probes check if the service is fully booted and connected to its dependencies. Failing a readiness probe removes the pod from the routing pool without restarting it.
+[Observability conventions](observability-conventions.md#health-probes) own probe semantics. Readiness uses the configured availability state; do not assume it tests database or Kafka connectivity. A healthy process and a usable checkout path are separate observations. [Shutdown](../operations/orders-shutdown-and-replay.md) describes drain and replay; configuration owns Kubernetes grace/preStop budgets.
 
-## 3. Environment Variables Naming
+## Secrets and images
 
-Use the following standard environment variable names across all services to maintain consistency:
-
-### Spring Profiles
-- `SPRING_PROFILES_ACTIVE`: Use `local` for Docker Compose, `cluster` for Kubernetes.
-
-### Database (PostgreSQL)
-
-Provide the connection as discrete parts, not as a full URL. A service that persists data needs
-two connection strings for the same database — the reactive runtime URL (R2DBC) and, where Flyway
-manages the schema, a migration URL (JDBC) — and both are composed of these shared parts. The
-parts also map 1:1 to the keys of the CloudNativePG-generated app secret (`host`, `port`, `dbname`,
-`username`, `password`), so they can be wired straight from `secretKeyRef`.
-
-- `DB_HOST`: database host (in cluster, the CloudNativePG read-write service, e.g. `orders-db-rw`)
-- `DB_PORT`: database port (default `5432`)
-- `DB_NAME`: logical database name
-- `DB_USER`: database username
-- `DB_PASSWORD`: database password
-
-The application composes the URLs from these parts, for example:
-- R2DBC (runtime): `r2dbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_NAME}`
-- Flyway (startup, JDBC): `jdbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_NAME}`
-
-### Kafka
-- `KAFKA_BOOTSTRAP_SERVERS`
-
-### Security (OIDC)
-- `SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI`
-
-## 4. Secret Management
-
-Secrets must **never** be committed in plaintext to any repository (application or configuration).
-
-- **Local Development:** Use standard environment variables in `docker-compose.yml` or a `.env` file that is ignored by Git.
-- **Cluster Deployment:** We use GitOps via ArgoCD. All secrets must be encrypted using **SealedSecrets**.
-  - Service Owners (e.g., Payments Slice Owner) are responsible for defining the required secret keys.
-  - Operations will encrypt the raw values into a `SealedSecret` manifest, which is safe to commit to the configuration repository.
-  - The Payments adapter (Stripe/PayPal Sandbox) must read its API keys via environment variables mounted from these secrets.
-
-## 5. Container Images
-
-- **Immutability:** Docker images published to our registry must be tagged with a unique identifier (e.g., the Git commit SHA).
-- **No `latest`:** Do not use the `latest` tag in Kubernetes deployment manifests. This breaks ArgoCD's ability to track actual changes and rollback reliably.
-- **Base Images:** Use minimal, secure base images to reduce attack surface and download size.
+Use managed environment injection for provider and database credentials. Cluster ciphertext and controller-key lifecycle belong to [security and secrets](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/platform/security-and-secrets.md). Local development values must not be presented as production credentials. Publish immutable image identities; a mutable local alias does not supply release provenance.

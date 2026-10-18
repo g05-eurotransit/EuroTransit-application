@@ -1,10 +1,9 @@
 # Report: Orders Shutdown During HTTP and Kafka Work (compose)
 
-- **Date:** 2026-10-08, times UTC
 - **Issue:** #124, local half (criteria 2 and 3; criterion 1 is [orders-shutdown-and-replay.md](../orders-shutdown-and-replay.md))
 - **Environment:** docker compose, `dev` at `1ab5035` plus this branch; Orders image rebuilt before
   the drills (`docker compose build orders`)
-- **Stop command:** `docker compose stop -t 35 orders` — SIGTERM, then SIGKILL after 35s, the budget
+- **Stop command:** `docker compose stop -t 35 orders` : SIGTERM, then SIGKILL after 35s, the budget
   Kubernetes leaves after the 10s preStop sleep (45s grace)
 - **Tooling:** `scripts/local-checkout-load.sh` (load), `scripts/local-readiness-probe.sh` (readiness
   from inside the network), `scripts/local-consistency-check.sh SINCE` (cross-database verdict)
@@ -21,7 +20,7 @@
 No accepted order was lost, no reservation or payment was duplicated, and nothing was dead-lettered
 by a stop. Every stop ended on SIGTERM (exit 143), none on SIGKILL.
 
-## S1 — HTTP drain
+## S1 : HTTP drain
 
 ```
 scripts/local-readiness-probe.sh > probe.log &
@@ -35,19 +34,19 @@ sleep 4; docker compose stop -t 35 orders
 | 13:43:24.181 | SIGTERM |
 | 13:43:24 | readiness `OUT_OF_SERVICE` (503) |
 | 13:43:24.512 | dead-letter and refund consumers stopped |
-| 13:43:25.283 | last `202` — served on Traefik's open connection while the web server was still up |
+| 13:43:25.283 | last `202` : served on Traefik's open connection while the web server was still up |
 | 13:43:25.434 | `order-placed` consumer finished its record, stopped |
-| 13:43:25.439–.447 | "Commencing graceful shutdown" → "Graceful shutdown complete" |
-| 13:43:25.566–27.837 | `502` from Traefik while the process exits |
+| 13:43:25.439 to .447 | "Commencing graceful shutdown" → "Graceful shutdown complete" |
+| 13:43:25.566 to 27.837 | `502` from Traefik while the process exits |
 | 13:43:27.988 | container stopped |
 | 13:43:38 → | `405`: the route is gone and the request reaches the frontend's catch-all (compose artefact; Kubernetes answers 503 for a service with no endpoints) |
 
 Every `202` has its order (17/17, compared by id), and all 17 converged to CONFIRMED after restart.
 
-## S2 — a backlog in the consumer's hands
+## S2 : a backlog in the consumer's hands
 
 The outbox connector was paused, 40 checkouts accepted (40 rows waiting), the connector resumed, and
-Orders stopped two seconds later — so the consumer held a polled batch at SIGTERM.
+Orders stopped two seconds later : so the consumer held a polled batch at SIGTERM.
 
 ```
 curl -X PUT localhost:8083/connectors/orders-outbox-connector/pause
@@ -57,21 +56,21 @@ docker compose stop -t 35 orders
 ```
 
 **Before the fix** (spring-kafka default, `stopImmediate=false`): SIGTERM at 13:45:14.182; the
-`order-placed` consumer kept going through the rest of its batch — six more checkouts, the last
-confirmed at 13:45:19.529, 5.3s after SIGTERM — and only then stopped. Harmless here at ~0.8s per
+`order-placed` consumer kept going through the rest of its batch : six more checkouts, the last
+confirmed at 13:45:19.529, 5.3s after SIGTERM : and only then stopped. Harmless here at ~0.8s per
 checkout, but the time is per record times batch size: with a slow dependency that still answers
-(5–20s per checkout) a batch outlasts the 25s shutdown phase and the 35s grace, and the pod is killed
+(5 to 20s per checkout) a batch outlasts the 25s shutdown phase and the 35s grace, and the pod is killed
 instead of stopped.
 
 **Fix:** `spring.kafka.listener.immediate-stop: true`, also read by the dead-letter factory
 (`e4e8022`).
 
-**After the fix**, same drill (dates from 2026-12-10): SIGTERM at 13:57:15.612; the checkout in
+**After the fix**, same drill (fresh travel-date fixtures): SIGTERM at 13:57:15.612; the checkout in
 progress was confirmed at 13:57:16.332 and the consumer stopped at once. 38 orders were still
 `ACCEPTED` with their records uncommitted; after restart all 38 were processed, 40/40 CONFIRMED, no
 order processed twice.
 
-## S3 — stopping while a dependency is down
+## S3 : stopping while a dependency is down
 
 ```
 docker pause eurotransit-payments
@@ -90,7 +89,7 @@ reconciliation record.
 ## Conclusions
 
 - Readiness refuses at once, the record in progress finishes, and everything not started is
-  redelivered and resumed from durable state — drain, not cancellation, and no duplicate effect.
+  redelivered and resumed from durable state : drain, not cancellation, and no duplicate effect.
 - One defect found and fixed: a stop used to process the whole polled batch (S2). Fixed by
   `immediate-stop`, proven by repeating the drill.
 - Not provable on compose and left to the cluster half (#124, configuration #46): routing during the

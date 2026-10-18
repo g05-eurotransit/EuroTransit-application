@@ -1,16 +1,16 @@
-# PostgreSQL recovery regression — 2026-10-17
+# PostgreSQL recovery regression
 
 ## Diagnosis and scope
 
 Baseline: application `origin/dev` at `e008cba`, including merged recovery-policy PR #139 and
-expired-`PAYMENT_PENDING` safety PR #141. The October 12 AKS experiment ran older Orders `bad4c04`.
+expired-`PAYMENT_PENDING` safety PR #141. The earlier AKS experiment ran older Orders `bad4c04`.
 Its accepted order `63afb29d-70e4-4ed1-bf85-b35d33b5278e` remained `RESERVING` with a
 `DELIVERY_EXHAUSTED` incident until the original event was replayed. PostgreSQL promotion took about
 3.5 seconds and the order GET recovered in about 5.1 seconds. Retained artifacts and the recorded
 run observation establish the state, the `dependency_error` classification and replay convergence;
 they do not retain the application's concrete nested exception. Consequently an exact historical exception classification cannot be
 reconstructed. Operational evidence belongs to the configuration repository:
-[October 12 report](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/392690487ca60f25532f6823506cc95f77f3f38e/docs/reliability/postgres-failover-2026-10-12.md).
+[original failover report](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/392690487ca60f25532f6823506cc95f77f3f38e/docs/reliability/postgres-failover-2026-10-12.md).
 
 The current policy already gives recoverable database failures six redeliveries with exponential
 backoff and jitter, instead of the former three fixed-delay retries. `waitingCanFix` includes Spring
@@ -34,8 +34,8 @@ confirmation/notification outbox event pair. Inventory and Payments remain in-pr
 Inventory now remembers the original hold and expiry by idempotency key. Their downstream database
 and provider uniqueness guarantees are outside this test.
 
-The integration suite uses its existing accelerated dependency waits (50–200 ms, ten retries).
-`CheckoutRetryBudgetTest` separately pins the production defaults: six waits, approximately 48–67
+The integration suite uses its existing accelerated dependency waits (50 to 200 ms, ten retries).
+`CheckoutRetryBudgetTest` separately pins the production defaults: six waits, approximately 48 to 67
 seconds total. An injected SQLSTATE is a statement failure; it does not reproduce a broken physical
 connection, stale pool entries, DNS/service routing, Debezium reconnect or CloudNativePG promotion.
 

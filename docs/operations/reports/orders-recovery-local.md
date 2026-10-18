@@ -1,7 +1,6 @@
 # Report: Orders Recovery From a Payments Outage (compose)
 
-- **Date:** 2026-10-13, times UTC
-- **Why:** on AKS (configuration #55, 2026-10-12) a 45-second Payments slowdown, an Inventory restart
+- **Why:** on AKS (configuration #55) a 45-second Payments slowdown, an Inventory restart
   and a PostgreSQL failover each left accepted orders waiting on an operator. The retry budget was
   three attempts a second apart, and with the breaker open every attempt fails at once.
 - **Change under test:** a delivery that failed because a dependency was not available gets six
@@ -20,12 +19,12 @@
 
 | Drill | Payments paused | Orders | Incidents | Operator | Consistency check |
 | --- | --- | --- | --- | --- | --- |
-| R1, outage shorter than the budget | 45 s (15:11:59.9–15:12:45.1) | 10/10 CONFIRMED | none | none | OK |
-| R2, outage longer than the budget | 240 s (15:13:05.8–15:17:05.9) | 5/5 CONFIRMED | 2, both redriven | 2 redrives | OK |
+| R1, outage shorter than the budget | 45 s (15:11:59.9 to 15:12:45.1) | 10/10 CONFIRMED | none | none | OK |
+| R2, outage longer than the budget | 240 s (15:13:05.8 to 15:17:05.9) | 5/5 CONFIRMED | 2, both redriven | 2 redrives | OK |
 
 On AKS the same 45-second slowdown ended with every affected order waiting for a manual replay.
 
-## R1 — 45 seconds: converges without an operator
+## R1 : 45 seconds: converges without an operator
 
 Ten checkouts from 15:11:58. The first order took its hold at 15:11:59 and met the paused Payments.
 After a first attempt of 11.4 s (three timeouts), its record was redelivered five times on the
@@ -34,7 +33,7 @@ next redelivery, at 15:12:51.7, confirmed the order, 7 s later. The nine orders 
 single consumer thread were confirmed in the next 8.5 seconds; all ten by 15:13:00.7. Five of the six
 redeliveries were used.
 
-## R2 — 4 minutes: the incident reaches the operator, the redrive finishes it
+## R2 : 4 minutes: the incident reaches the operator, the redrive finishes it
 
 Five checkouts from 15:13:04. The first was confirmed before the pause. The next ones, in turn:
 
@@ -42,11 +41,11 @@ Five checkouts from 15:13:04. The first was confirmed before the pause. The next
 | --- | --- | --- | --- | --- |
 | `d7d73aff` | 15:13:05.5 | 15:14:48.3 (+1 min 43 s) | 15:23:05.5 | redriven 15:17:36.9, CONFIRMED 15:17:39.1 |
 | `d6caf52b` | 15:14:48.3 | 15:16:19.3 (+1 min 31 s) | 15:24:48.3 | redriven 15:17:36.9, CONFIRMED 15:17:38.8 |
-| `63b03052` | 15:16:19.3 | — | — | converged by itself 15:17:35.7, 30 s after Payments returned |
-| `a6d87d8f` | queued | — | — | CONFIRMED 15:17:36.5 |
+| `63b03052` | 15:16:19.3 | : | : | converged by itself 15:17:35.7, 30 s after Payments returned |
+| `a6d87d8f` | queued | : | : | CONFIRMED 15:17:36.5 |
 
 `GET /api/orders/reconciliation` listed the two incidents first, nearest hold deadline first, and the
-2026-09-16 incident (past its hold, see below) after them. Each redrive answered `202`, the pipeline
+older incident (past its hold, see below) after them. Each redrive answered `202`, the pipeline
 resumed from `PAYMENT_PENDING` under the same Payments idempotency key, and both incidents closed by
 themselves when the orders were confirmed. Nothing was replayed by hand and no database row was touched.
 
@@ -64,20 +63,17 @@ to the short budget:
 
 - **Head-of-line blocking was real.** `compose-up` with a fresh Kafka makes Debezium snapshot the
   outbox and republish every historical event (a local artefact). One of them was an order of
-  2026-09-16 still in `PAYMENT_PENDING`, whose single-use payment token Stripe now refuses
+  the older fixture still in `PAYMENT_PENDING`, whose single-use payment token Stripe refused
   (`400 token_already_used`). Payments reports that refusal as `PROVIDER_UNAVAILABLE`, so Orders
   classified it as a dependency failure and retried it for the whole budget: every checkout on the pod
-  waited 2 min 18 s behind it (13:59:10–14:01:28). With the old budget that would have been about 3 s.
+  waited 2 min 18 s behind it (13:59:10 to 14:01:28). With the old budget that would have been about 3 s.
 - **The incident came late.** With an outage longer than the budget, the incident opened 3 min 06 s
   after the hold, leaving the operator under two minutes once the five-minute alert had fired.
 
-## Conclusions
+## Interpretation and current follow-up
 
-- An outage of up to about a minute no longer needs an operator: the AKS Payments case converges by
-  itself, with no duplicate authorization and nothing for an operator to do.
+- This local 45-second pause converged automatically. It does not prove every one-minute outage or an AKS deployment outcome.
 - A longer outage ends where it did before, with a `DELIVERY_EXHAUSTED` incident, but the operator can
   now find it through the API and finish it through the redrive, with an audit line, within the seat
   hold.
-- Follow-ups, outside Orders: Payments should report a definitive provider refusal as a refusal, not as
-  `PROVIDER_UNAVAILABLE`; `ReconciliationRecordOpen` should fire sooner than five minutes. In Orders, a
-  `PAYMENT_PENDING` order past its hold has no exit (the 2026-09-16 order above is still open).
+- The run exposed provider-refusal classification, delayed alerting and an expired-payment recovery gap. Current Orders implements abandonment and evidence-backed settlement; see the [recovery runbook](../orders-recovery-runbook.md). The older fixture was not re-audited by this documentation revision.

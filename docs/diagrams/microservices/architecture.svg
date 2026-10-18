@@ -492,13 +492,13 @@ svg[data-preset="editorial"] { --flow-halo-peak: 0.07; --flow-glow-peak: 0.28; -
 @keyframes archify-relay-comet-8 { 
   0% { stroke-dashoffset: calc(var(--flow-len, 0px) + var(--flow-shift, 0px)); opacity: 0; animation-timing-function: cubic-bezier(0.45, 0.05, 0.35, 1); }
   1.649% { opacity: var(--flow-peak, 0.9); }
-  20.608% { stroke-dashoffset: var(--flow-shift, 0px); opacity: var(--flow-peak, 0.9); }
-  22.807%, 100% { stroke-dashoffset: var(--flow-shift, 0px); opacity: 0; }
+  18.694% { stroke-dashoffset: var(--flow-shift, 0px); opacity: var(--flow-peak, 0.9); }
+  20.892%, 100% { stroke-dashoffset: var(--flow-shift, 0px); opacity: 0; }
 }
 @keyframes archify-relay-wake-8 { 
   0% { stroke-dashoffset: var(--flow-len, 0px); opacity: var(--flow-peak, 0.3); animation-timing-function: cubic-bezier(0.45, 0.05, 0.35, 1); }
-  20.608% { stroke-dashoffset: 0px; opacity: var(--flow-peak, 0.3); }
-  32.974%, 100% { stroke-dashoffset: 0px; opacity: 0; }
+  18.694% { stroke-dashoffset: 0px; opacity: var(--flow-peak, 0.3); }
+  31.059%, 100% { stroke-dashoffset: 0px; opacity: 0; }
 }
 @keyframes archify-relay-comet-9 { 
   0% { stroke-dashoffset: calc(var(--flow-len, 0px) + var(--flow-shift, 0px)); opacity: 0; animation-timing-function: cubic-bezier(0.45, 0.05, 0.35, 1); }
@@ -525,13 +525,13 @@ svg[data-preset="editorial"] { --flow-halo-peak: 0.07; --flow-glow-peak: 0.28; -
 @keyframes archify-relay-comet-11 { 
   0% { stroke-dashoffset: calc(var(--flow-len, 0px) + var(--flow-shift, 0px)); opacity: 0; animation-timing-function: cubic-bezier(0.45, 0.05, 0.35, 1); }
   1.649% { opacity: var(--flow-peak, 0.9); }
-  14.719% { stroke-dashoffset: var(--flow-shift, 0px); opacity: var(--flow-peak, 0.9); }
-  16.917%, 100% { stroke-dashoffset: var(--flow-shift, 0px); opacity: 0; }
+  13.787% { stroke-dashoffset: var(--flow-shift, 0px); opacity: var(--flow-peak, 0.9); }
+  15.986%, 100% { stroke-dashoffset: var(--flow-shift, 0px); opacity: 0; }
 }
 @keyframes archify-relay-wake-11 { 
   0% { stroke-dashoffset: var(--flow-len, 0px); opacity: var(--flow-peak, 0.3); animation-timing-function: cubic-bezier(0.45, 0.05, 0.35, 1); }
-  14.719% { stroke-dashoffset: 0px; opacity: var(--flow-peak, 0.3); }
-  27.084%, 100% { stroke-dashoffset: 0px; opacity: 0; }
+  13.787% { stroke-dashoffset: 0px; opacity: var(--flow-peak, 0.3); }
+  26.152%, 100% { stroke-dashoffset: 0px; opacity: 0; }
 }
 @keyframes archify-relay-comet-12 { 
   0% { stroke-dashoffset: calc(var(--flow-len, 0px) + var(--flow-shift, 0px)); opacity: 0; animation-timing-function: cubic-bezier(0.45, 0.05, 0.35, 1); }
@@ -643,9 +643,9 @@ svg[data-preset="editorial"] { --flow-halo-peak: 0.07; --flow-glow-peak: 0.28; -
 }
 @keyframes archify-relay-node-7 { 
   0%, 100% { filter: var(--ambient-node-base-filter, none); }
-  40.628% { filter: var(--ambient-node-base-filter, none); }
-  42.277%, 46.398% { filter: var(--ambient-node-base-filter,) drop-shadow(0 0 10px var(--arrow-emphasis)); }
-  57.115% { filter: var(--ambient-node-base-filter, none); }
+  38.714% { filter: var(--ambient-node-base-filter, none); }
+  40.362%, 44.484% { filter: var(--ambient-node-base-filter,) drop-shadow(0 0 10px var(--arrow-emphasis)); }
+  55.2% { filter: var(--ambient-node-base-filter, none); }
 }
 @keyframes archify-relay-node-8 { 
   0%, 100% { filter: var(--ambient-node-base-filter, none); }
@@ -667,9 +667,9 @@ svg[data-preset="editorial"] { --flow-halo-peak: 0.07; --flow-glow-peak: 0.28; -
 }
 @keyframes archify-relay-node-11 { 
   0%, 100% { filter: var(--ambient-node-base-filter, none); }
-  48.479% { filter: var(--ambient-node-base-filter, none); }
-  50.128%, 54.249% { filter: var(--ambient-node-base-filter,) drop-shadow(0 0 10px var(--arrow-emphasis)); }
-  64.966% { filter: var(--ambient-node-base-filter, none); }
+  46.565% { filter: var(--ambient-node-base-filter, none); }
+  48.213%, 52.335% { filter: var(--ambient-node-base-filter,) drop-shadow(0 0 10px var(--arrow-emphasis)); }
+  63.051% { filter: var(--ambient-node-base-filter, none); }
 }
 svg[data-node-ui] [data-node-id] &gt; rect:not(.c-mask) { stroke-width: 1.25px; }
 :is([data-theme="dark"] svg[data-node-ui], svg[data-node-ui][data-theme="dark"]) [data-node-id] &gt; rect:not(.c-mask).c-frontend { fill: color-mix(in srgb, var(--frontend-stroke) 13%, var(--mask)); stroke: color-mix(in srgb, var(--frontend-stroke) 72%, var(--mask)); }
@@ -766,20 +766,20 @@ rect.c-bg-rect { fill: var(--bg); }
           <path data-edge-from="gateway" data-edge-to="notifications" data-edge-label="History / SSE" data-edge-key="4" data-edge-id="gateway-to-notifications" data-composition-points="490,67;910,67" data-composition-crossover="halo" data-composition-independent="true" d="M 490 67 L 910 67" class="a-default" data-animate="edge" style="--step: 4;" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         </g>
         <g data-graph-role="automatic-crossover" style="--step:5">
-          <path data-graph-role="automatic-crossover-underlay" d="M 330 346 L 192 346 Q 184 346 184 338 L 184 318" fill="none" stroke="var(--mask)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
-          <path data-edge-from="orders" data-edge-to="identity" data-edge-label="Service token" data-edge-key="5" data-edge-id="orders-to-identity" data-composition-points="330,346;184,346;184,318" data-composition-crossover="halo" data-composition-independent="true" d="M 330 346 L 192 346 Q 184 346 184 338 L 184 318" class="a-security" data-animate="edge" style="--step: 5;" stroke-width="1.5" marker-end="url(#arrowhead-security)"/>
+          <path data-graph-role="automatic-crossover-underlay" d="M 346 330 L 346 310 Q 346 302 338 302 L 200 302" fill="none" stroke="var(--mask)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
+          <path data-edge-from="orders" data-edge-to="identity" data-edge-label="Service token" data-edge-key="5" data-edge-id="orders-to-identity" data-composition-points="346,330;346,302;200,302" data-composition-crossover="halo" data-composition-independent="true" d="M 346 330 L 346 310 Q 346 302 338 302 L 200 302" class="a-security" data-animate="edge" style="--step: 5;" stroke-width="1.5" marker-end="url(#arrowhead-security)"/>
         </g>
         <g data-graph-role="automatic-crossover" style="--step:6">
           <path data-graph-role="automatic-crossover-underlay" d="M 474 330 L 474 250 Q 474 242 482 242 L 620 242" fill="none" stroke="var(--mask)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
           <path data-edge-from="orders" data-edge-to="catalog" data-edge-label="Resolve offer" data-edge-key="6" data-edge-id="orders-to-catalog" data-composition-points="474,330;474,242;620,242" data-composition-crossover="halo" data-composition-independent="true" d="M 474 330 L 474 250 Q 474 242 482 242 L 620 242" class="a-default" data-animate="edge" style="--step: 6;" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         </g>
         <g data-graph-role="automatic-crossover" style="--step:7">
-          <path data-graph-role="automatic-crossover-underlay" d="M 330 382 L 192 382 Q 184 382 184 390 L 184 430" fill="none" stroke="var(--mask)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
-          <path data-edge-from="orders" data-edge-to="inventory" data-edge-label="Hold / confirm" data-edge-key="7" data-edge-id="orders-to-inventory" data-composition-points="330,382;184,382;184,430" data-composition-crossover="halo" data-composition-independent="true" d="M 330 382 L 192 382 Q 184 382 184 390 L 184 430" class="a-default" data-animate="edge" style="--step: 7;" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+          <path data-graph-role="automatic-crossover-underlay" d="M 474 398 L 474 438 Q 474 446 482 446 L 620 446" fill="none" stroke="var(--mask)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
+          <path data-edge-from="orders" data-edge-to="inventory" data-edge-label="Hold / confirm" data-edge-key="7" data-edge-id="orders-to-inventory" data-composition-points="474,398;474,446;620,446" data-composition-crossover="halo" data-composition-independent="true" d="M 474 398 L 474 438 Q 474 446 482 446 L 620 446" class="a-default" data-animate="edge" style="--step: 7;" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         </g>
         <g data-graph-role="automatic-crossover" style="--step:8">
-          <path data-graph-role="automatic-crossover-underlay" d="M 389 398 L 389 501 Q 389 509 381 509 L 128 509 Q 120 509 120 517 L 120 620" fill="none" stroke="var(--mask)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
-          <path data-edge-from="orders" data-edge-to="payments" data-edge-label="Authorize / reverse" data-edge-key="8" data-edge-id="orders-to-payments" data-composition-points="389,398;389,509;120,509;120,620" data-composition-crossover="halo" data-composition-independent="true" d="M 389 398 L 389 501 Q 389 509 381 509 L 128 509 Q 120 509 120 517 L 120 620" class="a-default" data-animate="edge" style="--step: 8;" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+          <path data-graph-role="automatic-crossover-underlay" d="M 330 382 L 192 382 Q 184 382 184 390 L 184 620" fill="none" stroke="var(--mask)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
+          <path data-edge-from="orders" data-edge-to="payments" data-edge-label="Authorize / reverse" data-edge-key="8" data-edge-id="orders-to-payments" data-composition-points="330,382;184,382;184,620" data-composition-crossover="halo" data-composition-independent="true" d="M 330 382 L 192 382 Q 184 382 184 390 L 184 620" class="a-default" data-animate="edge" style="--step: 8;" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         </g>
         <g data-graph-role="automatic-crossover" style="--step:9">
           <path data-graph-role="automatic-crossover-underlay" d="M 120 688 L 120 820" fill="none" stroke="var(--mask)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
@@ -790,16 +790,16 @@ rect.c-bg-rect { fill: var(--bg); }
           <path data-edge-from="orders" data-edge-to="database" data-edge-label="Orders SQL" data-edge-key="10" data-edge-id="orders-to-database" data-composition-points="403,398;403,620" data-composition-crossover="halo" data-composition-independent="true" d="M 403 398 L 403 620" class="a-default" data-animate="edge" style="--step: 10;" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         </g>
         <g data-graph-role="automatic-crossover" style="--step:11">
-          <path data-graph-role="automatic-crossover-underlay" d="M 200 471 L 298 471 Q 306 471 306 479 L 306 639 Q 306 647 314 647 L 330 647" fill="none" stroke="var(--mask)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
-          <path data-edge-from="inventory" data-edge-to="database" data-edge-label="Inventory SQL" data-edge-key="11" data-edge-id="inventory-to-database" data-composition-points="200,471;306,471;306,647;330,647" data-composition-crossover="halo" data-composition-independent="true" d="M 200 471 L 298 471 Q 306 471 306 479 L 306 639 Q 306 647 314 647 L 330 647" class="a-default" data-animate="edge" style="--step: 11;" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+          <path data-graph-role="automatic-crossover-underlay" d="M 620 482 L 482 482 Q 474 482 474 490 L 474 620" fill="none" stroke="var(--mask)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
+          <path data-edge-from="inventory" data-edge-to="database" data-edge-label="Inventory SQL" data-edge-key="11" data-edge-id="inventory-to-database" data-composition-points="620,482;474,482;474,620" data-composition-crossover="halo" data-composition-independent="true" d="M 620 482 L 482 482 Q 474 482 474 490 L 474 620" class="a-default" data-animate="edge" style="--step: 11;" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         </g>
         <g data-graph-role="automatic-crossover" style="--step:12">
           <path data-graph-role="automatic-crossover-underlay" d="M 200 661 L 330 661" fill="none" stroke="var(--mask)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
           <path data-edge-from="payments" data-edge-to="database" data-edge-label="Payments SQL" data-edge-key="12" data-edge-id="payments-to-database" data-composition-points="200,661;330,661" data-composition-crossover="halo" data-composition-independent="true" d="M 200 661 L 330 661" class="a-default" data-animate="edge" style="--step: 12;" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         </g>
         <g data-graph-role="automatic-crossover" style="--step:13">
-          <path data-graph-role="automatic-crossover-underlay" d="M 490 654 L 620 654" fill="none" stroke="var(--mask)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
-          <path data-edge-from="database" data-edge-to="relay" data-edge-label="Outbox WAL" data-edge-key="13" data-edge-id="database-to-relay" data-composition-points="490,654;620,654" data-composition-crossover="halo" data-composition-independent="true" d="M 490 654 L 620 654" class="a-dashed" data-animate="edge" style="--step: 12;" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+          <path data-graph-role="automatic-crossover-underlay" d="M 490 661 L 620 661" fill="none" stroke="var(--mask)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
+          <path data-edge-from="database" data-edge-to="relay" data-edge-label="Outbox WAL" data-edge-key="13" data-edge-id="database-to-relay" data-composition-points="490,661;620,661" data-composition-crossover="halo" data-composition-independent="true" d="M 490 661 L 620 661" class="a-dashed" data-animate="edge" style="--step: 12;" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
         </g>
         <g data-graph-role="automatic-crossover" style="--step:14">
           <path data-graph-role="automatic-crossover-underlay" d="M 780 654 L 910 654" fill="none" stroke="var(--mask)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
@@ -880,13 +880,13 @@ rect.c-bg-rect { fill: var(--bg); }
 
         <g id="node-inventory" data-node-id="inventory" data-node-label="Inventory" tabindex="0" role="button" aria-label="Focus Inventory, Seat consistency boundary, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="Seat consistency boundary" data-node-context="Architecture component">
           <title>Inventory · Seat consistency boundary · Architecture component</title>
-          <rect x="40" y="430" width="160" height="68" rx="8" class="c-mask"/>
-          <rect x="40" y="430" width="160" height="68" rx="8" class="c-backend" data-animate="node" style="--step: 8; --flow-node-name: archify-relay-node-6;" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(46 436) scale(0.6875)">
+          <rect x="620" y="430" width="160" height="68" rx="8" class="c-mask"/>
+          <rect x="620" y="430" width="160" height="68" rx="8" class="c-backend" data-animate="node" style="--step: 8; --flow-node-name: archify-relay-node-6;" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(626 436) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <text data-node-label="" x="120" y="462" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Inventory</text>
-        <text x="120" y="478" class="t-muted" font-size="9" text-anchor="middle">Seat consistency boundary</text>
+          <text data-node-label="" x="700" y="462" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Inventory</text>
+        <text x="700" y="478" class="t-muted" font-size="9" text-anchor="middle">Seat consistency boundary</text>
         </g>
 
         <g id="node-payments" data-node-id="payments" data-node-label="Payments" tabindex="0" role="button" aria-label="Focus Payments, Provider adapter + records, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="Provider adapter + records" data-node-context="Architecture component">
@@ -982,40 +982,40 @@ rect.c-bg-rect { fill: var(--bg); }
           <text x="700" y="57" class="t-edge-default" font-size="8" text-anchor="middle">History / SSE</text>
         </g>
         <g data-edge-from="orders" data-edge-to="identity" data-edge-label="Service token" data-edge-key="5" data-edge-id="orders-to-identity">
-          <rect x="220.8" y="326" width="72.4" height="14" rx="3" class="c-mask"/>
-          <text x="257" y="336" class="t-edge-security" font-size="8" text-anchor="middle">Service token</text>
+          <rect x="236.8" y="282" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="273" y="292" class="t-edge-security" font-size="8" text-anchor="middle">Service token</text>
         </g>
         <g data-edge-from="orders" data-edge-to="catalog" data-edge-label="Resolve offer" data-edge-key="6" data-edge-id="orders-to-catalog">
           <rect x="510.8" y="222" width="72.4" height="14" rx="3" class="c-mask"/>
           <text x="547" y="232" class="t-edge-default" font-size="8" text-anchor="middle">Resolve offer</text>
         </g>
         <g data-edge-from="orders" data-edge-to="inventory" data-edge-label="Hold / confirm" data-edge-key="7" data-edge-id="orders-to-inventory">
-          <rect x="145.4" y="386" width="77.2" height="14" rx="3" class="c-mask"/>
-          <text x="184" y="396" class="t-edge-default" font-size="8" text-anchor="middle">Hold / confirm</text>
+          <rect x="508.4" y="426" width="77.2" height="14" rx="3" class="c-mask"/>
+          <text x="547" y="436" class="t-edge-default" font-size="8" text-anchor="middle">Hold / confirm</text>
         </g>
         <g data-edge-from="orders" data-edge-to="payments" data-edge-label="Authorize / reverse" data-edge-key="8" data-edge-id="orders-to-payments">
-          <rect x="281.79999999999995" y="446.5" width="101.2" height="14" rx="3" class="c-mask"/>
-          <text x="332.4" y="456.5" class="t-edge-default" font-size="8" text-anchor="middle">Authorize / reverse</text>
+          <rect x="133.4" y="481" width="101.2" height="14" rx="3" class="c-mask"/>
+          <text x="184" y="491" class="t-edge-default" font-size="8" text-anchor="middle">Authorize / reverse</text>
         </g>
         <g data-edge-from="payments" data-edge-to="stripe" data-edge-label="HTTPS charges" data-edge-key="9" data-edge-id="payments-to-stripe">
           <rect x="41.599999999999994" y="747" width="72.4" height="14" rx="3" class="c-mask"/>
           <text x="77.8" y="757" class="t-edge-default" font-size="8" text-anchor="middle">HTTPS charges</text>
         </g>
         <g data-edge-from="orders" data-edge-to="database" data-edge-label="Orders SQL" data-edge-key="10" data-edge-id="orders-to-database">
-          <rect x="409" y="502" width="58" height="14" rx="3" class="c-mask"/>
-          <text x="438" y="512" class="t-edge-default" font-size="8" text-anchor="middle">Orders SQL</text>
+          <rect x="339" y="502" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="368" y="512" class="t-edge-default" font-size="8" text-anchor="middle">Orders SQL</text>
         </g>
         <g data-edge-from="inventory" data-edge-to="database" data-edge-label="Inventory SQL" data-edge-key="11" data-edge-id="inventory-to-database">
-          <rect x="269.8" y="539" width="72.4" height="14" rx="3" class="c-mask"/>
-          <text x="306" y="549" class="t-edge-default" font-size="8" text-anchor="middle">Inventory SQL</text>
+          <rect x="437.8" y="531" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="474" y="541" class="t-edge-default" font-size="8" text-anchor="middle">Inventory SQL</text>
         </g>
         <g data-edge-from="payments" data-edge-to="database" data-edge-label="Payments SQL" data-edge-key="12" data-edge-id="payments-to-database">
           <rect x="231.2" y="641" width="67.6" height="14" rx="3" class="c-mask"/>
           <text x="265" y="651" class="t-edge-default" font-size="8" text-anchor="middle">Payments SQL</text>
         </g>
         <g data-edge-from="database" data-edge-to="relay" data-edge-label="Outbox WAL" data-edge-key="13" data-edge-id="database-to-relay">
-          <rect x="526" y="634" width="58" height="14" rx="3" class="c-mask"/>
-          <text x="555" y="644" class="t-edge-dashed" font-size="8" text-anchor="middle">Outbox WAL</text>
+          <rect x="526" y="641" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="555" y="651" class="t-edge-dashed" font-size="8" text-anchor="middle">Outbox WAL</text>
         </g>
         <g data-edge-from="relay" data-edge-to="kafka" data-edge-label="Publish events" data-edge-key="14" data-edge-id="relay-to-kafka">
           <rect x="806.4" y="634" width="77.2" height="14" rx="3" class="c-mask"/>

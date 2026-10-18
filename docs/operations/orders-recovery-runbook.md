@@ -1,80 +1,10 @@
-# Orders: Recovery Policy and Operator Runbook
+# Orders recovery
 
-What Orders recovers by itself after a failure, what it hands to an operator, how fast each must
-happen, and the steps an operator follows. The policy is read from the code; the numbers are measured
-on the compose stack ([recovery report](reports/2026-10-orders-recovery-local.md)). It answers the
-open gate of the AKS experiments of 2026-10-12 (configuration #55): there, a Payments slowdown, an
-Inventory restart and a PostgreSQL failover each left accepted orders waiting on an operator, and they
-were recovered by replaying raw events rather than through this runbook.
+Recover unresolved orders through the operations API after the dependency has healed. Preserve unknown payment outcomes until retry or provider evidence establishes what happened. Use [checkout lifecycle](../design/reservation-confirmation.md#retry-and-reconciliation) for the retry policy and [SLO definitions](slo-observability.md#recovery-objectives) for proposed recovery objectives.
 
-A [PostgreSQL statement-failure regression](reports/2026-10-postgres-recovery-regression.md) checks
-automatic Kafka recovery after the hold under the current policy. A fresh AKS failover acceptance
-test is still required to validate physical connection and CloudNativePG recovery.
+## Prerequisites
 
-## The policy
-
-**An unknown outcome is never turned into a decision.** A checkout or refund whose dependency does not
-answer keeps its durable phase (`RESERVING`, `PAYMENT_PENDING`, `CONFIRMING_INVENTORY`,
-`COMPENSATING`, `REFUNDING`) and is retried; it is never failed or compensated on a guess
-(`reservation-confirmation.md`, invariant 8). What changes with the length of the failure is only *who*
-finishes it.
-
-| Failure | Who finishes it | How |
-| --- | --- | --- |
-| Pod stopped, rebalance, Kafka unreachable | Orders, by itself | The record is redelivered and resumes from the durable phase ([shutdown and replay](orders-shutdown-and-replay.md)). |
-| A dependency not available for up to about a minute: timeout, open breaker, full bulkhead, connection refused, a 5xx, a 408 or 429, Keycloak or the database unreachable | Orders, by itself | Six redeliveries, with waits of about 1, 2, 4, 8, 16 and 30 s each moved at random by up to a quarter: 48 to 67 s of waits, 1.5 to about 2.3 minutes in real time (`checkoutErrorHandler` in `KafkaConfiguration.kt`). |
-| Anything else, or a dependency outage longer than that | An operator | After three attempts a second apart (or the budget above), the delivery is dead-lettered and becomes a `DELIVERY_EXHAUSTED` incident; the operator redrives it once the cause is gone. A 4xx with no business code, a service credential Keycloak refuses or a statement the database rejects is a deployment or data bug: it is labelled `dependency_error` but gets the short budget, since waiting cannot fix it. |
-| A definitive refusal Orders cannot settle on its own | An operator | `PAYMENT_REVERSAL_FAILURE`, `SEAT_RETURN_FAILURE` (redrive) or `INVARIANT_VIOLATION` (investigate, then resolve). |
-
-**Why the automatic budget is about a minute and not longer.** Each listener has one consumer thread
-per pod, so while one record is being retried every checkout behind it on that pod waits too. And an
-outage that outlasts the budget reaches the operator later, closer to the deadline below. A minute
-covers the outages measured so far: a PostgreSQL failover in seconds, a 45-second Payments slowdown
-with a retry to spare. The waits are jittered so that the orders of one outage, on every pod, do not
-hit the recovering dependency at the same instants.
-
-**While a record waits, its consumer does not poll.** A rebalance during an outage (a rollout, a pod
-restart) therefore waits for this member to come back from its current wait, up to 30 s plus the
-attempt, and every pod's checkouts pause with it.
-
-**The cost to know about.** The retry budget follows the failure *class*, and the class follows what
-the dependency reports. Payments currently reports **every** provider exception as
-`PROVIDER_UNAVAILABLE`, including a definitive refusal such as Stripe's `token_already_used`. Such an
-order (Payments answers `503`) is retried for the whole budget although it can never succeed, and the
-checkouts behind it on that pod wait. On compose this held a pod's checkouts for over two minutes (with the two-minute budget
-first tried). Recognise it by a stalled pipeline while Payments is healthy; the order then reaches the
-operator as a `DELIVERY_EXHAUSTED` incident like any other.
-
-## Recovery objectives
-
-Proposed by the Orders owner; the team confirms them in [slo-observability.md](slo-observability.md).
-
-- **Automatic convergence.** An accepted order caught by a dependency outage of up to about a minute
-  reaches a terminal state without an operator, within about a minute of the dependency returning.
-- **Operator response.** A `DELIVERY_EXHAUSTED` incident on a `PAYMENT_PENDING` order is redriven
-  **before the order's `reservationExpiresAt`**. That is the hard limit: past it the redrive refuses
-  (`RESERVATION_HOLD_EXPIRED`), because authorizing a payment Inventory can no longer confirm buys only
-  a charge and its reversal. The sale is then lost and the order can only be abandoned (step 5b). Other
-  phases stay redrivable after the hold expires (they re-take the hold, or let Inventory refuse and the
-  pipeline compensate), but should be handled within the same window.
-- **Which deadline `reservationExpiresAt` is (ADR-016).** For a direct-flow order it is ten minutes
-  from the hold. For a customer-hold order it is **T2**, ten minutes from the payment, once the payment
-  window opened — the column is overwritten when it opens, so the list and the redrive check need
-  nothing new. If the window never opened (Inventory did not answer at the payment), it is still
-  **T1**, the customer's deadline, which may already be close. Such an order stays redrivable even
-  past it: Payments has never been called for it, so the redrive asks Inventory for the window, gets
-  the expired hold refused, and the order fails with no money moved — no abandonment needed.
-
-The time line for an outage longer than the budget, measured on compose, leaves the operator a few
-minutes, not ten. "Payment starts" is the hold in the direct flow and the payment submission in the
-customer-hold flow, where T2 restarts the clock:
-
-| | Time from the payment start |
-| --- | --- |
-| Payment starts, then fails | 0 |
-| Retry budget exhausted, incident opened | 1.5 to about 2.3 min |
-| `ReconciliationRecordOpen` fires (`for: 5m`) | 6.5 to about 7.3 min |
-| Hold expires; a `PAYMENT_PENDING` redrive is refused from here | 10 min |
+Use an operations credential for the intended environment. Check dependency health, current order state and the incident kind before acting. `reservationExpiresAt` is the operative Inventory deadline: T1 before a customer payment window opens, T2 afterward, or the original direct-checkout hold. A browser or JVM clock does not override the database decision.
 
 ## Runbook
 
@@ -93,12 +23,12 @@ now), `failureClass`, `attemptCount`, `createdAt` and the order's `reservationEx
 
 The same list is in the UI at `/operations`, where an account with the `operations` realm role lands
 after sign-in: one row per incident, a live countdown on each seat hold, and a single button per row
-offering only the step-4 action for that `kind` and `orderStatus` — including the evidence reference
+offering only the step-4 action for that `kind` and `orderStatus` : including the evidence reference
 that `settle` and `resolve` require. The `curl` calls below remain the fallback when the SPA is not
 reachable, and are what the operator commands do underneath.
 
 Orders in `HELD_AWAITING_PAYMENT` are never incidents on their own: a customer is reading the checkout
-page. Only `orders_holds_overdue` above zero for more than a minute means something is wrong — the T1
+page. Only `orders_holds_overdue` above zero for more than a minute means something is wrong : the T1
 expiry job is not running or cannot reach the database. The seat is not at risk (Inventory's sweep
 frees it at the same deadline); the order status is just stale until the job runs.
 
@@ -112,7 +42,7 @@ Redriving into the same outage only exhausts the budget again.
 | --- | --- | --- |
 | `DELIVERY_EXHAUSTED` | `ACCEPTED`, `RESERVING`, `CONFIRMING_INVENTORY`, `COMPENSATING` | Redrive. |
 | `DELIVERY_EXHAUSTED` | `PAYMENT_PENDING` | Redrive **before `reservationExpiresAt`**. After it the redrive is refused: abandon instead (step 5b). Exception: a customer-hold order whose payment window never opened is still accepted, and fails unpaid (ADR-016). |
-| `DELIVERY_EXHAUSTED` | `HELD_AWAITING_PAYMENT` | Nothing to do: a later delivery took the hold and the order is waiting for the customer (ADR-016). A redrive is harmless and useless — the order parks again. The incident closes when the order ends: paid and terminal, cancelled, or cancelled by the T1 expiry job at most ten minutes later. |
+| `DELIVERY_EXHAUSTED` | `HELD_AWAITING_PAYMENT` | Nothing to do: a later delivery took the hold and the order is waiting for the customer (ADR-016). A redrive is harmless and useless : the order parks again. The incident closes when the order ends: paid and terminal, cancelled, or cancelled by the T1 expiry job at most ten minutes later. |
 | `DELIVERY_EXHAUSTED`, `PAYMENT_REVERSAL_FAILURE`, `SEAT_RETURN_FAILURE` | `REFUNDING` | Redrive: it resumes the refund pipeline. |
 | `PAYMENT_REVERSAL_FAILURE` | `COMPENSATING` | Redrive: it retries the reversal. |
 | `PAYMENT_OUTCOME_UNKNOWN` | `COMPENSATING` | Check the provider, then settle (step 5c). |

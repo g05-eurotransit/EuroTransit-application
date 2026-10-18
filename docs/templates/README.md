@@ -18,7 +18,7 @@ Write in English. Give the answer first, followed by the information needed to u
 | What work remains and in what order? | [Work plan](work-plan-template.md) |
 | What may an actor do, and how is it checked? | [Governance](governance-template.md) |
 
-Completed examples: [microservice architecture](../design/architecture.md) and [Kind / AKS deployment](../../../EuroTransit-configuration/docs/platform/deployment.md).
+Completed examples: [microservice architecture](../design/architecture.md) and [Kind / AKS deployment](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/platform/deployment.md).
 
 ## Structure and prose
 
@@ -42,7 +42,7 @@ Omit editorial dates, decision timelines, session handovers, and historical test
 | Cluster procedures and operational verification | Configuration runbooks/reports | Link to the procedure or bounded result |
 | Local application procedures and code regression tests | Application operations/tests | Keep local results distinct from cluster proof |
 
-This directory is the shared template collection for both sibling repositories. Do not copy it into configuration. Use repository-relative Markdown links, including sibling-repository paths; a code-formatted path alone is not a navigable reference.
+This directory is the shared template collection for both sibling repositories. Do not copy it into configuration. Use repository-relative Markdown links within a repository and full GitHub links across repositories. A code-formatted path alone is not a navigable reference.
 
 A specification defines a rule once. An overview describes responsibilities and links to that rule. A decision explains the choice without restating the contract. A plan records remaining work. A readiness document maps acceptance criteria to evidence; it does not redefine their thresholds.
 
