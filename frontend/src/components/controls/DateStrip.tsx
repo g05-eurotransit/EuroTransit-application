@@ -1,26 +1,5 @@
-import { useState } from "react";
-
-const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const MONTH_LABELS = [
-  "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
-  "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
-];
-
-function isSameDay(a: Date, b: Date): boolean {
-  return a.toDateString() === b.toDateString();
-}
-
-function isPast(date: Date): boolean {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  return date < today;
-}
-
-function addDays(date: Date, days: number): Date {
-  const d = new Date(date);
-  d.setDate(d.getDate() + days);
-  return d;
-}
+import { useEffect, useState } from "react";
+import { DAY_LABELS, DAY_MS, MONTHS_SHORT, addDays, isPast, isSameDay, startOfDay } from "../../utils/dates";
 
 interface DateStripProps {
   selected: Date;
@@ -28,10 +7,21 @@ interface DateStripProps {
   visibleDays?: number;
 }
 
+/** A week of departure days, moved a day at a time — the long jump belongs to the calendar. */
 export function DateStrip({ selected, onSelect, visibleDays = 7 }: DateStripProps) {
   const [windowStart, setWindowStart] = useState(() =>
     addDays(selected, -Math.floor(visibleDays / 2)),
   );
+
+  // Only a date chosen elsewhere moves the window: the arrows must not snap back to the selection.
+  useEffect(() => {
+    const offset = Math.round(
+      (startOfDay(selected).getTime() - startOfDay(windowStart).getTime()) / DAY_MS,
+    );
+    if (offset < 0 || offset >= visibleDays) {
+      setWindowStart(addDays(selected, -Math.floor(visibleDays / 2)));
+    }
+  }, [selected, visibleDays, windowStart]);
 
   const days = Array.from({ length: visibleDays }, (_, i) => addDays(windowStart, i));
 
@@ -61,16 +51,24 @@ export function DateStrip({ selected, onSelect, visibleDays = 7 }: DateStripProp
               disabled={disabled}
               onClick={() => onSelect(day)}
               className={`btn border-0 rounded-3 px-3 py-2 text-center flex-shrink-0 ${
-                active ? "bg-primary text-white" : disabled ? "bg-white text-body-tertiary" : "bg-white text-body"
+                active
+                  ? "bg-primary text-white"
+                  : disabled
+                    ? "bg-white text-body-tertiary"
+                    : "bg-white text-body"
               }`}
               style={{ minWidth: 76 }}
             >
-              <div className={`small text-uppercase ${active ? "text-white-50" : "text-secondary-emphasis"}`}>
+              <div
+                className={`small text-uppercase ${active ? "text-white-50" : "text-secondary-emphasis"}`}
+              >
                 {DAY_LABELS[day.getDay()]}
               </div>
               <div className="fs-4 fw-bold lh-sm">{day.getDate()}</div>
-              <div className={`small text-uppercase ${active ? "text-white-50" : "text-secondary-emphasis"}`}>
-                {MONTH_LABELS[day.getMonth()]}
+              <div
+                className={`small text-uppercase ${active ? "text-white-50" : "text-secondary-emphasis"}`}
+              >
+                {MONTHS_SHORT[day.getMonth()]}
               </div>
             </button>
           );
