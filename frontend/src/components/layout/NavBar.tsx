@@ -2,6 +2,7 @@ import { Link, NavLink } from "react-router-dom";
 import { useAuth } from "react-oidc-context";
 import { Navbar, Nav, Container, Button, Dropdown, Badge } from "react-bootstrap";
 import { useSilentSignInChecked } from "../../auth/SilentSignIn";
+import { useIsOperator } from "../../auth/roles";
 import {
   useNotifications,
   formatTimestamp,
@@ -23,19 +24,25 @@ function initials(nameOrEmail: string): string {
 export function NavBar() {
   const auth = useAuth();
   const silentChecked = useSilentSignInChecked();
+  const isOperator = useIsOperator();
   const { items, unseenCount, markAllSeen } = useNotifications();
   const displayName = auth.user?.profile.preferred_username ?? auth.user?.profile.email ?? "";
 
   return (
     <Navbar bg="white" expand="md" className="border-bottom sticky-top shadow-sm">
-      <Container fluid className="py-2 px-4">
-        <Navbar.Brand as={Link} to="/" className="fw-bold text-primary fs-3">
+      <Container fluid="xxl" className="py-2 px-4">
+        <Navbar.Brand as={Link} to={isOperator ? "/operations" : "/"} className="fw-bold text-primary fs-3">
           EuroTransit
         </Navbar.Brand>
         <Navbar.Toggle aria-controls="main-nav" />
         <Navbar.Collapse id="main-nav">
           <Nav className="me-auto">
-            {auth.isAuthenticated && (
+            {isOperator && (
+              <span className="nav-link ms-4 text-primary" style={{ fontWeight: 700, letterSpacing: "0.02em", fontSize: "1.05rem" }}>
+                Operations
+              </span>
+            )}
+            {auth.isAuthenticated && !isOperator && (
               <NavLink
                 to="/orders"
                 className={({ isActive }) =>
@@ -48,7 +55,7 @@ export function NavBar() {
             )}
           </Nav>
           <Nav className="align-items-center gap-3">
-            {auth.isAuthenticated && (
+            {auth.isAuthenticated && !isOperator && (
               <Dropdown
                 align="end"
                 onToggle={(isOpen) => {

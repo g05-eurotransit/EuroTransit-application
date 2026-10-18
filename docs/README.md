@@ -13,7 +13,7 @@ This folder contains the assignment requirements and the project-owned documents
 - [design/api-design.md](design/api-design.md): service boundaries, APIs, events, and sync/async communication shape.
 - [design/reservation-confirmation.md](design/reservation-confirmation.md): Inventory confirmation protocol, HTTP/Kafka responsibilities, concurrency rules, retries, and compensation decisions.
 - [design/observability-conventions.md](design/observability-conventions.md): correlation id, structured logging, RED metrics, tracing, and probe conventions every service adopts.
-- [design/frontend.md](design/frontend.md): React customer SPA — OIDC/PKCE auth, in-memory token, SSE, and the frontend-security decisions (lecture 07b).
+- [design/frontend.md](design/frontend.md): React SPA — OIDC/PKCE auth, in-memory token, SSE, the role-based shells with the operator reconciliation console and the post-sale refund, and the frontend-security decisions (lecture 07b).
 
 ## Operations and Proof
 

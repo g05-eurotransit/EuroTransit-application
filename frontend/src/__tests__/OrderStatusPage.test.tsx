@@ -10,6 +10,8 @@ vi.mock("../api/orders", async (importOriginal) => ({
   getOrder: vi.fn(),
 }));
 vi.mock("../api/catalog", () => ({ getRoute: vi.fn() }));
+// The page asks for the operations role to pick its back link; no OIDC provider is mounted here.
+vi.mock("../auth/roles", () => ({ useIsOperator: () => false }));
 
 function order(status: OrderView["status"]): OrderView {
   return {

@@ -1,12 +1,32 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
-import { Alert, Badge, Button, Card } from "react-bootstrap";
-import { getOrder, isTerminal, type OrderStatus, type OrderView } from "../api/orders";
+import { Link, useLocation, useParams } from "react-router-dom";
+import { Alert, Badge, Button, Card, Modal, Spinner } from "react-bootstrap";
+import {
+  cutoffLabel,
+  getOrder,
+  isTerminal,
+  refundOrder,
+  refundWindow,
+  type OrderStatus,
+  type OrderView,
+} from "../api/orders";
+import { newId } from "../api/client";
+import { useIsOperator } from "../auth/roles";
 import { getRoute, type Route } from "../api/catalog";
 import { ApiError } from "../api/client";
 import { OrderStepper, stepIndexOf } from "../components/OrderStepper";
 
 const CURRENCY = "EUR";
+
+/** A refund deadline: the day and the time, in the reader's own zone. */
+function formatDeadline(ms: number): string {
+  return new Date(ms).toLocaleString(undefined, {
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 function formatDate(iso: string): string {
   return new Date(`${iso}T00:00:00`).toLocaleDateString(undefined, {
@@ -16,6 +36,14 @@ function formatDate(iso: string): string {
     year: "numeric",
   });
 }
+
+/** The refund refusals (api-design.md), in a customer's words. */
+const REFUND_REFUSAL_COPY: Record<string, string> = {
+  ORDER_NOT_CONFIRMED: "This order can no longer be refunded.",
+  ORDER_HAS_NO_OFFER: "This order was sold without refund terms.",
+  OFFER_NOT_REFUNDABLE: "This fare is non-refundable.",
+  REFUND_CUTOFF_PASSED: "The refund window for this ticket has closed.",
+};
 
 const FAILURE_COPY: Record<string, string> = {
   SEATS_UNAVAILABLE: "The seats you selected were taken by another customer first. Choose different seats and try again.",
@@ -32,7 +60,9 @@ const NO_PROGRESS_MS = 10 * 60_000;
 type PollStopReason = "deadline-passed" | "no-progress";
 
 function pollStopReason(order: OrderView, watchingSinceMs: number): PollStopReason | null {
-  if (order.reservationExpiresAt) {
+  // A refund has no seat hold left to run out — the sale completed — so only the no-progress rule
+  // applies to it; without this exception every REFUNDING order stops on its stale hold deadline.
+  if (order.reservationExpiresAt && order.status !== "REFUNDING") {
     const deadline = new Date(order.reservationExpiresAt).getTime();
     return Date.now() > deadline + HOLD_GRACE_MS ? "deadline-passed" : null;
   }
@@ -60,17 +90,33 @@ const STATUS_VARIANT: Record<OrderStatus, string> = {
   PAYMENT_PENDING: "warning",
   CONFIRMING_INVENTORY: "warning",
   COMPENSATING: "accent",
+  REFUNDING: "accent",
+  REFUNDED: "secondary",
 };
 
 
+/** What the tickets list sets when it links here, so this page can tell the two arrivals apart. */
+interface OrderStatusNavState {
+  fromTickets?: boolean;
+}
+
 export function OrderStatusPage() {
   const { orderId } = useParams<{ orderId: string }>();
+  // The refund button belongs to the ticket detail, not to the receipt the checkout lands on; the
+  // terms stay visible on both. History state, so a reload keeps it and the URL stays shareable.
+  const fromTickets = (useLocation().state as OrderStatusNavState | null)?.fromTickets === true;
   const [order, setOrder] = useState<OrderView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [route, setRoute] = useState<Route | null>(null);
   const [lastKnownStepIndex, setLastKnownStepIndex] = useState(0);
   const [stopReason, setStopReason] = useState<PollStopReason | null>(null);
   const [rechecking, setRechecking] = useState(false);
+  const [confirmingRefund, setConfirmingRefund] = useState(false);
+  const [refunding, setRefunding] = useState(false);
+  const [refundError, setRefundError] = useState<string | null>(null);
+  // Bumped once a refund is accepted, to restart the poll loop that stopped at CONFIRMED.
+  const [refundNonce, setRefundNonce] = useState(0);
+  const isOperator = useIsOperator();
 
   useEffect(() => {
     if (!orderId) return;
@@ -111,7 +157,7 @@ export function OrderStatusPage() {
       stop = true;
       ac.abort();
     };
-  }, [orderId]);
+  }, [orderId, refundNonce]);
 
   useEffect(() => {
     if (!order) return;
@@ -141,8 +187,37 @@ export function OrderStatusPage() {
     }
   }
 
+  async function requestRefund() {
+    if (!orderId || refunding) return;
+    setRefunding(true);
+    setRefundError(null);
+    try {
+      // A fresh key per attempt: an accepted key replays its original answer, which is what keeps a
+      // double click from asking for a second refund.
+      const refunded = await refundOrder(orderId, newId(), newId());
+      setOrder(refunded);
+      setConfirmingRefund(false);
+      setRefundNonce((n) => n + 1);
+    } catch (e) {
+      const text =
+        e instanceof ApiError
+          ? (e.code && REFUND_REFUSAL_COPY[e.code]) ?? e.message
+          : e instanceof Error
+            ? e.message
+            : "The refund could not be requested.";
+      setRefundError(text);
+      setConfirmingRefund(false);
+    } finally {
+      setRefunding(false);
+    }
+  }
+
   if (error) return <p className="text-danger">{error}</p>;
   if (!order) return <p>Loading order…</p>;
+
+  // Evaluated once per render: the page stops polling at CONFIRMED, so a window that lapses while
+  // this sits open still shows its button. The server refuses it, and the refusal is displayed.
+  const refund = refundWindow(order, Date.now());
 
   return (
     <div className="mx-auto" style={{ maxWidth: 640 }}>
@@ -178,7 +253,7 @@ export function OrderStatusPage() {
             <div>
               <div className="text-uppercase text-secondary-emphasis small fw-semibold">Total</div>
               <div className="fs-5 fw-bold text-dark">
-                {order.totalAmount.toFixed(2)} {CURRENCY}
+                {order.totalAmount.toFixed(2)} {order.currency ?? CURRENCY}
               </div>
             </div>
           </div>
@@ -221,8 +296,44 @@ export function OrderStatusPage() {
             </Alert>
           )}
           {order.status === "CONFIRMED" && (
-            <Alert variant="success" className="mb-0 fw-semibold">
-              Your booking is confirmed.
+            <>
+              <Alert variant="success" className="mb-3 fw-semibold">
+                Your booking is confirmed.
+              </Alert>
+              {fromTickets && refundError && (
+                <Alert variant="danger" className="mb-3" role="alert">
+                  {refundError}
+                </Alert>
+              )}
+              <div className="d-flex flex-wrap justify-content-between align-items-center gap-2">
+                <div className="text-secondary-emphasis small">
+                  {refund.open
+                    ? `Refundable until ${cutoffLabel(order.refundCutoffMinutesBeforeDeparture)} — ${formatDeadline(refund.deadline)}.`
+                    : refund.reason}
+                </div>
+                {fromTickets && refund.open && (
+                  <Button
+                    variant="outline-danger"
+                    className="fw-semibold"
+                    onClick={() => setConfirmingRefund(true)}
+                  >
+                    Refund this ticket
+                  </Button>
+                )}
+              </div>
+            </>
+          )}
+          {order.status === "REFUNDING" && (
+            <Alert variant="accent" className="d-flex align-items-center gap-2 mb-0">
+              <i className="bi bi-arrow-counterclockwise fs-5" aria-hidden="true" />
+              <div>
+                Refund in progress: the money is returned first, then the seat goes back on sale.
+              </div>
+            </Alert>
+          )}
+          {order.status === "REFUNDED" && (
+            <Alert variant="secondary" className="mb-0 fw-semibold">
+              This ticket was refunded.
             </Alert>
           )}
           {order.status === "FAILED" && (
@@ -238,11 +349,43 @@ export function OrderStatusPage() {
         </Card.Body>
       </Card>
       <div className="text-center mt-3">
-        <Link to="/" className="btn btn-primary fw-semibold">
+        <Link to={isOperator ? "/operations" : "/"} className="btn btn-primary fw-semibold">
           <i className="bi bi-arrow-left me-2" aria-hidden="true" />
-          Back to routes
+          {isOperator ? "Back to reconciliation" : "Back to routes"}
         </Link>
       </div>
+
+      <Modal show={confirmingRefund} onHide={() => setConfirmingRefund(false)} centered>
+        <Modal.Header closeButton>
+          <Modal.Title className="fs-5">Refund this ticket?</Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          <p className="mb-0">
+            {order.totalAmount.toFixed(2)} {order.currency ?? CURRENCY} goes back to the original
+            payment method. The seat returns to sale and the ticket is void.
+          </p>
+        </Modal.Body>
+        <Modal.Footer>
+          <Button variant="outline-secondary" onClick={() => setConfirmingRefund(false)}>
+            Keep the ticket
+          </Button>
+          <Button
+            variant="danger"
+            className="fw-semibold"
+            disabled={refunding}
+            onClick={() => void requestRefund()}
+          >
+            {refunding ? (
+              <>
+                <Spinner animation="border" size="sm" />
+                <span className="visually-hidden">Working…</span>
+              </>
+            ) : (
+              "Refund"
+            )}
+          </Button>
+        </Modal.Footer>
+      </Modal>
     </div>
   );
 }
