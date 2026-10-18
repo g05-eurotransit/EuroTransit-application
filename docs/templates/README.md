@@ -70,13 +70,13 @@ Link sanitized, portable evidence when available. Mark restricted evidence as un
 
 Use Archify for architecture, deployment, checkout sequences, state transitions, or GitOps flows when the picture answers a concrete technical question. A short checklist or a simple instruction does not need a diagram.
 
-Version editable JSON, its standalone HTML and canonical SVG export together under `docs/diagrams/<topic>/`, using stable names. Embed the SVG as a relative Markdown image so GitHub displays it, and link its hosted interactive viewer. The Pages workflow uploads committed HTML; removing viewers requires a separate replacement generation/publishing pipeline.
+Version editable JSON, its standalone HTML and canonical SVG export together under `docs/diagrams/<topic>/`, using stable names. Embed the SVG as a relative Markdown image wrapped in a link to its hosted interactive viewer: `[![Diagram description](../diagrams/topic/diagram.svg)](https://g05-eurotransit.github.io/REPOSITORY/topic/diagram.html)`. Clicking the preview must open the interactive diagram. The Pages workflow uploads committed HTML; removing viewers requires a separate replacement generation/publishing pipeline.
 
 Keep the abstraction level clear, protocols labelled and configured topology separate from live evidence. Verify relationships at the recorded Git revision. An architecture view is not a second contract. When a diagram changes, run Archify `finalize` with repository evidence and browser checks, export its canonical SVG and inspect light/dark captures at documentation width. Keep delivery sidecars, receipts and captures outside published documentation. Update JSON, HTML and SVG together.
 
 ## Publishing interactive diagrams
 
-Each repository publishes its HTML diagrams from `main` with `.github/workflows/diagrams-pages.yml`. The workflow stages only HTML files from `docs/diagrams/`, preserving their relative paths, and serves `docs/diagrams/index.html` at the site root. Add new diagrams to that index and link their hosted viewer beside the SVG preview.
+Each repository publishes its HTML diagrams from `main` with `.github/workflows/diagrams-pages.yml`. The workflow stages only HTML files from `docs/diagrams/`, preserving their relative paths, and serves `docs/diagrams/index.html` at the site root. Add new diagrams to that index and make each SVG preview link directly to its hosted viewer.
 
 The sites are [application diagrams](https://g05-eurotransit.github.io/EuroTransit-application/) and [configuration diagrams](https://g05-eurotransit.github.io/EuroTransit-configuration/).
 

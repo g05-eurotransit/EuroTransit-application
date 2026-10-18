@@ -4,7 +4,7 @@ EuroTransit exposes a React storefront and the public Catalog, Orders and Notifi
 
 ## System view
 
-![EuroTransit microservices: public APIs, synchronous checkout decisions, owned databases, and asynchronous outbox delivery](../diagrams/microservices/architecture.svg)
+[![EuroTransit microservices: public APIs, synchronous checkout decisions, owned databases, and asynchronous outbox delivery](../diagrams/microservices/architecture.svg)](https://g05-eurotransit.github.io/EuroTransit-application/microservices/architecture.html)
 
 [Open the full-size SVG](../diagrams/microservices/architecture.svg) · [Open interactive diagram](https://g05-eurotransit.github.io/EuroTransit-application/microservices/architecture.html)
 

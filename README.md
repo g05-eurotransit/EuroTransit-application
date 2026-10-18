@@ -2,7 +2,7 @@
 
 EuroTransit sells train tickets through a React storefront and five Kotlin/Spring WebFlux services. Orders coordinates seat holds, sandbox payments, confirmation, refunds and asynchronous notifications.
 
-![Microservice architecture](docs/diagrams/microservices/architecture.svg)
+[![Microservice architecture](docs/diagrams/microservices/architecture.svg)](https://g05-eurotransit.github.io/EuroTransit-application/microservices/architecture.html)
 
 [Interactive diagrams](https://g05-eurotransit.github.io/EuroTransit-application/) are published from `main` through GitHub Pages.
 

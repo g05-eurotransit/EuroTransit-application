@@ -4,7 +4,7 @@ Orders commits accepted work before processing it through Kafka. Inventory owns 
 
 ## Checkout flows
 
-![Customer-hold and direct checkout sequence](../diagrams/checkout/checkout.svg)
+[![Customer-hold and direct checkout sequence](../diagrams/checkout/checkout.svg)](https://g05-eurotransit.github.io/EuroTransit-application/checkout/checkout.html)
 
 [Full-size sequence](../diagrams/checkout/checkout.svg) · [Open interactive diagram](https://g05-eurotransit.github.io/EuroTransit-application/checkout/checkout.html)
 
