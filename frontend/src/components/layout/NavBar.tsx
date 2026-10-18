@@ -8,8 +8,6 @@ import { useNotifications, formatTimestamp, formatTrip } from "../../notificatio
 import { shortRef } from "../../utils/format";
 
 const NAV_LINK_CLASS = "nav-link et-nav-link ms-4";
-// The active page is marked by a gold rule under it, not by a colour change the eye would have to
-// compare against its neighbour to notice.
 const NAV_ACTIVE = "text-primary et-navlink-active";
 const NAV_IDLE = "text-dark";
 const NAV_LINK_STYLE = { fontWeight: 700, letterSpacing: "0.02em", fontSize: "1.05rem" };
