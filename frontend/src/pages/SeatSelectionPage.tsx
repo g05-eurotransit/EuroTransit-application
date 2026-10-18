@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Alert, Button, Card, Col, Row, Spinner } from "react-bootstrap";
-import { BackButton } from "../components/BackButton";
-import { OrderSummaryCard } from "../components/OrderSummaryCard";
+import { Alert, Button, Col, Row, Spinner } from "react-bootstrap";
+import { BackButton } from "../components/controls/BackButton";
+import { OrderSummaryCard } from "../components/ticket/OrderSummaryCard";
+import { arrivesNextDay, hhmm } from "../utils/format";
 import { cancelOrder, createHold, getOrder, getSeatAvailability, isPaymentUnderway, type SeatView } from "../api/orders";
 import { ApiError, newId } from "../api/client";
 
@@ -105,23 +106,20 @@ export function SeatSelectionPage() {
     );
   }
 
+  /** Selected is gold *and* filled, taken is grey *and* struck through: never colour alone. */
   function seatButton(seat: SeatView) {
     const selected = selectedSeats.includes(seat.seatId);
     return (
-      <Button
+      <button
         key={seat.seatId}
-        variant={selected ? "accent" : "outline-dark"}
-        className="fw-bold fs-5 text-nowrap position-relative"
-        style={{
-          width: "3.75rem",
-          height: "3.5rem",
-          ...(!seat.available && { backgroundColor: "#e9ecef", borderColor: "#ced4da" }),
-        }}
+        type="button"
+        className={`et-seat${selected ? " is-selected" : ""}`}
         disabled={!seat.available}
+        aria-pressed={selected}
         onClick={() => toggleSeat(seat.seatId)}
       >
         {seat.seatId}
-      </Button>
+      </button>
     );
   }
 
@@ -217,21 +215,13 @@ export function SeatSelectionPage() {
     await continueToCheckout();
   }
 
+  const freeSeats = seats?.filter((s) => s.available).length ?? null;
+
   return (
     <>
-      <div className="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4 pb-3 border-bottom">
-        <div>
-          <div className="d-flex align-items-center gap-3">
-            <BackButton />
-            <h1 className="fw-bold mb-1">Choose your seat</h1>
-          </div>
-          <p
-            className="text-uppercase text-secondary-emphasis fw-semibold mb-0"
-            style={{ marginLeft: "3.5rem" }}
-          >
-            {offer.trainType} · {offer.fareClass}
-          </p>
-        </div>
+      <div className="d-flex align-items-center gap-3 mb-4">
+        <BackButton />
+        <h1 className="fw-bold mb-0">Choose your seat</h1>
       </div>
 
       {offer.notice && <Alert variant="warning">{offer.notice}</Alert>}
@@ -263,47 +253,64 @@ export function SeatSelectionPage() {
 
       <Row className="g-4">
         <Col lg={8}>
-          <div className="d-flex gap-4 align-items-center bg-white border rounded-3 p-3 mb-4">
-            <div className="d-flex align-items-center gap-2">
-              <span
-                className="d-inline-block rounded border"
-                style={{ width: 22, height: 22, background: "var(--bs-white)" }}
-              />
-              <span className="fs-6 fw-semibold text-secondary-emphasis">Available</span>
+          <div className="et-surface">
+            {/* A light header: the solid band belongs to the summary, on the right. */}
+            <div className="et-maphead">
+              <p className="et-maphead__sub">
+                {offer.trainType} · <b>{hhmm(offer.departureTime)}</b> {offer.origin} →{" "}
+                <b>{hhmm(offer.arrivalTime)}</b> {offer.destination}
+                {arrivesNextDay(offer.departureTime, offer.arrivalTime) && " · +1 day"}
+              </p>
+              {freeSeats !== null && (
+                <span className="badge rounded-pill bg-secondary-subtle text-primary border border-secondary-subtle">
+                  {freeSeats} {freeSeats === 1 ? "seat" : "seats"} free
+                </span>
+              )}
             </div>
-            <div className="d-flex align-items-center gap-2">
-              <span className="d-inline-block rounded bg-accent" style={{ width: 22, height: 22 }} />
-              <span className="fs-6 fw-semibold text-secondary-emphasis">Selected</span>
-            </div>
-            <div className="d-flex align-items-center gap-2">
-              <span
-                className="d-inline-block rounded border"
-                style={{ width: 22, height: 22, backgroundColor: "#e9ecef", borderColor: "#ced4da" }}
-              />
-              <span className="fs-6 fw-semibold text-secondary-emphasis">Taken</span>
-            </div>
-          </div>
 
-          <Card className="border-2 border-primary-subtle rounded-4 p-4">
-            {error && <Alert variant="danger">{error}</Alert>}
+            <div className="et-legend">
+              <span>
+                <i style={{ background: "#fff", border: "1px solid var(--et-line)" }} /> Available
+              </span>
+              <span>
+                <i className="bg-accent" /> Selected
+              </span>
+              <span>
+                <i style={{ background: "var(--et-taken)", border: "1px solid var(--et-taken-line)" }} /> Taken
+              </span>
+            </div>
+
+            {error && (
+              <div className="p-3">
+                <Alert variant="danger" className="mb-0">
+                  {error}
+                </Alert>
+              </div>
+            )}
             {!error && !seats && (
-              <div className="text-secondary-emphasis d-flex align-items-center gap-2">
+              <div className="text-secondary-emphasis d-flex align-items-center gap-2 p-4">
                 <Spinner animation="border" size="sm" /> Loading seat map…
               </div>
             )}
             {!error && seats && (
-              <div style={{ overflowX: "auto" }} className="pb-1">
-                {groupByRow(seats).map(({ row, seats: rowSeats }) => (
-                  <div key={row} className="d-flex align-items-center gap-3 mb-3" style={{ width: "fit-content" }}>
-                    <div className="text-secondary-emphasis fw-semibold fs-5" style={{ width: 28 }}>
-                      {row}
+              <div className="et-seatmap">
+                {groupByRow(seats).map(({ row, seats: rowSeats }) => {
+                  const aisleAt = Math.ceil(rowSeats.length / 2);
+                  return (
+                    <div key={row} className="et-seatmap__row">
+                      <span className="et-seatmap__no">{row}</span>
+                      {rowSeats.map((seat, i) => (
+                        <Fragment key={seat.seatId}>
+                          {i === aisleAt && <span className="et-seatmap__aisle" />}
+                          {seatButton(seat)}
+                        </Fragment>
+                      ))}
                     </div>
-                    <div className="d-flex gap-2">{rowSeats.map((s) => seatButton(s))}</div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
-          </Card>
+          </div>
         </Col>
 
         <Col lg={4}>
@@ -317,12 +324,22 @@ export function SeatSelectionPage() {
             fareClass={offer.fareClass}
             travelDate={offer.travelDate}
             seats={selectedSeats}
+            unitPrice={offer.price}
+            conditions={offer.conditions}
             totalAmount={total}
             currency={offer.currency}
-            actionLabel={holding ? "Holding your seats…" : "Continue"}
+            actionLabel={holding ? "Holding your seats…" : "Hold the seat and pay"}
             actionDisabled={selectedSeats.length === 0 || holding}
             actionType="button"
             onAction={() => void continueToCheckout()}
+            // The button takes the seat off sale, so the rule is read before it is accepted.
+            note={
+              <>
+                Confirming holds {selectedSeats.length > 1 ? "the seats" : "the seat"} for{" "}
+                <b className="text-primary">10 minutes</b> — the time to pay. If it runs out the
+                seat goes back on sale and you are not charged.
+              </>
+            }
           />
         </Col>
       </Row>

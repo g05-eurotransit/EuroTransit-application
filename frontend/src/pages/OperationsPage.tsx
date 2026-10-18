@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { Alert, Badge, Button, Form, Modal, Spinner, Table } from "react-bootstrap";
+import { Button, Form, Modal, Spinner } from "react-bootstrap";
 import { ApiError, newId } from "../api/client";
+import { formatInstant } from "../utils/dates";
+import { shortRef } from "../utils/format";
 import {
   abandonOrder,
   allowedAction,
@@ -52,6 +54,16 @@ const ACTION_VARIANT: Record<IncidentAction, string> = {
   resolve: "outline-primary",
 };
 
+/** Red for a broken invariant or an open question about money, amber for a delivery that ran out. */
+const KIND_TONE: Record<ReconciliationKind, string> = {
+  DELIVERY_EXHAUSTED: "et-kind--warning",
+  INVARIANT_VIOLATION: "et-kind--danger",
+  PAYMENT_REVERSAL_FAILURE: "et-kind--danger",
+  // Not accent: nothing is being paid here, and gold means money everywhere else in the app.
+  SEAT_RETURN_FAILURE: "",
+  PAYMENT_OUTCOME_UNKNOWN: "et-kind--danger",
+};
+
 const KIND_LABEL: Record<ReconciliationKind, string> = {
   DELIVERY_EXHAUSTED: "Delivery exhausted",
   INVARIANT_VIOLATION: "Invariant violation",
@@ -60,37 +72,17 @@ const KIND_LABEL: Record<ReconciliationKind, string> = {
   PAYMENT_OUTCOME_UNKNOWN: "Payment outcome unknown",
 };
 
-const KIND_VARIANT: Record<ReconciliationKind, string> = {
-  DELIVERY_EXHAUSTED: "warning",
-  INVARIANT_VIOLATION: "danger",
-  PAYMENT_REVERSAL_FAILURE: "danger",
-  SEAT_RETURN_FAILURE: "accent",
-  PAYMENT_OUTCOME_UNKNOWN: "danger",
-};
-
-function formatInstant(iso: string): string {
-  return new Date(iso).toLocaleString("it-IT", {
-    day: "2-digit",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-/** Minutes:seconds while the hold runs, a flag once it has lapsed. */
+/** The customer's clock, in the console. At zero it becomes a state, and the state picks the button. */
 function HoldDeadline({ expiresAt, now }: { expiresAt: string; now: number }) {
   const remaining = Math.floor((new Date(expiresAt).getTime() - now) / 1000);
   if (remaining <= 0) {
-    return (
-      <Badge bg="danger" className="fs-6">
-        hold expired
-      </Badge>
-    );
+    return <span className="badge bg-danger">hold expired</span>;
   }
   const minutes = Math.floor(remaining / 60);
   const seconds = remaining % 60;
   return (
-    <span className={`fw-bold ${remaining < 120 ? "text-danger" : "text-dark"}`}>
+    <span className={`et-hold-pill${remaining < 120 ? " et-hold-pill--late" : ""}`}>
+      <i className="bi bi-clock-history" aria-hidden="true" />
       {minutes}:{seconds.toString().padStart(2, "0")}
     </span>
   );
@@ -105,7 +97,9 @@ export function OperationsPage() {
   const [incidents, setIncidents] = useState<ReconciliationIncident[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ id: number; variant: string; text: string } | null>(null);
+  const [result, setResult] = useState<
+    { id: number; variant: string; text: string; trace?: string } | null
+  >(null);
   const noticeSeq = useRef(0);
   const noticeTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(noticeTimer.current), []);
@@ -127,10 +121,10 @@ export function OperationsPage() {
   }, []);
 
   /** Shows one notice, replacing any other. */
-  const announce = useCallback((variant: "success" | "danger", text: string) => {
+  const announce = useCallback((variant: "success" | "danger", text: string, trace?: string) => {
     const id = ++noticeSeq.current;
     window.clearTimeout(noticeTimer.current);
-    setResult({ id, variant, text });
+    setResult({ id, variant, text, trace });
     if (variant === "success") {
       noticeTimer.current = window.setTimeout(
         // Guarded on the id so a slow timer cannot clear a newer notice.
@@ -186,7 +180,7 @@ export function OperationsPage() {
     setResult(null);
     const key = newId();
     const correlationId = newId();
-    const ref = `#${incident.orderId.slice(0, 8)}`;
+    const ref = `#${shortRef(incident.orderId)}`;
     try {
       switch (action) {
         case "redrive": {
@@ -217,8 +211,14 @@ export function OperationsPage() {
           : e instanceof Error
             ? e.message
             : "The action failed";
-      const correlation = e instanceof ApiError && e.correlationId ? ` (correlation ${e.correlationId})` : "";
-      announce("danger", `${ACTION_LABEL[action]} on ${ref} refused: ${text}${correlation}`);
+      // The code and the correlation id: the two strings that end up in the ticket.
+      const trace = [
+        e instanceof ApiError ? e.code : undefined,
+        e instanceof ApiError && e.correlationId ? `correlation ${e.correlationId}` : undefined,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      announce("danger", `${ACTION_LABEL[action]} on ${ref} refused: ${text}`, trace || undefined);
     } finally {
       setBusyId(null);
       // Twice, either way: now for what the command changed outright, then again once the pipeline
@@ -271,29 +271,46 @@ export function OperationsPage() {
 
   return (
     <div>
-      <div className="d-flex flex-wrap justify-content-between align-items-end mb-4 pb-3 border-bottom gap-3">
+      <div className="d-flex flex-wrap justify-content-between align-items-end mb-4 gap-3">
         <div>
           <h1 className="fw-bold mb-1">Reconciliation</h1>
+          <div className="text-secondary-emphasis small">
+            {incidents.length} open {incidents.length === 1 ? "incident" : "incidents"} · most
+            urgent first · refreshes itself every {POLL_MS / 1000}s
+          </div>
         </div>
         <Button variant="outline-primary" onClick={() => void load()} disabled={loading}>
-          {loading ? <Spinner animation="border" size="sm" /> : "Refresh"}
+          {loading ? (
+            <Spinner animation="border" size="sm" />
+          ) : (
+            <>
+              <i className="bi bi-arrow-repeat me-2" aria-hidden="true" />
+              Refresh
+            </>
+          )}
         </Button>
       </div>
 
       {error && (
-        <Alert variant="danger" role="alert">
-          {error}
-        </Alert>
+        <div className="et-notice mb-3" role="alert">
+          <i className="bi bi-exclamation-triangle fs-5" aria-hidden="true" />
+          <span>{error}</span>
+        </div>
       )}
       {result && (
-        <Alert
-          variant={result.variant}
+        <div
+          className={`et-notice mb-3${result.variant === "success" ? " et-notice--ok" : ""}`}
           role={result.variant === "danger" ? "alert" : "status"}
-          dismissible
-          onClose={() => setResult(null)}
         >
-          {result.text}
-        </Alert>
+          <i
+            className={`bi ${result.variant === "success" ? "bi-check-circle" : "bi-exclamation-triangle"} fs-5`}
+            aria-hidden="true"
+          />
+          <span>
+            {result.text}
+            {result.trace && <span className="et-notice__trace et-mono d-block">{result.trace}</span>}
+          </span>
+        </div>
       )}
 
       {loading && incidents.length === 0 && (
@@ -303,95 +320,120 @@ export function OperationsPage() {
       )}
 
       {!loading && !error && incidents.length === 0 && (
-        <p className="text-secondary-emphasis text-center py-5 mb-0">
-          No open incidents.
-        </p>
+        <div className="et-surface">
+          <div className="et-edge">
+            <div className="et-edge__ic">
+              <i className="bi bi-check-circle" aria-hidden="true" />
+            </div>
+            <h2>No open incidents</h2>
+            <p>The pipeline is holding on its own. This list checks itself every {POLL_MS / 1000} seconds.</p>
+          </div>
+        </div>
       )}
 
       {incidents.length > 0 && (
-        <div className="table-responsive">
-          <Table hover className="align-middle">
-            <thead>
-              <tr className="text-secondary-emphasis">
-                <th>Order</th>
-                <th>Incident</th>
-                <th>Failed in</th>
-                <th>Now</th>
-                <th>Failure</th>
-                <th className="text-center">Attempts</th>
-                <th>Seat hold</th>
-                <th>Opened</th>
-                <th className="text-end">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map(({ incident, decision }) => (
-                <tr key={incident.id}>
-                  <td>
-                    <Link to={`/orders/${incident.orderId}`} className="fw-bold" title={incident.orderId}>
-                      #{incident.orderId.slice(0, 8)}
-                    </Link>
-                  </td>
-                  <td>
-                    <Badge bg={KIND_VARIANT[incident.kind]} className="fs-6">
-                      {KIND_LABEL[incident.kind] ?? incident.kind}
-                    </Badge>
-                  </td>
-                  <td className="text-secondary-emphasis small">{incident.orderState}</td>
-                  <td className="fw-semibold text-dark small">{incident.orderStatus ?? "—"}</td>
-                  <td className="text-secondary-emphasis small">{incident.failureClass}</td>
-                  <td className="text-center">{incident.attemptCount}</td>
-                  <td>
-                    {incident.reservationExpiresAt && currentStatus(incident) === "PAYMENT_PENDING" ? (
-                      <HoldDeadline expiresAt={incident.reservationExpiresAt} now={now} />
+        <div className="et-surface">
+          <div className="et-ops-scroll">
+            <div className="et-ops et-ops--head">
+              <span className="et-lab">Order</span>
+              <span className="et-lab">Incident</span>
+              <span className="et-lab">Where it broke</span>
+              <span className="et-lab text-center">Tries</span>
+              <span className="et-lab">Seat hold</span>
+              <span className="et-lab">Opened</span>
+              <span className="et-lab text-end">Action</span>
+            </div>
+
+            {rows.map(({ incident, decision }) => {
+              const liveHold =
+                !!incident.reservationExpiresAt && currentStatus(incident) === "PAYMENT_PENDING";
+              const holdExpired =
+                liveHold && new Date(incident.reservationExpiresAt!).getTime() <= now;
+              const busy = working.has(incident.orderId);
+              // The rule on the left is urgency, not kind: the clock decides the action.
+              const tone = holdExpired ? " et-ops--expired" : liveHold ? " et-ops--urgent" : "";
+              return (
+                <div key={incident.id} className={`et-ops${tone}${busy ? " et-ops--busy" : ""}`}>
+                  <Link
+                    to={`/orders/${incident.orderId}`}
+                    className="et-ops__ref et-mono"
+                    title={incident.orderId}
+                  >
+                    #{shortRef(incident.orderId)}
+                  </Link>
+
+                  <span className={`et-kind ${KIND_TONE[incident.kind]}`}>
+                    <i aria-hidden="true" />
+                    <span>{KIND_LABEL[incident.kind] ?? incident.kind}</span>
+                  </span>
+
+                  {/* One transition: where it failed, and where the order is now. */}
+                  <div>
+                    <div className="et-ops__flow">
+                      <span className="et-ops__from">{incident.orderState}</span>
+                      <span aria-hidden="true">→</span>
+                      <span>{incident.orderStatus ?? "—"}</span>
+                    </div>
+                    <div className="et-ops__class et-mono">{incident.failureClass}</div>
+                  </div>
+
+                  <span className="et-ops__count">{incident.attemptCount}</span>
+
+                  <span>
+                    {liveHold ? (
+                      <HoldDeadline expiresAt={incident.reservationExpiresAt!} now={now} />
                     ) : (
                       <span className="text-secondary-emphasis">—</span>
                     )}
-                  </td>
-                  <td className="text-secondary-emphasis small">{formatInstant(incident.createdAt)}</td>
-                  <td className="text-end">
-                    {decision.action ? (
+                  </span>
+
+                  <span className="et-ops__when">{formatInstant(incident.createdAt)}</span>
+
+                  <span className="et-ops__act">
+                    {busy ? (
+                      <span className="et-ops__reason d-flex align-items-center gap-2">
+                        <Spinner animation="border" size="sm" />
+                        Waiting for the pipeline…
+                      </span>
+                    ) : decision.action ? (
                       <Button
                         size="sm"
                         variant={ACTION_VARIANT[decision.action]}
                         className="fw-semibold"
-                        title={working.has(incident.orderId) ? "Waiting for the pipeline to finish." : decision.hint}
-                        disabled={busyId !== null || working.has(incident.orderId)}
+                        title={decision.hint}
+                        disabled={busyId !== null}
                         onClick={() => start(incident, decision.action)}
                       >
-                        {working.has(incident.orderId) ? (
-                          <>
-                            <Spinner animation="border" size="sm" />
-                            {/* A spinner alone leaves the button with no accessible name. */}
-                            <span className="visually-hidden">Working…</span>
-                          </>
-                        ) : (
-                          ACTION_LABEL[decision.action]
-                        )}
+                        {ACTION_LABEL[decision.action]}
+                        {needsEvidence(decision.action) ? "…" : ""}
                       </Button>
                     ) : (
-                      <span className="text-secondary-emphasis small">{decision.reason}</span>
+                      <span className="et-ops__reason">{decision.reason}</span>
                     )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </Table>
+                  </span>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
       <Modal show={prompt !== null} onHide={() => setPrompt(null)} centered>
         <Modal.Header closeButton>
           <Modal.Title className="fs-5">
-            {prompt ? `${ACTION_LABEL[prompt.action]} order #${prompt.incident.orderId.slice(0, 8)}` : ""}
+            {prompt ? `${ACTION_LABEL[prompt.action]} order #${shortRef(prompt.incident.orderId)}` : ""}
           </Modal.Title>
         </Modal.Header>
         <Modal.Body>
-          <p className="text-secondary-emphasis">
-            {prompt?.action === "settle"
-              ? "You attest the provider holds no money for this order. The order will then fail."
-              : "Closes an investigated invariant violation. The order is not changed."}
-          </p>
+          <div className="et-notice mb-3">
+            <i className="bi bi-exclamation-triangle fs-5" aria-hidden="true" />
+            <span>
+              <b>{prompt?.action === "settle" ? "Check the provider first." : "Investigate first."}</b>
+              {prompt?.action === "settle"
+                ? "You attest the provider holds no money for this order. The order will then fail, and the incident closes with your evidence."
+                : "This closes an investigated invariant violation with your evidence. The order itself is not changed."}
+            </span>
+          </div>
           <Form
             onSubmit={(e) => {
               e.preventDefault();

@@ -47,7 +47,7 @@ describe("order status page", () => {
     vi.mocked(getOrder).mockResolvedValue(order("PAYMENT_PENDING"));
     renderOrder();
 
-    expect(await screen.findByText("PAYMENT_PENDING")).toBeInTheDocument();
+    expect(await screen.findByText("Paying")).toBeInTheDocument();
     expect(screen.queryByText(/expires in/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/\d+:\d\d/)).not.toBeInTheDocument();
   });

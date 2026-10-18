@@ -1,0 +1,1273 @@
+/**
+ * The screen-by-screen redesign, as classes. Loaded after custom-bootstrap.scss, so the colours are
+ * the theme's own; the `et-` prefix keeps them off Bootstrap's names.
+ *
+ * 1. the trip band is the only block of solid colour;  2. one white surface per screen;
+ * 3. gold is money and nothing else;                   4. digits in a column are tabular;
+ * 5. one uppercase role, the 10px label;               6. the stub appears once the seat is sold;
+ * 7. where a hold runs there is a clock, always the same shape.
+ */
+
+:root {
+  --et-ink: #1b4332;
+  --et-muted: #68786f;
+  --et-line: #dee2e6;
+  --et-hairline: #eef1ef;
+  --et-money: #8a6d10;
+  --et-band: #1b4332;
+  --et-band-dead: #33403a;
+  --et-warm: #fbfaf4;
+  --et-warm-line: #eee4c6;
+  --et-hold-bg: #f1f6f3;
+  --et-hold-line: #dde8e1;
+  --et-taken: #eceff0;
+  --et-taken-line: #dde1e3;
+  --et-taken-ink: #a7b0ac;
+}
+
+/* Bootstrap puts a dropdown at 1000 and a sticky element at 1020: without this the checkout's
+   sticky summary paints over the notifications menu. */
+.navbar.sticky-top {
+  z-index: 1025;
+}
+.navbar .dropdown-menu {
+  z-index: 1030;
+}
+
+/* The wordmark. Montserrat 900 with the tracking pulled in: at 700 it reads as a page title. */
+.et-brand {
+  font-weight: 900;
+  letter-spacing: -0.02em;
+}
+
+/* The current page is marked underneath: the navbar stays white, the solid colour is the band's. */
+.et-navlink-active {
+  box-shadow: inset 0 -2px 0 var(--bs-accent);
+}
+
+/* Hand-written controls, so they carry their own focus ring. */
+.et-seat,
+.et-datebtn,
+.et-cal__day,
+.et-cal__month,
+.et-cal__arrow,
+.et-tix,
+.et-ops__ref {
+  &:focus-visible {
+    outline: 2px solid var(--bs-secondary);
+    outline-offset: 2px;
+  }
+}
+
+/* ---------- the two repeating primitives ---------- */
+
+/* One white surface per screen: everything inside is separated by hairlines, not by more cards. */
+.et-surface {
+  background: #fff;
+  border-radius: 0.75rem;
+  overflow: hidden;
+  box-shadow:
+    0 1px 3px rgba(27, 67, 50, 0.09),
+    0 6px 18px rgba(27, 67, 50, 0.06);
+}
+.et-surface + .et-surface {
+  margin-top: 0.875rem;
+}
+
+/* For rows stacked 8px apart: the full surface's wide shadow would bleed into its neighbours. */
+.et-surface--quiet {
+  box-shadow: 0 1px 2px rgba(27, 67, 50, 0.08);
+}
+
+/* The only uppercase role in the app. Values are sentence case, so the two never blur together. */
+.et-lab {
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--et-muted);
+}
+
+.et-num {
+  font-variant-numeric: tabular-nums;
+}
+
+.et-mono {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+}
+
+.et-money {
+  color: var(--et-money);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 1. the trip band ---------- */
+
+.et-band {
+  background: var(--et-band);
+  color: #fff;
+  padding: 1.125rem 1.25rem 1.25rem;
+
+  &--dead {
+    background: var(--et-band-dead);
+  }
+
+  &--slim {
+    padding: 0.875rem 1.125rem 0.9375rem;
+
+    .et-band__t {
+      font-size: 1.5rem;
+    }
+  }
+
+  &__svc {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.72);
+  }
+
+  &__od {
+    margin-top: 0.8125rem;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 0.875rem;
+    align-items: center;
+  }
+
+  &__od--stacked {
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+  }
+
+  &__t {
+    font-size: 2rem;
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: -0.025em;
+    font-variant-numeric: tabular-nums;
+  }
+
+  &__s {
+    margin-top: 0.375rem;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.82);
+  }
+
+  &__end {
+    text-align: right;
+  }
+
+  &__od--stacked &__end {
+    text-align: left;
+  }
+
+  &__mid {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.3125rem;
+    color: rgba(255, 255, 255, 0.62);
+  }
+
+  &__dur {
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* A dashed wire, not a solid rule: the journey between two times, not a divider. */
+  &__wire {
+    width: 100%;
+    height: 2px;
+    background: repeating-linear-gradient(
+      to right,
+      rgba(255, 255, 255, 0.55) 0 4px,
+      transparent 4px 9px
+    );
+  }
+
+  &__plus {
+    display: inline-block;
+    margin-top: 0.4375rem;
+    font-size: 0.625rem;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    color: #fff;
+    background: rgba(255, 255, 255, 0.18);
+    border-radius: 0.3125rem;
+    padding: 0.125rem 0.4375rem;
+  }
+}
+
+@media (max-width: 520px) {
+  .et-band__od {
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+  }
+  .et-band__end {
+    text-align: left;
+  }
+  .et-band__mid {
+    display: none;
+  }
+}
+
+/* ---------- 7. the hold clock ---------- */
+
+/* The bar: full width, because the deadline belongs to the whole page and must not be scrolled past. */
+.et-hold {
+  display: flex;
+  align-items: center;
+  gap: 0.875rem;
+  padding: 0.8125rem 1.125rem;
+  background: var(--et-hold-bg);
+  border: 1px solid var(--et-hold-line);
+  border-radius: 0.75rem;
+
+  &--flush {
+    border: 0;
+    border-bottom: 1px solid var(--et-hold-line);
+    border-radius: 0;
+  }
+
+  &--dead {
+    background: #fdf2f3;
+    border-color: #f1c7cb;
+
+    .et-hold__clock {
+      background: var(--bs-danger);
+    }
+  }
+
+  &__clock {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 0.5625rem;
+    background: var(--bs-primary);
+    color: #fff;
+    border-radius: 0.4375rem;
+    padding: 0.5rem 0.75rem;
+  }
+
+  &__n {
+    font-size: 1.125rem;
+    font-weight: 800;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+
+  &__tx {
+    font-size: 0.78125rem;
+    color: var(--et-muted);
+
+    b {
+      display: block;
+      color: var(--et-ink);
+      font-size: 0.84375rem;
+    }
+  }
+}
+
+@media (max-width: 520px) {
+  .et-hold {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+/* The same clock where it only has to help pick a row. */
+.et-hold-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+  font-size: 0.6875rem;
+  font-weight: 800;
+  color: var(--et-ink);
+  background: #eef3f0;
+  border: 1px solid #d9e4dd;
+  border-radius: 999px;
+  padding: 0.1875rem 0.5625rem;
+  font-variant-numeric: tabular-nums;
+
+  /* Under two minutes the colour changes, the shape does not. */
+  &--late {
+    color: #6b1f27;
+    background: #fdf2f3;
+    border-color: #f1c7cb;
+  }
+}
+
+/* ---------- the notifications menu ---------- */
+
+.et-notif {
+  /* Unread, not "new": frozen at the moment the menu opened. */
+  &--unseen {
+    background: #fcfbf5;
+  }
+
+  &__mk {
+    flex: none;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.875rem;
+    background: #eef1ef;
+    color: var(--et-muted);
+
+    &--ok {
+      background: #e6f1ea;
+      color: var(--bs-secondary);
+    }
+
+    &--no {
+      background: #fbeaec;
+      color: var(--bs-danger);
+    }
+  }
+
+  &__trip {
+    font-size: 0.78125rem;
+    font-weight: 700;
+    color: var(--et-ink);
+  }
+
+  /* Rendered verbatim: Orders owns what this sentence may claim about money. */
+  &__msg {
+    font-size: 0.75rem;
+    color: var(--et-muted);
+    margin-top: 0.0625rem;
+  }
+
+  &__foot {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.625rem;
+    margin-top: 0.375rem;
+    font-size: 0.65625rem;
+  }
+
+  &__ref {
+    color: var(--et-money);
+    font-weight: 500;
+  }
+
+  &__when {
+    color: var(--et-muted);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* ---------- the date strip and its calendar ---------- */
+
+.et-datebtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: #fff;
+  border: 1px solid var(--et-line);
+  border-radius: 0.4375rem;
+  padding: 0.3125rem 0.6875rem;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  color: var(--et-ink);
+
+  &:hover {
+    border-color: var(--bs-secondary);
+  }
+}
+
+.et-cal {
+  width: 20rem;
+  max-width: 100%;
+  background: #fff;
+  border: 1px solid var(--et-line);
+  border-radius: 0.375rem;
+  overflow: hidden;
+  box-shadow: 0 12px 32px rgba(27, 67, 50, 0.15);
+
+  &__head {
+    padding: 0.6875rem 0.8125rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.625rem;
+    border-bottom: 1px solid var(--et-line);
+    font-size: 0.84375rem;
+    font-weight: 800;
+  }
+
+  &__arrow {
+    width: 1.75rem;
+    height: 1.75rem;
+    border: 1px solid var(--et-line);
+    border-radius: 50%;
+    background: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--et-ink);
+    padding: 0;
+  }
+
+  /* The month rail is what turns forty "next week" clicks into one. */
+  &__rail {
+    display: flex;
+    gap: 0.3125rem;
+    padding: 0.5625rem 0.8125rem;
+    border-bottom: 1px solid var(--et-line);
+    overflow-x: auto;
+  }
+
+  &__month {
+    flex: none;
+    border: 1px solid var(--et-line);
+    border-radius: 0.25rem;
+    padding: 0.25rem 0.5rem;
+    background: #fff;
+    font-size: 0.6875rem;
+    font-weight: 700;
+    color: var(--et-muted);
+    white-space: nowrap;
+
+    &.is-on {
+      background: var(--bs-primary);
+      border-color: var(--bs-primary);
+      color: #fff;
+    }
+  }
+
+  &__grid {
+    padding: 0.6875rem 0.8125rem 0.8125rem;
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 0.25rem;
+  }
+
+  &__wd {
+    font-size: 0.5625rem;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--et-muted);
+    text-align: center;
+    padding-bottom: 0.1875rem;
+  }
+
+  &__day {
+    aspect-ratio: 1 / 1;
+    border: 1px solid #e4eae6;
+    border-radius: 0.25rem;
+    background: #f4f7f5;
+    color: var(--et-ink);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.78125rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    padding: 0;
+
+    &:disabled {
+      background: transparent;
+      border-color: transparent;
+      color: #b6c0ba;
+    }
+
+    &.is-on {
+      background: var(--bs-primary);
+      border-color: var(--bs-primary);
+      color: #fff;
+    }
+  }
+}
+
+/* Two or three views as one object: a dropdown would hide alternatives that fit on screen. */
+.et-seg {
+  display: inline-flex;
+  border: 1px solid var(--et-line);
+  border-radius: 0.5625rem;
+  overflow: hidden;
+  background: #fff;
+
+  &__btn {
+    border: 0;
+    background: transparent;
+    padding: 0.4375rem 0.875rem;
+    font-size: 0.78125rem;
+    font-weight: 700;
+    color: var(--et-muted);
+    white-space: nowrap;
+
+    &:hover {
+      color: var(--et-ink);
+    }
+
+    &.is-on {
+      background: var(--bs-primary);
+      color: #fff;
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--bs-secondary);
+      outline-offset: -2px;
+    }
+  }
+}
+
+/* ---------- the catalogue row ---------- */
+
+/* 34px between the arrival time and the price: at 16 the two numbers read as one. */
+.et-route {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  column-gap: 2.125rem;
+  row-gap: 0.875rem;
+  align-items: center;
+  /* Height from the row's own padding, not from gaps between rows. */
+  padding: 1.25rem 1.125rem;
+
+  &__legs {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 1rem;
+    align-items: center;
+    min-width: 0;
+    padding-right: 0.375rem;
+  }
+
+  &__t {
+    font-size: 1.3125rem;
+    font-weight: 800;
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+  }
+
+  &__st {
+    margin-top: 0.125rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--et-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  &__mid {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.25rem;
+    min-width: 4.5rem;
+  }
+
+  &__wire {
+    width: 100%;
+    height: 2px;
+    background: repeating-linear-gradient(to right, var(--bs-secondary) 0 4px, transparent 4px 9px);
+  }
+
+  &__end {
+    text-align: right;
+  }
+
+  &__price {
+    text-align: right;
+    min-width: 5.875rem;
+
+    strong {
+      display: block;
+      font-size: 1.1875rem;
+      font-weight: 800;
+      color: var(--et-money);
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+  }
+}
+
+.et-fares {
+  border-top: 1px solid var(--et-line);
+  background: #fbfcfb;
+  padding: 0.8125rem 1.125rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5625rem;
+}
+
+.et-fare {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.75rem;
+  background: #fff;
+  border: 1px solid var(--et-line);
+  border-radius: 0.625rem;
+  padding: 0.75rem 0.875rem;
+
+  /* The cheapest fare gets a rule, not a second coloured price fighting the first. */
+  &--best {
+    border-color: #cfe0d5;
+    box-shadow: inset 3px 0 0 var(--bs-secondary);
+  }
+
+  &__cls {
+    font-size: 0.8125rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  &__cond {
+    font-size: 0.71875rem;
+    color: var(--et-muted);
+    margin-top: 0.125rem;
+  }
+
+  &__right {
+    display: flex;
+    align-items: center;
+    gap: 1.125rem;
+  }
+
+  &__amt {
+    font-size: 1rem;
+    font-weight: 800;
+    color: var(--et-money);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 760px) {
+  .et-route {
+    grid-template-columns: 1fr auto;
+    column-gap: 1rem;
+  }
+  .et-route__price {
+    grid-column: 1;
+    text-align: left;
+  }
+}
+
+@media (max-width: 520px) {
+  .et-route__legs {
+    grid-template-columns: 1fr;
+  }
+  .et-route__mid {
+    display: none;
+  }
+  .et-route__end {
+    text-align: left;
+  }
+}
+
+/* ---------- the seat map ---------- */
+
+/* The map carries a light header, not a second trip band: the solid one lives in the summary. */
+.et-maphead {
+  padding: 1rem 1.125rem 0.875rem;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.875rem;
+  border-bottom: 1px solid var(--et-line);
+
+  h2 {
+    margin: 0;
+    font-size: 1.125rem;
+    font-weight: 800;
+    letter-spacing: -0.015em;
+  }
+
+  &__sub {
+    margin: 0;
+    font-size: 0.84375rem;
+    color: var(--et-muted);
+
+    b {
+      color: var(--et-ink);
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+  }
+}
+
+.et-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding: 0.75rem 1.125rem;
+
+  span {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--et-muted);
+  }
+
+  i {
+    width: 1.125rem;
+    height: 1.125rem;
+    border-radius: 0.3125rem;
+    display: block;
+  }
+}
+
+.et-seatmap {
+  padding: 1rem 1.125rem 1.125rem;
+  overflow-x: auto;
+
+  &__row {
+    display: flex;
+    align-items: center;
+    gap: 0.6875rem;
+
+    & + & {
+      margin-top: 0.5rem;
+    }
+  }
+
+  &__no {
+    width: 1.125rem;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--et-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Breaking the row in the middle makes the map read as the plan of a train, not a keyboard. */
+  &__aisle {
+    width: 1rem;
+  }
+}
+
+.et-seat {
+  width: 2.75rem;
+  height: 2.5rem;
+  border-radius: 0.5625rem;
+  border: 1px solid var(--et-line);
+  background: #fff;
+  color: var(--et-ink);
+  font-size: 0.84375rem;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+
+  &.is-selected {
+    background: var(--bs-accent);
+    border-color: var(--bs-accent);
+    color: #2e2403;
+  }
+
+  /* Struck through as well as greyed, so "taken" does not depend on colour alone. */
+  &:disabled {
+    background: var(--et-taken);
+    border-color: var(--et-taken-line);
+    color: var(--et-taken-ink);
+    text-decoration: line-through;
+    opacity: 1;
+  }
+}
+
+/* ---------- the summary ---------- */
+
+.et-sum {
+  padding: 0.9375rem 1.125rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+
+  &__r {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.75rem;
+    font-size: 0.8125rem;
+  }
+
+  &__k {
+    color: var(--et-muted);
+    font-weight: 600;
+  }
+
+  &__v {
+    font-weight: 700;
+    text-align: right;
+  }
+
+  &__sep {
+    height: 1px;
+    background: var(--et-line);
+  }
+}
+
+.et-seatchip {
+  font-size: 0.71875rem;
+  font-weight: 700;
+  background: #faf3dd;
+  color: var(--et-money);
+  border: 1px solid #ecdca6;
+  border-radius: 0.375rem;
+  padding: 0.125rem 0.4375rem;
+}
+
+/* The one warm patch in the app, and it is where the money is. */
+.et-total {
+  padding: 0.875rem 1.125rem 1.0625rem;
+  background: var(--et-warm);
+  border-top: 1px solid var(--et-warm-line);
+
+  &__line {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 0.75rem;
+  }
+
+  &__amt {
+    font-size: 1.625rem;
+    font-weight: 800;
+    color: var(--et-money);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+
+  &__note {
+    margin: 0.625rem 0 0;
+    font-size: 0.71875rem;
+    color: var(--et-muted);
+    text-align: center;
+  }
+}
+
+/* ---------- the ticket: perforation and stub ---------- */
+
+.et-perf {
+  position: relative;
+  margin-top: 1.0625rem;
+  border-top: 2px dashed var(--et-line);
+
+  /* The two notches are punched out of the page behind, so the card looks torn, not drawn. */
+  &::before,
+  &::after {
+    content: "";
+    position: absolute;
+    top: -11px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--bs-body-bg);
+  }
+
+  &::before {
+    left: -10px;
+  }
+  &::after {
+    right: -10px;
+  }
+}
+
+.et-stub {
+  padding: 1.0625rem 1.25rem 1.1875rem;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.5rem;
+
+  /* A voided ticket keeps the shape of the stub, with nothing to scan. */
+  &__void {
+    width: 104px;
+    height: 104px;
+    border: 1px dashed var(--et-line);
+    border-radius: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #b6c0ba;
+    font-size: 1.75rem;
+  }
+
+  /* The square sits where a printed ticket keeps it: hard right, the seat big on the left. */
+  &__qr {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.375rem;
+  }
+
+  &__seat {
+    font-size: 2.5rem;
+    font-weight: 800;
+    line-height: 0.92;
+    letter-spacing: -0.03em;
+    color: var(--et-ink);
+  }
+
+  &__id {
+    font-size: 0.71875rem;
+    line-height: 1.45;
+    margin-top: 0.3125rem;
+    overflow-wrap: anywhere;
+  }
+}
+
+/* Before the sale the stub is a dashed outline: the shape says on its own that something is missing. */
+.et-pending-stub {
+  margin: 1.0625rem 1.25rem 1.1875rem;
+  border: 2px dashed #c7d3cb;
+  border-radius: 0.6875rem;
+  padding: 0.9375rem;
+  display: flex;
+  align-items: center;
+  gap: 0.9375rem;
+  background: #f6f9f7;
+
+  &__left {
+    flex: none;
+    padding-right: 0.9375rem;
+    border-right: 1px solid #d8e2db;
+  }
+
+  &__big {
+    margin-top: 0.1875rem;
+    font-size: 1.625rem;
+    font-weight: 800;
+    line-height: 1;
+    color: var(--et-ink);
+    font-variant-numeric: tabular-nums;
+  }
+
+  &__tx {
+    font-size: 0.78125rem;
+    color: var(--et-muted);
+
+    b {
+      display: block;
+      color: var(--et-ink);
+      font-size: 0.84375rem;
+    }
+  }
+}
+
+@media (max-width: 520px) {
+  .et-stub {
+    flex-direction: column;
+    gap: 1.125rem;
+  }
+  .et-pending-stub {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .et-pending-stub__left {
+    padding-right: 0;
+    border-right: 0;
+  }
+}
+
+/* ---------- the ticket list ---------- */
+
+/* The same shape as the departures list: it is the same kind of list. */
+.et-tix {
+  display: grid;
+  grid-template-columns: 4rem 1fr auto;
+  column-gap: 1.5rem;
+  row-gap: 0.75rem;
+  padding: 1.25rem 1.125rem;
+  align-items: center;
+  text-decoration: none;
+  color: inherit;
+
+  &:hover {
+    background: #fbfcfb;
+    color: inherit;
+  }
+
+  /* A row to come back to. The surface shadow is repeated: box-shadow replaces, it does not add. */
+  &--live {
+    box-shadow:
+      inset 3px 0 0 var(--bs-warning),
+      0 1px 2px rgba(27, 67, 50, 0.08);
+  }
+
+  &__when {
+    text-align: center;
+    background: #f3f6f4;
+    border-radius: 0.5rem;
+    padding: 0.5rem 0.25rem;
+  }
+
+  &__dd {
+    font-size: 1.25rem;
+    font-weight: 800;
+    line-height: 1.05;
+    font-variant-numeric: tabular-nums;
+  }
+
+  &__mo {
+    font-size: 0.625rem;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--et-muted);
+  }
+
+  /* The route reads at the weight the departure time has in the other list: it is what you scan. */
+  &__trip {
+    font-size: 1rem;
+    font-weight: 800;
+  }
+
+  &__meta {
+    font-size: 0.75rem;
+    color: var(--et-muted);
+    margin-top: 0.1875rem;
+  }
+
+  &__right {
+    text-align: right;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.5rem;
+  }
+
+  &__amt {
+    font-size: 1rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Travelled: muted ink rather than opacity, which would dim the status badge too. */
+  &--past {
+    .et-tix__trip,
+    .et-tix__dd,
+    .et-tix__amt {
+      color: var(--et-muted);
+    }
+
+    .et-tix__when {
+      background: transparent;
+      border: 1px solid var(--et-line);
+    }
+  }
+}
+
+/* Rare and irreversible: findable, never inviting. The real red belongs to the dialog. */
+.et-refund {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  color: var(--et-muted);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+
+  &:hover {
+    color: var(--bs-danger);
+  }
+
+  &:focus-visible {
+    color: var(--bs-danger);
+    outline: 2px solid var(--bs-danger);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+}
+
+/* ---------- edge states ---------- */
+
+.et-edge {
+  padding: 1.875rem 1.25rem;
+  text-align: center;
+
+  &__ic {
+    width: 2.875rem;
+    height: 2.875rem;
+    margin: 0 auto 0.75rem;
+    border-radius: 0.75rem;
+    background: #f1f5f2;
+    color: var(--bs-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.375rem;
+  }
+
+  h2 {
+    margin: 0 0 0.3125rem;
+    font-size: 1rem;
+    font-weight: 800;
+  }
+
+  p {
+    margin: 0 auto 0.9375rem;
+    font-size: 0.8125rem;
+    color: var(--et-muted);
+    max-width: 34ch;
+  }
+}
+
+/* ---------- the operator console ---------- */
+
+.et-ops-scroll {
+  overflow-x: auto;
+}
+
+.et-ops {
+  display: grid;
+  grid-template-columns: 6rem 10.5rem minmax(13rem, 1fr) 3.25rem 5.875rem 6.5rem 8.5rem;
+  gap: 1rem;
+  padding: 0.8125rem 1.125rem;
+  align-items: center;
+  min-width: 59rem;
+
+  &--head {
+    padding-block: 0.625rem;
+    background: #fbfcfb;
+    border-bottom: 1px solid var(--et-line);
+  }
+
+  & + & {
+    border-top: 1px solid var(--et-hairline);
+  }
+
+  /* The rule on the left is not the kind of incident: it is whether a clock is running. */
+  &--urgent {
+    box-shadow: inset 3px 0 0 var(--bs-warning);
+  }
+
+  &--expired {
+    box-shadow: inset 3px 0 0 var(--bs-danger);
+  }
+
+  &--busy {
+    background: #fafbfa;
+  }
+
+  &__ref {
+    font-size: 0.78125rem;
+    font-weight: 500;
+    color: var(--et-ink);
+  }
+
+  &__flow {
+    font-size: 0.78125rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 0.4375rem;
+    flex-wrap: wrap;
+  }
+
+  &__from {
+    color: var(--et-muted);
+    font-weight: 600;
+  }
+
+  &__class {
+    margin-top: 0.1875rem;
+    font-size: 0.6875rem;
+    color: var(--et-muted);
+  }
+
+  &__count {
+    font-size: 0.84375rem;
+    font-weight: 700;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+
+  &__when {
+    font-size: 0.71875rem;
+    color: var(--et-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  &__act {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  /* No action means the runbook has none: the reason sits here instead of a button nobody can use. */
+  &__reason {
+    font-size: 0.6875rem;
+    color: var(--et-muted);
+    text-align: right;
+    line-height: 1.4;
+  }
+}
+
+.et-kind {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1.3;
+
+  i {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    margin-top: 4px;
+    flex: none;
+    background: #93a39a;
+  }
+
+  &--danger i {
+    background: var(--bs-danger);
+  }
+
+  &--warning i {
+    background: var(--bs-warning);
+  }
+}
+
+.et-notice {
+  display: flex;
+  gap: 0.6875rem;
+  align-items: flex-start;
+  border-radius: 0.6875rem;
+  padding: 0.8125rem 0.9375rem;
+  font-size: 0.78125rem;
+  background: #fdf2f3;
+  border: 1px solid #f1c7cb;
+  color: #6b1f27;
+
+  &--ok {
+    background: #f1f7f3;
+    border-color: #cfe0d5;
+    color: #1f4733;
+  }
+
+  b {
+    display: block;
+    font-size: 0.84375rem;
+    margin-bottom: 0.1875rem;
+  }
+
+  /* The two strings that end up in the ticket. */
+  &__trace {
+    margin-top: 0.375rem;
+    font-size: 0.6875rem;
+    opacity: 0.8;
+  }
+}

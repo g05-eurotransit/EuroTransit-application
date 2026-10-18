@@ -22,10 +22,6 @@ export function formatTimestamp(iso: string): string {
   });
 }
 
-export function shortOrderRef(orderId: string): string {
-  return orderId.slice(0, 8);
-}
-
 /**
  * The trip line shown above a notification's message.
  *

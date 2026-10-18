@@ -9,6 +9,7 @@ import { SilentSignInProvider } from "./auth/SilentSignIn";
 import { NotificationsProvider } from "./notifications/NotificationsProvider";
 import { App } from "./App";
 import "./custom-bootstrap.scss";
+import "./design.scss";
 import "bootstrap-icons/font/bootstrap-icons.css";
 
 const root = createRoot(document.getElementById("root")!);

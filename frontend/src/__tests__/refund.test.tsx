@@ -11,7 +11,9 @@ vi.mock("../api/orders", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api/orders")>();
   return { ...actual, getOrder: vi.fn(), refundOrder: vi.fn() };
 });
-vi.mock("../api/catalog", () => ({ getRoute: vi.fn() }));
+// listOffers resolves the fare class the ticket shows next to the train; this suite is about the
+// refund, so it answers with nothing and the band simply names the train alone.
+vi.mock("../api/catalog", () => ({ getRoute: vi.fn(), listOffers: vi.fn(() => Promise.resolve([])) }));
 vi.mock("../auth/roles", () => ({ useIsOperator: () => false }));
 
 const ORDER_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";

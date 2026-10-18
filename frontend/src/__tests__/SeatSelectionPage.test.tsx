@@ -84,7 +84,7 @@ describe("seat selection", () => {
     vi.mocked(createHold).mockResolvedValue({ orderId: "o-1", status: "ACCEPTED" });
     renderSeats(offerState(price));
 
-    const continueButton = screen.getByRole("button", { name: "Continue" });
+    const continueButton = screen.getByRole("button", { name: "Hold the seat and pay" });
     expect(continueButton).toBeDisabled();
     await pick("1A", "1B", "1C");
     expect(screen.getByText(`${total.toFixed(2)} EUR`)).toBeInTheDocument();
@@ -106,9 +106,9 @@ describe("seat selection", () => {
     renderSeats();
     await pick("1A");
 
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hold the seat and pay" }));
     expect(await screen.findByText(/could not reach the booking service/i)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hold the seat and pay" }));
     await screen.findByTestId("checkout-search");
 
     const [first, second] = vi.mocked(createHold).mock.calls.map((call) => call[1]);
@@ -124,7 +124,7 @@ describe("seat selection", () => {
     renderSeats();
     await pick("1A");
 
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hold the seat and pay" }));
     expect(await screen.findByText(/already have seats held/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Resume" })).toBeInTheDocument();
 
@@ -141,7 +141,7 @@ describe("seat selection", () => {
     renderSeats();
     await pick("1A");
 
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hold the seat and pay" }));
 
     await screen.findByTestId("checkout-search");
     expect(createHold).toHaveBeenCalledTimes(2);
@@ -160,7 +160,7 @@ describe("seat selection", () => {
     renderSeats();
     await pick("1A");
 
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hold the seat and pay" }));
 
     expect(await screen.findByText(/costs 26.90 EUR/)).toBeInTheDocument();
     expect(screen.queryByText(/could not reach/i)).not.toBeInTheDocument();
@@ -176,7 +176,7 @@ describe("seat selection", () => {
     renderSeats();
     await pick("1A");
 
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hold the seat and pay" }));
     fireEvent.click(await screen.findByRole("button", { name: "Cancel it and continue" }));
 
     expect(await screen.findByText(/already being paid/)).toBeInTheDocument();
@@ -192,7 +192,7 @@ describe("seat selection", () => {
     renderSeats();
     await pick("1A");
 
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hold the seat and pay" }));
     fireEvent.click(await screen.findByRole("button", { name: "Cancel it and continue" }));
 
     expect((await screen.findByTestId("checkout-search")).textContent).toBe("?orderId=o-new");

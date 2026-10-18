@@ -1,5 +1,5 @@
 import { ProgressBar, Spinner } from "react-bootstrap";
-import type { OrderStatus } from "../api/orders";
+import type { OrderStatus } from "../../api/orders";
 
 export const HAPPY_PATH: { status: OrderStatus; label: string; icon: string }[] = [
   { status: "ACCEPTED", label: "Order placed", icon: "bi-receipt" },
@@ -49,10 +49,13 @@ function progressPercent(status: OrderStatus): number {
 }
 
 export function OrderStepper({ status, lastKnownStepIndex }: { status: OrderStatus; lastKnownStepIndex: number }) {
+  // The stepper answers "what is happening to my order now". On a finished one, nothing is.
+  if (status === "CONFIRMED" || status === "REFUNDED") return null;
+
   if (status === "FAILED" || status === "CANCELLED") {
     if (lastKnownStepIndex === 0) {
       return (
-        <div className="d-flex align-items-center gap-3 mb-4 p-3 bg-light rounded-3">
+        <div className="d-flex align-items-center gap-3 px-3 py-3 border-bottom">
           <div className="position-relative flex-shrink-0" style={{ width: STEP_SIZE * 3, height: STEP_SIZE }}>
             <ProgressBar
               now={100}
@@ -88,7 +91,7 @@ export function OrderStepper({ status, lastKnownStepIndex }: { status: OrderStat
     const percent = (failIndex / (HAPPY_PATH.length - 1)) * 100;
 
     return (
-      <div className="mb-4 p-3 bg-light rounded-3">
+      <div className="px-3 py-3 border-bottom">
         <div className="position-relative mb-2" style={{ height: STEP_SIZE }}>
           <ProgressBar
             now={percent}
@@ -112,8 +115,6 @@ export function OrderStepper({ status, lastKnownStepIndex }: { status: OrderStat
                   >
                     {isFailNode ? (
                       <i className={`bi ${status === "FAILED" ? "bi-x-lg" : "bi-slash-lg"}`} aria-hidden="true" />
-                    ) : isDone ? (
-                      <i className="bi bi-check-lg" aria-hidden="true" />
                     ) : (
                       <i className={`bi ${step.icon}`} aria-hidden="true" />
                     )}
@@ -150,7 +151,7 @@ export function OrderStepper({ status, lastKnownStepIndex }: { status: OrderStat
   const trackInset = `${100 / (HAPPY_PATH.length * 2)}%`;
 
   return (
-    <div className="mb-4 p-3 bg-light rounded-3">
+    <div className="px-3 py-3 border-bottom">
       <div className="position-relative mb-2" style={{ height: STEP_SIZE }}>
         <ProgressBar
           now={progressPercent(status)}
@@ -173,9 +174,9 @@ export function OrderStepper({ status, lastKnownStepIndex }: { status: OrderStat
                 >
                   {state === "active" && !isCompensatingNode ? (
                     <Spinner animation="border" size="sm" />
-                  ) : state === "done" ? (
-                    <i className="bi bi-check-lg" aria-hidden="true" />
                   ) : (
+                    // Done keeps its own icon: the filled circle already says it happened, and a row
+                    // of identical ticks says nothing about which step was which.
                     <i className={`bi ${icon}`} aria-hidden="true" />
                   )}
                 </div>
