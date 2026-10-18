@@ -1,5 +1,7 @@
 # Application documentation
 
+[Interactive diagrams](https://g05-eurotransit.github.io/EuroTransit-application/) are published from `main` with GitHub Pages.
+
 Start with the [architecture](design/architecture.md) to understand the system, [local setup](operations/local-dev-setup.md) to run it, or the [API contracts](design/api-design.md) to integrate a service.
 
 | Section | Contents |
