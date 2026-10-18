@@ -1,54 +1,12 @@
-# Frontend (React SPA)
+# Frontend
 
-The EuroTransit frontend (`frontend/`) covers the assignment's required customer
-flow: route/offer browsing, checkout, order-status refresh with clear success/failure
-states, and live notifications. It also carries the two money-path screens that are not
-customer-facing on their own — the operator console and the post-sale refund. Stack:
-Vite + React 19 + TypeScript, served as static assets by nginx behind Traefik at the site
-root (same origin as `/api/*`).
+The React/TypeScript storefront supports browsing, seat selection, customer-held checkout, order progress, notifications and commercial refunds. Operations accounts use the reconciliation console. nginx serves the SPA and public runtime configuration behind Traefik; the UI calls same-origin APIs.
 
-Every security decision is grounded in the course's **Frontend Security lecture (07b)**.
+## Identity and client behavior
 
-## Authentication
+The public Keycloak client uses authorization code with PKCE. Access tokens remain in memory; silent renewal uses the SSO session. Roles from the access token select the UI shell, while services enforce the [authorization contract](api-design.md#security-boundary). An operations account lands on `/operations` and cannot purchase on behalf of a customer.
 
-- **OIDC Authorization Code Flow + PKCE (S256)** against Keycloak, via `react-oidc-context`
-  / `oidc-client-ts`. The SPA is a public client and holds no secret; PKCE proves the token
-  request came from the client that started the flow (07b slides 14–16, RFC 9700).
-- `state` param guards the callback against CSRF (slide 15).
-- The browser redirect flow is used — **not** the password/direct-access grant (that was
-  curl-only testing).
-
-## Token storage
-
-- **Access token in memory only** (`oidc-client-ts` configured with `InMemoryWebStorage`).
-  Never `localStorage`/`sessionStorage` — any injected script could read it there (07b
-  slides 5, 18, 19). The token is lost on reload; silent renew via the Keycloak SSO cookie
-  restores the session without persisting the JWT.
-- The non-React API client reads the token from an in-memory holder (`auth/tokenHolder.ts`)
-  that a small component (`TokenSync`) keeps in sync — nothing touches persistent storage.
-
-## Roles and shells
-
-- The realm role is read from the **access** token's `realm_access.roles` (`auth/roles.ts`),
-  not from the ID token: the access token is the one Orders authorizes on, and the local realm
-  puts the claim in it alone (the cluster realm maps it into both).
-- The claim is not verified in the browser and does not need to be. It decides what the UI
-  *offers*; every endpoint behind it is gated server-side on `ROLE_operations`, so a forged
-  claim buys a nav label and a page whose calls answer `403`.
-- An `operations` account gets a different shell: `/operations` plus the order-detail page, and
-  every other path redirects to the console. It cannot place an order (`POST /api/orders` is
-  customer-only) and owns no tickets, so browsing and checkout would be dead ends.
-
-## API calls
-
-- Single `fetch` wrapper (`api/client.ts`): attaches `Authorization: Bearer <token>` on
-  protected calls, a fresh `Idempotency-Key` per checkout attempt (reused only on retry of
-  the same attempt — frozen contract), and a per-action `X-Correlation-Id` so the money-path
-  trace ties back to the exact UI action.
-- Relative same-origin `/api/...` paths → no CORS wildcard ever needed (07b slide 12).
-- The frozen error model (`{code, message, correlationId}`) is mapped to typed UI outcomes:
-  401→login, 403/404→not-authorized/not-found, 409→conflict, 422→business error,
-  503→dependency/circuit-open.
+The shared fetch wrapper attaches the bearer token on protected calls and carries action correlation and idempotency identities. Tokens never belong in URLs, browser persistent storage, logs or runtime configuration. A random retry key may be stored in sessionStorage; it is not a credential.
 
 ## Checkout with a seat hold (ADR-016)
 
@@ -91,97 +49,16 @@ The checkout is two calls, minutes apart, and the seats are held between them.
   keeps for the rest of the checkout (T2) is the pipeline's, not the customer's, and the UI never shows or
   names it. A held order opened from the order list shows **Complete payment**.
 
-## SSE (live notifications)
+## Notifications
 
-- Uses `@microsoft/fetch-event-source`, **not** the native `EventSource`, specifically so
-  the token travels in an `Authorization` header — the native `EventSource` can't set
-  headers, which would force the JWT into the URL query string, forbidden by 07b slide 19
-  (tokens leak in logs/history/Referer).
-- On disconnect, the page keeps the history it already fetched and shows a soft "offline"
-  state; checkout and order status are unaffected (graceful degradation — assignment).
+Authenticated fetch-based SSE carries the token in an Authorization header. On disconnect, the UI retains fetched messages and can poll the notification API. Its [process-local history limitation](api-design.md#notifications) applies after restart; displaying the list does not establish durable history. Checkout and order progress remain usable while Notifications is unavailable.
 
-## Operator console (`/operations`)
+## Operations and refunds
 
-The UI over the reconciliation API (`docs/design/api-design.md`), for the orders automatic
-recovery could not finish. Policy and the decision table live in
-[orders-recovery-runbook.md](../operations/orders-recovery-runbook.md); the page only renders them.
+The console presents the single action applicable to an incident and order state, according to the [recovery runbook](../operations/orders-recovery-runbook.md). It rechecks state after asynchronous commands, disables in-flight actions and requires evidence for settle/resolve. Its deadline display is advisory; the backend checks the database clock.
 
-- **One action per row, never four.** `allowedAction()` in `api/reconciliation.ts` duplicates the
-  runbook's `kind` × `orderStatus` table and offers the single action that applies — or, where the
-  runbook allows none, the reason instead of a button. The duplication is deliberate: the API
-  refuses a wrong action with a `409` anyway, and an operator should not have to provoke the
-  refusal to learn the rule. The four preconditions are mutually exclusive, so at most one of
-  `redrive` / `abandon` / `settle` / `resolve` is ever accepted for a given incident.
-- **The seat-hold clock is part of the decision.** A `PAYMENT_PENDING` order is redrivable until
-  its hold lapses and abandonable only after; the table runs one 1 Hz clock and the button changes
-  by itself at the deadline. The clock is shown only for `PAYMENT_PENDING` — every other status
-  keeps the deadline its hold once had, necessarily in the past. The browser's clock is advisory:
-  the server re-checks expiry in SQL against the database clock.
-- **Every command is a `202`,** so the list reloads twice — immediately, then after a grace period
-  — and that order's buttons stay disabled in between. Without it the reload lands while the
-  pipeline is still working and can offer an action the order has already outgrown.
-- **Evidence is required** for `settle` and `resolve` and is collected in a modal; the refusal
-  codes are rendered as sentences, with the correlation id kept on screen.
-- The list also refreshes itself every 30 s, paused while a dialog is open or a command is in
-  flight.
+Commercial refunds use frozen offer terms exposed by Orders. A successful acceptance shows refund progress rather than claiming money and seat return are already complete. API errors are rendered as actionable messages with correlation IDs; provider/internal failure details are never shown as customer explanations.
 
-## Post-sale refund
+## Browser boundary
 
-The customer path for ADR-015, on the order-detail page. The refund terms are frozen at checkout
-and come back with the order (`refundable`, `refundCutoffMinutesBeforeDeparture`, `departureAt`),
-so the page needs no catalogue call.
-
-- `refundWindow()` in `api/orders.ts` mirrors the server's four refusals, so a customer reads the
-  rule — "Refundable until 1 day before departure", "This fare is non-refundable" — instead of
-  meeting a `409`. Eligibility is still decided server-side against the database clock.
-- A refund is irreversible, so it is confirmed in a modal that states the amount, that the seat
-  returns to sale, and that the ticket is void. A fresh `Idempotency-Key` per attempt keeps a
-  double click from asking twice.
-- `202` moves the order to `REFUNDING`, which is **not** terminal for the page: polling resumes
-  until `REFUNDED`. The hold-expiry rule that stops polling is skipped for a refund — a completed
-  sale has no hold left to run out.
-- An `operations` account can refund on a customer's behalf, from the same page, reached by the
-  order link in the console. The role lifts only the ownership check: the four eligibility rules
-  apply to staff exactly as they do to the owner, so a refund outside the terms is refused for
-  everyone.
-
-## XSS
-
-- Zero `dangerouslySetInnerHTML`; all backend strings (notification `message`, catalog
-  fields) render as text through JSX escaping (07b slide 7). If HTML rendering is ever
-  needed, it must go through `DOMPurify.sanitize`, and any URL used as `href`/`src` must be
-  scheme-validated (no `javascript:`/`data:`).
-
-## Secrets & supply chain
-
-- No secrets in the frontend: `VITE_*` vars carry only the Keycloak issuer, the public
-  client id, and the API base path — all public (07b slide 25). `.env.example` documents them.
-- Minimal dependency footprint; `package-lock.json` committed; `npm audit` is clean for
-  production dependencies (dev-only tooling advisories, if any, are tracked separately).
-
-## Client-side validation
-
-- UX only (07b slide 26 — "validate twice, enforce once"): the checkout form gives instant
-  feedback, but the server is the source of truth for every rule.
-
-## Production checklist (07b slide 29) — status
-
-| Check | Status |
-| --- | --- |
-| Access token in memory; refresh token in httpOnly cookie | Access token in memory ✅. Refresh-token-in-httpOnly-cookie (BFF) noted as future hardening, out of scope for the local capstone. |
-| Dangerous HTML wrapped in DOMPurify | N/A — no `dangerouslySetInnerHTML` used ✅ |
-| CORS origin lists specific origins, not `*` | Same-origin via the gateway → no CORS needed ✅ |
-| Session cookie `SameSite=Lax`/`Strict` + `Secure` | Keycloak session cookie — owned by Person 1 (gateway/Keycloak) ⛳ |
-| CSP header present; no `unsafe-inline` in `script-src` | Set at the gateway (Traefik middleware); the build emits no inline scripts. Cross-slice item for Person 1 ⛳ |
-| No secrets in `VITE_*` vars | ✅ |
-| Client-side rules duplicated on server | ✅ (server enforces) |
-| `npm audit` clean; lockfile committed; Dependabot | Lockfile committed, prod deps clean ✅; Dependabot is a repo-level follow-up ⛳ |
-
-## Cross-slice items (owned by others)
-
-- **Person 1 (gateway/security):** enforce PKCE (`pkce.code.challenge.method: S256`) on the
-  Keycloak `eurotransit-frontend` client (currently unset); tighten `redirectUris`/`webOrigins`
-  from `*` to the real frontend origin; add the Traefik CSP/HSTS/security-headers middleware
-  on the frontend route (roll out `Content-Security-Policy-Report-Only` first — slide 23).
-- **Person 4 (payments):** confirm the exact `paymentMethodToken` value/format the sandbox
-  provider accepts (the UI sends the token Stripe.js creates from the card form).
+React escapes text; do not introduce untrusted HTML rendering. Runtime configuration is publicly retrievable and contains no secret. Client-side validation improves feedback but never replaces server validation, ownership or refund eligibility checks. See [frontend source](../../frontend/src) for routes and API consumers, and [local setup](../operations/local-dev-setup.md) for execution.

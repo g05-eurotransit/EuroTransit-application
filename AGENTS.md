@@ -7,3 +7,5 @@
 - Keep implementation and documentation focused on the EuroTransit marketplace and its money path: catalog browsing, order placement, seat hold, payment authorization, confirmation, and notification.
 - Agents expect `EuroTransit-application` and `EuroTransit-configuration` to be checked out in the same parent folder. If either repository is missing, ask the user to clone it into that same folder before making cross-repository documentation changes.
 - When updating documentation, always evaluate both repositories and keep them aligned: application docs own behavior/contracts/team planning, while configuration docs own Kubernetes, GitOps, ingress, secrets, observability, and operational proof.
+
+- Use the [documentation guide](docs/templates/README.md) for structure, templates, ownership and GitHub diagram previews.

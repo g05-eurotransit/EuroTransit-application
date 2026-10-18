@@ -96,12 +96,6 @@ If `just customer-token` fails:
 - `invalid_grant`: confirm the user credentials, that the user is enabled, and that the password is not temporary.
 - `NO_TOKEN`, empty output, or `null`: rerun `just customer-token` directly and use the printed Keycloak error payload as the source of truth.
 
-## Service-Level Authorization Baseline
+## Authorization
 
-Every service validates bearer JWTs locally. The local gateway marker header is not authentication.
-
-- Catalog permits unauthenticated `GET /api/catalog/**` reads and denies other routes by default.
-- Orders requires the `customer` role for `POST /api/orders`; `GET /api/orders/**` accepts `customer` or `operations`, with ownership checks still required in Orders code.
-- Inventory and Payments require the `service` role for internal APIs.
-- Notifications customer-facing reads require `customer` or `operations`.
-- Actuator health endpoints are public for probes; all unlisted routes are denied.
+The [API security matrix](api-design.md#security-boundary) owns roles and ownership rules. Local issuer/JWKS configuration must agree with tokens obtained from Keycloak.
