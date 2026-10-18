@@ -251,7 +251,8 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
     hold race; `SEATS_UNAVAILABLE` at checkout remains the authoritative answer and clients must
     still handle it.
   - Browsing traffic is isolated from the money path by a separate `inventory-read` circuit breaker
-    and bulkhead, a tighter timeout, and **no retry** — a stale seat map is not worth a retry, and
+    and bulkhead, a configurable timeout (default 5 seconds, including service authentication;
+    `ORDERS_INVENTORY_READ_TIMEOUT_MS` overrides it), and **no retry** — a stale seat map is not worth a retry, and
     retrying read traffic is how a slow dependency becomes an outage.
   - `404` when Inventory reports no seats for the route and date. Inventory returns one code for two
     different cases — an unknown route, and a known route with no seats provisioned for that travel

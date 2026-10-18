@@ -32,6 +32,7 @@ class WebClientInventoryReadClient(
     serviceAuthExchangeFilter: ExchangeFilterFunction,
     circuitBreakerRegistry: CircuitBreakerRegistry,
     bulkheadRegistry: BulkheadRegistry,
+    @Value("\${eurotransit.services.inventory.read-timeout-ms:5000}") timeoutMillis: Long = 5000,
 ) : InventoryReadClient {
 
     // Same builder as the money-path client: it carries the correlation-id customizer and client
@@ -46,9 +47,9 @@ class WebClientInventoryReadClient(
     private val circuitBreaker = circuitBreakerRegistry.circuitBreaker("inventory-read")
     private val bulkhead = bulkheadRegistry.bulkhead("inventory-read")
 
-    // Half the money path's two seconds. A customer waiting on a seat map is waiting on a page, not
-    // on a purchase: failing fast and letting them retry costs far less than holding a connection.
-    private val timeout = Duration.ofSeconds(1)
+    // Includes first-use service-token acquisition and connection setup, not only Inventory work.
+    // Keep the wait bounded while allowing cold requests more time than the former one-second limit.
+    private val timeout = Duration.ofMillis(timeoutMillis)
 
     override suspend fun getSeatAvailability(routeId: String, travelDate: LocalDate): SeatAvailabilityOutcome =
         try {

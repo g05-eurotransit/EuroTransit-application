@@ -108,6 +108,8 @@ eurotransit:
   services:
     inventory:
       url: http://localhost:8082
+      # Seat-map reads only; includes service authentication and connection setup.
+      read-timeout-ms: ${ORDERS_INVENTORY_READ_TIMEOUT_MS:5000}
     payments:
       url: http://localhost:8085
     # Resolved per checkout to price the offer and freeze its refund terms. Unlike inventory and

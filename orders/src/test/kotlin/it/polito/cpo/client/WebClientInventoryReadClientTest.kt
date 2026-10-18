@@ -7,6 +7,7 @@ import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.test.web.reactive.server.HttpHandlerConnector
 import org.springframework.web.reactive.function.client.ExchangeFilterFunction
+import org.springframework.web.reactive.function.client.ClientResponse
 import org.springframework.web.reactive.function.client.WebClient
 import org.springframework.web.reactive.function.client.WebClientResponseException
 import org.springframework.web.reactive.function.server.RequestPredicates
@@ -14,6 +15,9 @@ import org.springframework.web.reactive.function.server.RouterFunctions
 import org.springframework.web.reactive.function.server.ServerResponse
 import reactor.core.publisher.Mono
 import java.time.LocalDate
+import java.time.Duration
+import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -142,6 +146,57 @@ class WebClientInventoryReadClientTest {
 
         assertEquals(1, reads.get(), "the seat map must not be retried")
         assertEquals(3, holds.get(), "the money path retries: 1 initial + 2, per retryConfig")
+    }
+
+    @Test
+    fun `the default read budget allows service authentication taking longer than one second`() = runBlocking {
+        val calls = AtomicInteger()
+        val resilience = ResilienceConfiguration()
+        val client = WebClientInventoryReadClient(
+            inventoryUrl = "http://inventory.test",
+            webClientBuilder = WebClient.builder().exchangeFunction {
+                calls.incrementAndGet()
+                Mono.just(ClientResponse.create(HttpStatus.OK)
+                    .header("Content-Type", "application/json")
+                    .body("""{"routeId":"R1","travelDate":"2026-09-20","seats":[]}""")
+                    .build())
+            },
+            serviceAuthExchangeFilter = ExchangeFilterFunction { request, next ->
+                Mono.delay(Duration.ofMillis(1250)).flatMap { next.exchange(request) }
+            },
+            circuitBreakerRegistry = resilience.circuitBreakerRegistry(),
+            bulkheadRegistry = resilience.bulkheadRegistry(),
+        )
+
+        assertIs<SeatAvailabilityOutcome.Found>(client.getSeatAvailability("R1", travelDate))
+        assertEquals(1, calls.get())
+    }
+
+    @Test
+    fun `an overridden timeout cancels stuck authentication without calling Inventory or retrying`() = runBlocking {
+        val calls = AtomicInteger()
+        val authAttempts = AtomicInteger()
+        val cancelled = AtomicBoolean()
+        val resilience = ResilienceConfiguration()
+        val client = WebClientInventoryReadClient(
+            inventoryUrl = "http://inventory.test",
+            webClientBuilder = WebClient.builder().exchangeFunction {
+                calls.incrementAndGet()
+                Mono.error(AssertionError("Inventory must not be called before authentication completes"))
+            },
+            serviceAuthExchangeFilter = ExchangeFilterFunction { _, _ ->
+                authAttempts.incrementAndGet()
+                Mono.never<ClientResponse>().doOnCancel { cancelled.set(true) }
+            },
+            circuitBreakerRegistry = resilience.circuitBreakerRegistry(),
+            bulkheadRegistry = resilience.bulkheadRegistry(),
+            timeoutMillis = 50,
+        )
+
+        assertFailsWith<TimeoutException> { client.getSeatAvailability("R1", travelDate) }
+        assertEquals(1, authAttempts.get())
+        assertEquals(0, calls.get())
+        assertTrue(cancelled.get(), "the expired read must cancel its authentication publisher")
     }
 
     /**
