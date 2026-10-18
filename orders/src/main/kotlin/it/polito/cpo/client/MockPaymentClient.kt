@@ -17,5 +17,5 @@ class MockPaymentClient : PaymentClient {
     ): AuthorizationOutcome = AuthorizationOutcome.Authorized(providerReference = "mock_auth_id")
 
     override suspend fun refund(orderId: UUID, idempotencyKey: String): ReversalOutcome =
-        ReversalOutcome.Reversed
+        ReversalOutcome.Reversed(providerReference = "mock_refund_id")
 }

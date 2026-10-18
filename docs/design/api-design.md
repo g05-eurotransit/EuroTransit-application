@@ -17,7 +17,7 @@ EuroTransit is designed as an enterprise-grade system. Public APIs must assume a
 - Inventory and Payments APIs are internal service-to-service APIs and are not exposed directly to public clients.
 - Service-to-service requests must propagate correlation IDs, the authenticated principal where required, and a trusted service identity. The production target should use mTLS or an equivalent workload-identity control.
 - Gateway authentication is not a substitute for service-level authorization. Each service must enforce local ownership, role, and scope decisions for resources it owns.
-- Money-path actions must emit audit-ready logs with correlation ID, principal ID, order ID, and outcome. Logs must not contain bearer tokens, secrets, raw payment data, or card details.
+- Money-path actions must emit audit-ready logs with correlation ID, principal ID, order ID, and outcome. Logs must not contain bearer tokens, secrets, raw payment data, or card details. Orders' implementation: [observability-conventions.md, Money-Path Audit Log](observability-conventions.md#money-path-audit-log).
 - Secrets such as database credentials, signing keys, and payment-provider credentials belong in the configuration repository as SealedSecrets, not in application source.
 
 ### Endpoint Security Summary
@@ -26,12 +26,22 @@ EuroTransit is designed as an enterprise-grade system. Public APIs must assume a
 | --- | --- | --- | --- |
 | `GET /api/catalog/**` | Public or authenticated depending on offer visibility | Optional for public catalog; required for personalized offers | Public read or customer scope |
 | `POST /api/orders` | External | Required | Customer scope; principal becomes order owner |
+| `POST /api/orders/{orderId}/payment` | External | Required | Order owner only; submits the payment for a held customer-hold order (ADR-016), 404 for anyone else |
+| `GET /api/orders` | External | Required | Customer scope; always scoped to the caller's own orders, with no operations widening |
+| `GET /api/orders/seat-availability` | External | Required | Customer scope; no owned resource, so no ownership check — it is a checkout step, not public browsing |
 | `GET /api/orders/{orderId}` | External | Required | Order owner or privileged operations scope |
+| `POST /api/orders/{orderId}/refund` | External | Required | Order owner or privileged operations scope, same ownership rule as `cancel` (404, never 403, for anyone else) |
+| `GET /api/orders/reconciliation` | Internal operations | Required operations credential | Operations role only; lists the open reconciliation incidents an operator chooses a redrive from |
 | `POST /api/orders/{orderId}/reconciliation/redrive` | Internal operations | Required operations credential | Operations role only; redrives an open reconciliation record through the Orders outbox |
+| `POST /api/orders/{orderId}/reconciliation/abandon` | Internal operations | Required operations credential | Operations role only; moves a `PAYMENT_PENDING` order past its seat hold into compensation (#140) |
+| `POST /api/orders/{orderId}/reconciliation/{recordId}/settle` | Internal operations | Required operations credential | Operations role only; settles an abandoned order's unknown payment outcome with provider evidence (#140) |
 | `POST /api/orders/{orderId}/reconciliation/{recordId}/resolve` | Internal operations | Required operations credential | Operations role only; records evidence-backed resolution of a terminal invariant incident |
+| `GET /api/inventory/availability` | Internal | Required service credential | Orders service only; read behind the Orders façade, no propagated user context required |
 | `POST /api/inventory/reservations` | Internal | Required service credential plus propagated user context | Orders service only; order owner context required |
 | `PUT /api/inventory/reservations/{reservationId}/confirmation` | Internal | Required service credential plus propagated user context | Orders service only; confirms the reservation for its owning order |
+| `PUT /api/inventory/reservations/{reservationId}/payment-window` | Internal | Required service credential | Orders service only; opens the one-time T2 payment window for its owning order (ADR-016), idempotent by reservation state, no `Idempotency-Key` |
 | `DELETE /api/inventory/reservations/{reservationId}` | Internal | Required service credential plus propagated user context | Orders service only; compensation for owned order |
+| `POST /api/inventory/reservations/{reservationId}/refund` | Internal | Required service credential | Orders service only; post-sale seat return for a refund (ADR-014/ADR-015), idempotent by reservation state, no `Idempotency-Key` |
 | `POST /api/payments/authorize` | Internal | Required service credential plus propagated user context | Orders service only; payment belongs to owned order |
 | `POST /api/payments/refund` | Internal | Required service credential plus propagated user context | Orders service only; idempotently reverses payment for a failed checkout |
 | `GET /api/notifications` | External | Required | Authenticated customer can read only their own notifications |
@@ -39,12 +49,12 @@ EuroTransit is designed as an enterprise-grade system. Public APIs must assume a
 
 ## Shared Request Headers
 
-| Header | Required On | Contract |
-| --- | --- | --- |
-| `Authorization` | Protected external APIs and internal service calls according to the endpoint security summary | Carries a bearer JWT for public APIs or service identity for internal calls. |
-| `X-User-Id` | Internal service-to-service calls (e.g. `POST /api/inventory/reservations`) | Explicitly propagates the original customer identity when the `Authorization` header carries a service account token instead of the user token. |
-| `X-Correlation-Id` | All internal calls, logs, and Kafka events | Public clients may provide it; the gateway generates one if absent; services must propagate it unchanged through one checkout flow. |
-| `Idempotency-Key` | `POST /api/orders`, both `POST /api/orders/{orderId}/reconciliation/**` operations, `POST /api/inventory/reservations`, `POST /api/payments/authorize`, `POST /api/payments/refund` | Identifies one mutating attempt. It is not an authorization credential and must be scoped with caller/user context, operation, and request fingerprint. |
+| Header             | Required On                                                                                                                                                                         | Contract                                                                                                                                                |
+|--------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Authorization`    | Protected external APIs and internal service calls according to the endpoint security summary                                                                                       | Carries a bearer JWT for public APIs or service identity for internal calls.                                                                            |
+| `X-User-Id`        | Internal service-to-service calls (e.g. `POST /api/inventory/reservations`)                                                                                                         | Explicitly propagates the original customer identity when the `Authorization` header carries a service account token instead of the user token.         |
+| `X-Correlation-Id` | All internal calls, logs, and Kafka events                                                                                                                                          | Public clients may provide it; the gateway generates one if absent; services must propagate it unchanged through one checkout flow.                     |
+| `Idempotency-Key`  | `POST /api/orders`, `POST /api/orders/{orderId}/payment`, `POST /api/orders/{orderId}/refund`, both `POST /api/orders/{orderId}/reconciliation/**` operations, `POST /api/inventory/reservations`, `POST /api/payments/authorize`, `POST /api/payments/refund` | Identifies one mutating attempt. It is not an authorization credential and must be scoped with caller/user context, operation, and request fingerprint. |
 
 Idempotency keys are generated at the caller boundary for the operation they protect:
 
@@ -52,30 +62,31 @@ Idempotency keys are generated at the caller boundary for the operation they pro
 - Public clients reuse that key only for retries of the same checkout attempt.
 - A new checkout attempt uses a new key, even if the request payload is identical.
 - Orders consumes the public checkout key and stores it with `principalId`, operation, request fingerprint, and result.
-- Orders generates separate downstream keys for internal operations, derived from the immutable order id. The scheme is `inv-{orderId}` for the seat reservation, `pay-{orderId}` for payment authorization, `rel-{orderId}` for hold release, and `refund-{orderId}` for payment reversal.
+- Orders generates separate downstream keys for internal operations, derived from the immutable order id. The scheme is `inv-{orderId}` for the seat reservation, `pay-{orderId}` for payment authorization, `rel-{orderId}` for hold release, `refund-{orderId}` for a checkout compensation's payment reversal, and `pay-refund-{orderId}` for a post-sale refund's payment reversal (ADR-015) — a distinct namespace, because reusing `refund-{orderId}` would make Payments replay the compensation's stored result for a commercial refund.
 - Inventory and Payments store their received keys scoped by operation, service caller/user context where applicable, request fingerprint, and result.
 - Reusing the same key with the same logical payload returns the current idempotent business result.
 - Reusing the same key with a different logical payload returns `409 Conflict`.
 
 Idempotency retention is service-specific:
 
-| Service | Operation | Retention |
-| --- | --- | --- |
-| Orders | Checkout/order placement | 24 hours |
-| Inventory | Seat reservation | 30 minutes |
-| Payments | Payment authorization | 24 hours |
+| Service   | Operation                | Retention  |
+|-----------|--------------------------|------------|
+| Orders    | Checkout/order placement | 24 hours   |
+| Orders    | Payment submission       | 24 hours   |
+| Inventory | Seat reservation         | 30 minutes |
+| Payments  | Payment authorization    | 24 hours   |
 
-Inventory seat holds last 10 minutes. The 30-minute idempotency record identifies the original reservation but does not freeze a cached `HELD` response, extend the deadline, or create a replacement hold. A replay resolves the reservation's current state. `reservations.order_id` remains unique after idempotency-record purge, so one order cannot acquire a second reservation.
+Inventory seat holds last 10 minutes. A customer-hold order (ADR-016) gets one more 10-minute window, restarted once by the payment-window command when the customer pays; nothing else extends a hold. The 30-minute idempotency record identifies the original reservation but does not freeze a cached `HELD` response, extend the deadline, or create a replacement hold. A replay resolves the reservation's current state. `reservations.order_id` remains unique after idempotency-record purge, so one order cannot acquire a second reservation.
 
 ## Service Boundaries
 
-| Service | Responsibility | Interaction Style | Why this boundary exists |
-| --- | --- | --- | --- |
-| Catalog | Exposes routes, schedules, products, and offers. | Synchronous read API. | Catalog is read-heavy and tolerant of stale data, so it can be scaled and deployed independently from checkout. |
-| Orders | Owns the customer-facing purchase workflow, order state, idempotent checkout acceptance, and its PostgreSQL database. | Synchronous entry API plus asynchronous pipeline orchestration. | Orders is the money-path coordinator: it accepts checkout requests quickly and records/reports order progress. |
-| Inventory | Owns finite seat availability, time-limited seat holds, and the hold-to-sale transition. | Synchronous hold and confirmation decisions plus reservation events. | Inventory is the contended resource. It must create one strongly consistent hold before payment and atomically confirm the sale before Orders becomes final. Its reservation store is separate from Orders' order-state ownership. |
-| Payments | Owns payment authorization state and integrates with a provider sandbox/test API. | Synchronous idempotent authorization plus payment events. | Payment authorization must not double-charge under retries; an immediate success/failure decision is needed before order confirmation. |
-| Notifications | Sends confirmations and customer updates. | Fully asynchronous event consumer. | Notification failure must not fail checkout. Kafka buffers the work until the service recovers. |
+| Service       | Responsibility                                                                                                        | Interaction Style                                                    | Why this boundary exists                                                                                                                                                                                                           |
+|---------------|-----------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Catalog       | Exposes routes, schedules, products, and offers.                                                                      | Synchronous read API.                                                | Catalog is read-heavy and tolerant of stale data, so it can be scaled and deployed independently from checkout.                                                                                                                    |
+| Orders        | Owns the customer-facing purchase workflow, order state, idempotent checkout acceptance, and its PostgreSQL database. | Synchronous entry API plus asynchronous pipeline orchestration.      | Orders is the money-path coordinator: it accepts checkout requests quickly and records/reports order progress.                                                                                                                     |
+| Inventory     | Owns finite seat availability, time-limited seat holds, and the hold-to-sale transition.                              | Synchronous hold and confirmation decisions plus reservation events. | Inventory is the contended resource. It must create one strongly consistent hold before payment and atomically confirm the sale before Orders becomes final. Its reservation store is separate from Orders' order-state ownership. |
+| Payments      | Owns payment authorization state and integrates with a provider sandbox/test API.                                     | Synchronous idempotent authorization plus payment events.            | Payment authorization must not double-charge under retries; an immediate success/failure decision is needed before order confirmation.                                                                                             |
+| Notifications | Sends confirmations and customer updates.                                                                             | Fully asynchronous event consumer.                                   | Notification failure must not fail checkout. Kafka buffers the work until the service recovers.                                                                                                                                    |
 
 ## Datastore Ownership
 
@@ -96,38 +107,312 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
 - `GET /api/catalog/routes`
   - Lists available routes and schedules. Public data may be served without authentication; personalized pricing requires an authenticated user.
 - `GET /api/catalog/routes/{routeId}`
-  - Returns details for one route.
+  - Returns details for one route, including `departureZone`, the IANA zone id of the departure
+    station. `departureTime` is a zone-less `LocalTime`, so a caller holding a `travelDate` needs the
+    zone to compose an instant.
 - `GET /api/catalog/offers`
   - Lists currently available pricing and ticket offers. Personalized offers require a customer principal.
+- `GET /api/catalog/offers/{offerId}`
+  - Returns one offer with its machine-readable `refundPolicy` (`refundable`, plus
+    `cutoffMinutesBeforeDeparture`, null when not refundable), its `termsVersion`, and the route's
+    `departureTime` and `departureZone` denormalized onto the response.
+  - Catalog owns the refund policy; Orders applies it. The `conditions` string is display text
+    *rendered from* the policy — a caller must never parse it to make a money decision.
+  - The response carries a duration and a zone rather than a precomputed instant: Orders composes
+    `travelDate + departureTime` in `departureZone` and compares it against its own database clock,
+    for the same reason hold expiry uses the database clock. Catalog never learns about orders.
+  - `termsVersion` is the monotonic marker Orders persists with the offer id at checkout, so editing
+    an offer later cannot retroactively rewrite what a past customer accepted.
 
 ### Orders
 
 - `POST /api/orders`
-  - Accepts a checkout request.
+  - Accepts a checkout request: `routeId`, `seats`, `travelDate`, `totalAmount`, `offerId`, and an
+    optional `paymentMethodToken`.
+  - **The token selects the flow (ADR-016).** Without it, the order follows the customer-hold flow:
+    the pipeline holds the seats and stops in `held-awaiting-payment`, and the customer pays with
+    `POST /api/orders/{orderId}/payment` before the hold's T1 deadline. With it, the direct flow runs
+    hold, authorization and confirmation straight through, as it always has; the load test and the
+    canary analysis jobs depend on it. The frontend uses the customer-hold flow.
+  - `409 ACTIVE_HOLD_EXISTS` when the customer already has a customer-hold order in `accepted`,
+    `reserving` or `held-awaiting-payment`. `details.orderId` carries that order, so a client can
+    offer to resume it or cancel it. Enforced by a unique index, so two concurrent requests cannot
+    both pass. Direct-flow orders are not counted. `details.orderId` is null when the blocking order
+    ended in the instant between the refusal and the lookup: the client simply retries.
+  - `travelDate` is the ISO day being travelled (`"2026-09-01"`). A route plus a seat does not identify
+    a bookable thing on its own: Inventory keys seats by `(route_id, travel_date, seat_id)`, so the same
+    physical seat is sold separately for each day.
+  - `offerId` is **required** and decides the price. Orders resolves it against
+    `GET /api/catalog/offers/{offerId}` inside the synchronous entry and rejects the checkout unless
+    the offer exists, is sold on `routeId`, and its price matches:
+  - **An offer price is per seat.** `totalAmount` must equal `price × seats.length`. This is a
+    constraint, not an accident of the current seed: every offer is a fare per passenger. An offer
+    ever sold per unit — a sleeper compartment rather than a berth — would make this multiplication
+    silently wrong, so it must be raised with Catalog before such an offer exists.
+  - `400 SEATS_REQUIRED` when `seats` is empty. A checkout with no seats is not orderable whatever
+    the offer says, and with the expected total computed as `price × seats.length` an empty list
+    would otherwise make a `totalAmount` of `0` pass the price check.
+    - `400 OFFER_NOT_FOUND` — no such offer.
+    - `400 OFFER_ROUTE_MISMATCH` — the offer is sold on another route. `details.routeId` carries the
+      route it does belong to.
+    - `400 OFFER_PRICE_MISMATCH` — the amount disagrees with the offer. `details.price` carries the
+      per-seat price and `details.expectedTotal` the line total, so a client can re-render rather
+      than guess. The request is refused rather than silently corrected: charging an amount other
+      than the one the customer was shown is its own bug. Amounts are compared by value, so `24.9`
+      and `24.90` agree.
+    - `503 OFFER_UNRESOLVABLE` — Catalog could not be reached, so the price could not be verified.
+      **The checkout fails closed**: this is a deliberate availability trade, because accepting the
+      client's amount when the check cannot be made reopens issue #93 at the moment nobody is
+      watching. A `503` rather than a `400` because the request was fine — the answer is "ask again".
+  - What gets authorized is the **resolved** price and currency, not the requested ones. `totalAmount`
+    is a consistency check on what the client displayed. The currency comes from the offer too: it
+    used to be a `"EUR"` literal on the authorization call while the amount came from the request, so
+    the two were never checked against each other — latent while every seeded offer is EUR, and not
+    latent on the first CHF offer for one of the cross-border routes.
+  - The order also freezes the offer's refund terms — refundability, the cutoff, the accepted
+    `termsVersion`, and the departure instant composed from `travelDate` and the station's zone — so
+    a later catalogue edit cannot rewrite what the customer accepted and the refund needs no Catalog
+    call. See ADR-015.
+  - **`offerId` became required once the SPA started sending it (#84), which closes #93.** Two
+    consequences worth stating. The idempotency fingerprint now always carries the offer segment, so
+    every canonical string has fixed arity — that removed a collision the optional form carried, and
+    could only be done in the same change. And Catalog is now on the critical path of **every**
+    checkout, not only those carrying an offer: while it is unreachable, no checkout is accepted.
+    That is the cost of closing #93 and it is deliberate.
+  - The `offer_id` **column** stays nullable. Orders placed before the SPA change legitimately hold
+    `NULL` and there is nothing to backfill them with; the refund endpoint refuses them, which is the
+    right answer.
   - Requires an authenticated customer identity.
   - Returns `202 Accepted` with an `orderId` and initial status after the request has been accepted for processing.
+  - Rejects a `travelDate` in the past with `400 TRAVEL_DATE_IN_THE_PAST`. Orders deliberately checks no
+    more than that: which dates actually have seats is Inventory's to answer, and a date without seats
+    becomes a definitive hold rejection that fails the order through the normal path.
   - Requires a public-client-generated `Idempotency-Key` so client retries do not create duplicate orders.
+    The stored request fingerprint includes `travelDate`, so reusing one key for two different days is an
+    `IDEMPOTENCY_CONFLICT` rather than a replay of the wrong day. A request with a token keeps exactly
+    the canonical string it had before ADR-016, so keys stored before that change still replay; a
+    request without one has a distinct marker in place of the token. It includes `offerId` for the same
+    reason, and only when the field is present, so keys already in flight when the field shipped still
+    replay instead of conflicting.
   - Stores checkout idempotency records for 24 hours.
+- `POST /api/orders/{orderId}/payment`
+  - Submits the payment for a customer-hold order (ADR-016): `paymentMethodToken` in the body and a
+    public-client-generated `Idempotency-Key`. Only the order owner may call it; anyone else gets
+    `404`, as for `GET /api/orders/{orderId}`. The operations role does not widen it: staff never pay
+    on a customer's behalf.
+  - In one Orders transaction it moves `held-awaiting-payment` to `payment-pending` — only while the
+    order's `reservationExpiresAt` is still ahead of the Orders database clock — stores the token and
+    the submission time, stores the idempotency record, and writes a new `order-placed` outbox row.
+    The pipeline then opens the T2 payment window in Inventory and authorizes. Returns
+    `202 Accepted` with the `orderId` and the status `payment-pending`, the same shape as the checkout
+    response; the client follows the rest on `GET /api/orders/{orderId}`.
+  - `400 PAYMENT_TOKEN_REQUIRED` for a blank token, before the order is touched.
+  - The same key with the same token replays the stored response. Refusals, each `409`:
+    `HOLD_EXPIRED` (T1 has passed by the Orders clock, whether or not the expiry job has already
+    cancelled the order; the client goes back to seat selection),
+    `PAYMENT_ALREADY_STARTED` (a payment for this order was already accepted under another key or
+    token — the first one stands, and the later token is not used), `ORDER_NOT_PAYABLE` (any other
+    state, including a direct-flow order, one the customer cancelled, or one still `reserving`), and
+    `IDEMPOTENCY_CONFLICT` (same key, different token).
+  - Inventory remains the authority on T1 (invariant 4): a payment admitted here a moment before the
+    Inventory deadline is refused by the payment-window command and the order fails before any money
+    moves.
+  - Stores payment-submission idempotency records for 24 hours.
+- `GET /api/orders`
+  - Returns the authenticated customer's own order history, newest first.
+  - Accepts an optional `status` filter, so a "my tickets" view is `?status=CONFIRMED` while the
+    unfiltered list stays reachable and a customer can still find a failed attempt.
+  - Paginates by keyset, not offset: `limit` (default 20, capped at 100) plus an opaque `cursor`
+    returned as `nextCursor`, null on the last page. Offset paging would shift under the concurrent
+    inserts that happen precisely while a customer is reading this list.
+  - **Unlike `GET /api/orders/{orderId}`, the operations role does not widen this endpoint.** That
+    role exists so support can read one order it was given the id of; dropping the principal filter
+    on a collection would return every customer's orders in one call. The filter is applied in the
+    SQL predicate rather than in the controller, so it cannot be bypassed by a later edit.
+  - A malformed cursor is `400`, not a silent restart from the first page, which would make a paging
+    client loop over the same page forever.
+- `GET /api/orders/seat-availability?routeId=&travelDate=`
+  - Returns every seat for that route and travel date with a single `available` flag.
+  - Orders fronts this so Inventory stays internal: the browser reaches the `/api/orders` prefix
+    through Traefik, and Orders calls `GET /api/inventory/availability` with a service credential.
+    Routing it through Catalog instead would serve an authenticated step of the checkout from a
+    public anonymous route, and would leave nowhere to create a hold if issue #72 is ever accepted.
+  - `travelDate` is required, not optional: seats are keyed by `(route_id, travel_date, seat_id)`,
+    so a route alone does not identify a bookable seat.
+  - Rejects a `travelDate` in the past with `400 TRAVEL_DATE_IN_THE_PAST`, the same code `POST
+    /api/orders` uses, so a client that handles one handles the other (issue #98). It is a second
+    line of defence rather than the fix — which seats exist for a past date is Inventory's own truth,
+    tracked in #97. Filtering a *same-day* run that has already departed needs the departure instant
+    per route and is the remaining half of #98.
+  - Inventory's `HELD` and `SOLD` are deliberately collapsed into one flag, and no reservation id,
+    order id, or principal is returned: distinguishing held from sold reports another customer's
+    in-flight checkout.
+  - **The answer is advisory.** It is a read with no lock, so a seat reported free can still lose the
+    hold race; `SEATS_UNAVAILABLE` at checkout remains the authoritative answer and clients must
+    still handle it.
+  - Browsing traffic is isolated from the money path by a separate `inventory-read` circuit breaker
+    and bulkhead, a configurable timeout (default 5 seconds, including service authentication;
+    `ORDERS_INVENTORY_READ_TIMEOUT_MS` overrides it), and **no retry** — a stale seat map is not worth a retry, and
+    retrying read traffic is how a slow dependency becomes an outage.
+  - `404` when Inventory reports no seats for the route and date. Inventory returns one code for two
+    different cases — an unknown route, and a known route with no seats provisioned for that travel
+    date — so the façade has nothing better to say than to re-raise it; tracked in #96. A sold-out
+    run is not one of those cases: its seat rows exist, so it is a `200` with every seat unavailable.
+  - `409 RUN_ALREADY_DEPARTED` when the requested date is **today** and the run has already left.
+    ADR-014 requires this filter at read time rather than at the write, because a refund puts the
+    seats of a departed run back to `AVAILABLE` by design (#82) — so Inventory's rows are untouched
+    and a train that left at 07:40 still reads as bookable at 14:00. A distinct code rather than
+    "every seat unavailable": only a code lets the picker say what happened, since a grid of
+    greyed-out seats is indistinguishable from a sold-out train and the two need opposite advice.
+    `409` rather than `400` because the date is valid and it is the run's state that is wrong.
+    Catalog is consulted **only** for a travel date of today — a future date cannot have departed —
+    so the common browsing request keeps exactly one dependency. A route Catalog does not know is not
+    an error here: Inventory still owns whether the route and date have seats, and answers as it did
+    before this filter existed.
+  - `503 SEAT_MAP_UNAVAILABLE` when Inventory does not answer at all — a timeout, an open
+    `inventory-read` breaker, a 5xx, a refused connection. Deliberately distinct from the `404` above,
+    which is Inventory answering: collapsing the two would let "Inventory is down" be read as "no
+    seats are free". `503` rather than `504` because the status set is frozen and `503` is its member
+    for a dependency being unavailable or a circuit being open. The likeliest trigger is an Inventory
+    rollout, during which the breaker opens for about ten seconds (issue #104). The same code
+    answers when **Catalog** does not answer the departure lookup above: not knowing whether a train
+    has left is not a reason to say it has not, so the endpoint fails closed rather than dropping the
+    filter and selling a seat on a departed run.
+
 - `GET /api/orders/{orderId}`
-  - Returns the current order status: accepted, reserving, payment-pending, confirming-inventory, compensating, confirmed, failed, or cancelled.
+  - Returns the current order status: accepted, reserving, held-awaiting-payment, payment-pending, confirming-inventory, compensating, confirmed, failed, cancelled, refunding, or refunded. The last two are a separate durable process (ADR-015), reachable only from confirmed.
+  - Includes `travelDate`, distinct from `createdAt`: the day of travel, not the day of purchase.
+  - Includes `currency` beside `totalAmount`, so an amount is never presented without the unit it was
+    actually authorized in.
+  - Includes `offerId` when the checkout carried one, so a client can show what was bought and decide
+    whether to offer a refund: an order without an offer has no refund terms and the refund endpoint
+    will refuse it (ADR-015). Null on orders placed before the field existed.
+  - With it, the refund terms the order was sold under: `refundable`,
+    `refundCutoffMinutesBeforeDeparture` (null when not refundable, and null when refundable right up
+    to departure), and `departureAt` — the offset-bearing instant the cutoff counts back from,
+    already composed from the travel date and the departure station's zone so no client has to do
+    that arithmetic. All three are null together for an order placed without an offer.
+    These let a client render the right thing; **eligibility is still decided server-side** against
+    the Orders database clock (ADR-015). The accepted `termsVersion` is deliberately not exposed: it
+    is an audit marker, and a client holding it might use it as a key into a catalogue that no longer
+    has that revision.
+  - Once seats are held, includes `reservationExpiresAt`: the Inventory hold deadline, carried as an
+    offset-bearing instant because it is produced by the Inventory database clock and consumed by a
+    browser in an unknown zone. What it means depends on the state (ADR-016). In
+    `held-awaiting-payment` it is T1, the customer's deadline to pay, and clients show it as a
+    countdown. From `payment-pending` onward it is the deadline for the *checkout* to converge —
+    covering crash, retry, and Kafka lag — which in the customer-hold flow becomes T2 once the payment
+    window opens; it is not a customer deadline and clients must not count it down. 3-D Secure and
+    other customer actions after payment are not supported (#72).
+  - Includes `serverNow`, the Orders server's current instant, so a client can correct its own clock
+    before counting down to `reservationExpiresAt`. The countdown is presentation only; the server
+    decides whether a payment is still accepted.
+  - On a `failed` order, includes `failureCode` and a ready-to-display `failureMessage`. The code is
+    drawn from a deliberately small closed set — `SEATS_UNAVAILABLE`, `PAYMENT_DECLINED`, and a
+    generic `CHECKOUT_FAILED` — because only the first two describe something a customer can act on.
+    Every other internal classification, including every invariant violation, collapses into the
+    generic code, so an operator-facing failure class or a provider code can never reach a customer.
+    The mapping is an allowlist: a failure class added later collapses by default rather than leaking.
   - Requires the authenticated customer to own the order, unless an operator/admin role is used.
   - Returns `404 Not Found` for customer-to-customer access to avoid revealing another customer's order.
 - `POST /api/orders/{orderId}/cancel`
   - Cancels an order that has not yet started payment authorization, releasing any seat hold.
   - Requires the authenticated customer to own the order, or an operations role.
-  - Accepted only while the order is `accepted` or `reserving`. From `payment-pending` onward it
+  - Accepted only while the order is `accepted`, `reserving` or `held-awaiting-payment`; the last is
+    how the customer-hold flow goes back or changes seat — cancel, then a new order. From `payment-pending` onward it
     returns `409 ORDER_NOT_CANCELLABLE`, which is what closes the cancellation race before money
     moves; post-sale cancellation is a separate business process and cannot use hold release.
+- `POST /api/orders/{orderId}/refund`
+  - The post-sale refund (ADR-015): reverses the payment and returns the seat for a `confirmed`
+    order, money first. Requires the authenticated customer to own the order, or an operations role;
+    same 404-for-non-owner rule as `cancel`.
+  - Requires an `Idempotency-Key`, unlike `cancel`: the replay rule below needs a stored record to
+    distinguish a retried acceptance from a new request.
+  - Returns `202 Accepted` with the order now `refunding`, not `200`: unlike `cancel`, which commits
+    a terminal state synchronously, this commits only the acceptance of a refund whose reversal runs
+    asynchronously through its own `refund-requested` trigger and consumer — never the `order-placed`
+    pipeline, so a redelivered checkout event can never restart a completed sale.
+  - Refuses, each with its own `409` code: `ORDER_NOT_CONFIRMED` (wrong state, including an order
+    already refunding or refunded), `ORDER_HAS_NO_OFFER` (no offer, so no refund terms — every order
+    predating the offer fields is in this set), `OFFER_NOT_REFUNDABLE` (the offer's terms say no),
+    and `REFUND_CUTOFF_PASSED` (past `departureAt` minus the offer's cutoff, evaluated against the
+    Orders database clock, not a JVM clock, so two replicas agree at the boundary).
+  - **The replay rule is two opposite behaviours on one time condition.** An `Idempotency-Key`
+    already accepted before the cutoff returns its original result even when the retry arrives after
+    it; a genuinely new request after the cutoff is refused. The stored idempotency record is what
+    tells the two apart.
+  - The reversal itself: `pay-refund-{orderId}` against Payments (never `refund-{orderId}`, which
+    checkout compensation already consumes), then the reservation's refund against Inventory. If the
+    seat return fails definitively after the money is already reversed, the order stays `refunding`
+    with an open reconciliation incident — there is no `refund_failed` terminal state.
 - Orders persists order state in `orders_db`.
+- `GET /api/orders/reconciliation?limit=100`
+  - Requires an operations credential; a customer or a service credential is refused with `403`. Its
+    own rule precedes the order-read rule, which would otherwise admit any customer.
+  - Lists the **open** incidents, most urgent first — a live seat hold, nearest deadline first; then no
+    hold deadline, oldest first; then past the hold — at most `limit` (default 100, clamped to 1–500): `id`,
+    `orderId`, `kind`, `orderState` (the phase the incident was recorded in), `orderStatus` (where the
+    order is now, what a redrive resumes from), `failureClass`, `attemptCount`, `createdAt`,
+    `updatedAt` and the order's `reservationExpiresAt`. The last is the operator's deadline: past it, a `payment_pending`
+    order can no longer be redriven (`409 RESERVATION_HOLD_EXPIRED` below).
+  - Read only: no idempotency key, no audit line. The free-text `failureDetail` is not returned.
+  - How the list is used: [orders-recovery-runbook.md](../operations/orders-recovery-runbook.md).
 - `POST /api/orders/{orderId}/reconciliation/redrive`
   - Requires an operations credential and an idempotency key. A service credential is refused with
     `403`: it drives automated internal calls and must not be able to redrive a customer's checkout.
   - Accepts only orders with an open reconciliation record, otherwise
     `409 NO_OPEN_RECONCILIATION_RECORD`.
-  - Atomically stores the redrive result and writes a new `order-placed` outbox row, then returns `202 Accepted`.
-  - A terminal order returns `409 ORDER_ALREADY_TERMINAL` and closes any stale record as it refuses.
+  - Atomically stores the redrive result and writes a new outbox row, then returns `202 Accepted`. The
+    row's type depends on which durable process the order is currently in: `order-placed` for the
+    checkout pipeline, `refund-requested` for a `refunding` order (ADR-015).
+  - **What a redrive does and does not retry on a stuck refund.** It resumes the refund pipeline from
+    the durable `refunding` row, so it does retry a seat return that failed and a delivery that
+    exhausted its retries — and a payment reversal Payments refused definitively after #122 was deployed: the
+    reversal is re-sent under the same deterministic `pay-refund-{orderId}` key, but Payments no longer
+    stores a declined refund as a settled result and sends the provider a key suffixed with the number
+    of recorded declines, so the redrive reaches the provider again. If the provider declines again
+    the incident stays open, correctly: `closeAutoResolvable` runs only on the way to `refunded`,
+    `closeStaleFor`'s callers all exclude `refunding`, and `resolve` is filtered to invariant
+    violations.
+  - A **genuinely** terminal order (`confirmed`, `failed`, `cancelled`, `refunded`) returns
+    `409 ORDER_ALREADY_TERMINAL` and closes any stale record as it refuses. `refunding` answers `true`
+    from the same internal terminal check the checkout consumer uses, but is deliberately **not**
+    treated as terminal here: the money or the seat may still be unresolved, and closing its incident
+    on redrive would be exactly the failure this endpoint exists to fix.
+  - A `payment_pending` order whose seat hold has already expired returns
+    `409 RESERVATION_HOLD_EXPIRED` and leaves the incident open; its exit is `abandon` below. The one
+    exception is a customer-hold order whose payment window was never recorded (ADR-016): it resumes by
+    asking Inventory for the window, not by authorizing, so the redrive is accepted and the expired hold
+    makes the order fail with no money moved. That phase resumes by authorizing and
+    the hold is gone, so the redrive would buy nothing but a charge and its reversal. Only that phase
+    is refused: the others either re-take the hold or drive the order to a resolution it needs. The
+    same comparison is deliberately not made at authorization time, where the deadline is an Inventory
+    instant seconds away and Inventory is the only authority on whether it has passed (invariant 4).
   - Never modifies Inventory, Payments, or terminal Orders state directly. The stored order status is
     what selects the resume action, so the endpoint holds no knowledge of which stage resumes.
+- `POST /api/orders/{orderId}/reconciliation/abandon`
+  - Requires an operations credential and an idempotency key; a service credential is refused with `403`.
+  - Accepts only a `payment_pending` order whose seat hold has expired and that has an open incident.
+    Moves it to `compensating` and writes a new `order-placed` outbox row. The pipeline then reverses
+    an `AUTHORIZED` payment under `refund-{orderId}`, releases the hold and fails the order
+    (`CHECKOUT_FAILED`). If Payments holds no authorization, or one that is not `AUTHORIZED`, the order
+    stays `compensating` under a `PAYMENT_OUTCOME_UNKNOWN` incident: Payments writes its row only
+    after the provider answers, so a missing row does not prove no charge. A reversal the provider
+    refuses leaves `PAYMENT_REVERSAL_FAILURE`, redrivable as usual. Nothing on this path authorizes.
+    `202 Accepted`, the same key replays the same response.
+  - Refusals: `409 RESERVATION_HOLD_NOT_EXPIRED` (the hold still runs, by either clock: redrive
+    instead), `409 ORDER_NOT_ABANDONABLE` (any other status), `409 NO_OPEN_RECONCILIATION_RECORD`.
+- `POST /api/orders/{orderId}/reconciliation/{recordId}/settle`
+  - Requires an operations credential, an idempotency key and an `evidenceReference` from the payment
+    provider: the operator attests that the provider holds no money for the order (never charged, or
+    refunded there). Accepts only an open `PAYMENT_OUTCOME_UNKNOWN` of that order, with the order
+    `compensating`.
+  - Closes the incident with the evidence and writes a new `order-placed` outbox row; the pipeline then
+    fails the order. It never moves the order itself and never calls Payments or Inventory.
+    `202 Accepted`, the same key replays the same response.
+  - Refusals: `400 EVIDENCE_REFERENCE_REQUIRED`, `404 RECONCILIATION_RECORD_NOT_FOUND` (also another
+    order's record), `409 RECONCILIATION_KIND_NOT_SETTLEABLE`, `409 RECONCILIATION_ALREADY_RESOLVED`,
+    `409 ORDER_NOT_SETTLEABLE`.
 - `POST /api/orders/{orderId}/reconciliation/{recordId}/resolve`
   - Requires an operations credential, an idempotency key, a terminal order, and an evidence reference.
   - Resolves only an investigated invariant-violation record; it cannot waive payment reversal or change order state.
@@ -138,11 +423,19 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
 
 ### Inventory
 
+- `GET /api/inventory/availability`
+  - Returns seats and their privacy-safe boolean availability (`isAvailable`) for a specific route and `travelDate`.
+  - Internal API; callers must be trusted services such as Orders (seat map façade).
+  - Does not require a propagated user context (`X-User-Id`), as it only returns public seat state.
 - `POST /api/inventory/reservations`
   - Attempts to create a 10-minute hold for the requested seats.
+  - Returns `expiresAt` as an offset-bearing instant. It is derived from the Inventory database clock,
+    which is the only authority for expiry, and it reaches a browser as a countdown; a zone-less
+    wall-clock reading would be re-interpreted in the viewer's own zone.
   - Internal API; callers must be trusted services such as Orders.
   - Requires an Orders-generated idempotency key derived from the order id, operation, and attempt.
   - Uses a strong consistency decision: the same seat cannot have two active holds.
+  - Differentiates holds by route, travel date, and seat, so the same physical seat can be sold for different days.
   - Stores reservation idempotency records for 30 minutes without extending the 10-minute hold.
   - Owns reservation/seat availability state for the no-oversell invariant; this does not replace Orders' ownership of the order-state database.
 - `PUT /api/inventory/reservations/{reservationId}/confirmation`
@@ -151,9 +444,31 @@ Orders, Inventory, and Payments use separate logical PostgreSQL databases with s
   - Is idempotent by reservation and order: a first success and every valid replay return `200 CONFIRMED`.
   - Serializes with expiration and release. If expiration wins, confirmation returns a stable conflict and cannot resurrect the reservation.
   - Uses the protocol and failure semantics defined in [reservation-confirmation.md](reservation-confirmation.md).
+- `PUT /api/inventory/reservations/{reservationId}/payment-window`
+  - Opens the one-time payment window (T2) of a customer-hold reservation for the owning `orderId`
+    (ADR-016): under the reservation-row lock, a `HELD` reservation whose deadline has not passed by
+    the Inventory database clock gets `expiresAt = now + T2` (default 10 minutes) once.
+  - Idempotent by reservation state, no `Idempotency-Key`: a replay after the window opened returns
+    `200 HELD` with the same deadline and never extends it again.
+  - Refusals: `404 RESERVATION_NOT_FOUND`, `409 RESERVATION_ORDER_CONFLICT`,
+    `409 RESERVATION_EXPIRED` (the deadline has passed — the reservation is expired and its seats
+    released in the same transaction), `409 RESERVATION_CANCELLED`, `409 RESERVATION_NOT_HELD`
+    (`CONFIRMED` or `REFUNDED`).
+  - Serializes with confirmation, release, and expiration; the full mapping is in
+    [reservation-confirmation.md](reservation-confirmation.md#payment-window-api-adr-016).
 - `DELETE /api/inventory/reservations/{reservationId}`
   - Releases a hold when payment fails, the order is cancelled, or the 10-minute hold expires.
   - Is idempotent by reservation state, operates only on `HELD`, never releases `CONFIRMED`/`SOLD`, and does not require an `Idempotency-Key`.
+- `POST /api/inventory/reservations/{reservationId}/refund`
+  - Transitions a `CONFIRMED` reservation to `REFUNDED` and its seats back to available (ADR-014),
+    for the owning `orderId`. Called by Orders' post-sale refund (ADR-015) only after the payment
+    reversal has already succeeded.
+  - Idempotent **by reservation state**, not by key: a replay against an already-`REFUNDED`
+    reservation returns the same `200` instead of erroring, and the endpoint takes no
+    `Idempotency-Key` at all — unlike reserve and release.
+  - Refusals: `404 RESERVATION_NOT_FOUND`, `409 RESERVATION_ORDER_CONFLICT` (belongs to another
+    order), `409 RESERVATION_NOT_CONFIRMED` (any state but `CONFIRMED` or `REFUNDED`),
+    `409 RESERVATION_SEAT_CONFLICT` (seat count mismatch during the refund).
 
 ### Payments
 
@@ -202,31 +517,54 @@ Events use a common envelope. `schemaVersion` is the version of the event schema
 
 Consumers must be idempotent because Kafka delivery is treated as at-least-once. Events must not contain bearer tokens, provider secrets, raw payment data, card details, or plaintext credentials.
 
-| Event | Producer | Consumers | Purpose |
-| --- | --- | --- | --- |
-| `order-placed` | Orders | Orders pipeline observers, optional analytics | Durable record that checkout was accepted. |
-| `inventory-reserved` | Inventory | Orders | Indicates that the requested seats are held for 10 minutes and can proceed to payment. |
-| `inventory-failed` | Inventory | Orders | Indicates that the hold failed and the order must not proceed to payment. |
-| `payment-authorized` | Payments | Orders | Indicates payment authorization succeeded. |
-| `payment-declined` | Payments | Orders | Indicates payment failed and compensation may be needed. |
-| `payment-refunded` | Payments | Orders | Indicates a refund succeeded (compensation completed after a prior authorization). |
-| `payment-refund-failed` | Payments | Orders | Indicates a refund attempt failed and may need manual reconciliation. |
-| `order-confirmed` | Orders | Notifications, observability consumers | Indicates the order is complete and customer notification can be sent. |
-| `notification-requested` | Orders | Notifications | Optional explicit notification command if separated from `order-confirmed`. |
+| Event                    | Producer  | Consumers                                     | Purpose                                                                                                          |
+|--------------------------|-----------|-----------------------------------------------|------------------------------------------------------------------------------------------------------------------|
+| `order-placed`           | Orders    | Orders pipeline observers, optional analytics | Durable record that checkout was accepted.                                                                       |
+| `inventory-reserved`     | Inventory | Orders                                        | Indicates that the requested seats are held for 10 minutes and can proceed to payment. Includes the travel date. |
+| `inventory-failed`       | Inventory | Orders                                        | Indicates that the hold failed and the order must not proceed to payment. Includes the travel date.              |
+| `payment-authorized`     | Payments  | Orders                                        | Indicates payment authorization succeeded.                                                                       |
+| `payment-declined`       | Payments  | Orders                                        | Indicates payment failed and compensation may be needed.                                                         |
+| `payment-refunded`       | Payments  | Orders                                        | Indicates a refund succeeded (compensation completed after a prior authorization).                               |
+| `payment-refund-failed`  | Payments  | Orders                                        | Indicates a refund attempt failed and may need manual reconciliation.                                            |
+| `order-confirmed`        | Orders    | Notifications, observability consumers        | Indicates the order is complete and customer notification can be sent.                                           |
+| `notification-requested` | Orders    | Notifications                                 | Optional explicit notification command if separated from `order-confirmed`.                                      |
+| `refund-requested`       | Orders    | Orders (its own consumer only)                | Durable trigger for the post-sale refund (ADR-015): `confirmed` was accepted into `refunding`, and the reversal must run. Never consumed by the `order-placed` pipeline. |
+
+### `notification-requested` payload
+
+Beyond `recipientEmail` and `message`, the payload carries `type`
+(`ORDER_CONFIRMED`/`ORDER_FAILED`), `failureCode` (the `CustomerFailureCode` name, null on a
+confirmation), and the trip as `routeId` + `travelDate`.
+
+- **Every field past `message` is optional.** Orders and Notifications are deployed separately, so
+  an event produced by the previous version must keep parsing; a consumer that sees no `type`
+  renders the plain `message`, exactly as before.
+- **The trip travels as identifiers, not as resolved names.** Orders has no Catalog client and does
+  not acquire one for this: a confirmation must not depend on Catalog being reachable. Notifications
+  resolves the route against `GET /api/catalog/routes/{routeId}` and caches it, and delivers the
+  notification without trip context when that fails.
+- **Clients branch on `failureCode`, never on an HTTP status.** Inventory answers `409` for five
+  distinct conditions and none of them means the seats were taken, while the refusal that does mean
+  it is not a `409` at all.
+- **`message` is the only field that speaks about money**, and it is rendered verbatim. Those claims
+  belong to the closed `CustomerFailureCode` set, which is deliberately careful about what it can
+  truthfully assert — `CHECKOUT_FAILED` stays neutral because it covers both a failure before any
+  authorization and a checkout reversed after one. A client that recomposes the sentence would
+  reintroduce as a presentation bug the very claim Orders avoided making.
 
 ## Error Model
 
 All services use a shared HTTP status mapping:
 
-| Status | Meaning |
-| --- | --- |
-| `400` | Malformed request or required header missing |
-| `401` | Missing or invalid authentication |
-| `403` | Authenticated but not authorized |
-| `404` | Resource missing or intentionally not visible |
-| `409` | Idempotency conflict, reservation conflict, or incompatible state transition |
-| `422` | Valid request shape but invalid business action |
-| `503` | Dependency unavailable, provider unavailable, or circuit breaker open |
+| Status | Meaning                                                                      |
+|--------|------------------------------------------------------------------------------|
+| `400`  | Malformed request or required header missing                                 |
+| `401`  | Missing or invalid authentication                                            |
+| `403`  | Authenticated but not authorized                                             |
+| `404`  | Resource missing or intentionally not visible                                |
+| `409`  | Idempotency conflict, reservation conflict, or incompatible state transition |
+| `422`  | Valid request shape but invalid business action                              |
+| `503`  | Dependency unavailable, provider unavailable, or circuit breaker open        |
 
 Error responses use structured JSON:
 
@@ -267,13 +605,15 @@ The selected money path is hybrid sync+async:
 9. Kafka publishes facts such as `order-confirmed` and asynchronous work such as `notification-requested`.
 10. Notifications consumes events asynchronously; if it is down, checkout remains successful and Kafka retains the work.
 
+In the customer-hold flow (ADR-016), step 1 carries no payment token and the pipeline stops after step 4 in `HELD_AWAITING_PAYMENT`, with the seats held for T1. The customer then submits `POST /api/orders/{orderId}/payment`, which moves the order to `PAYMENT_PENDING` and writes a new `order-placed` row; the pipeline opens the T2 payment window in Inventory and continues from step 6.
+
 ## Resilience Requirements
 
 - All synchronous service calls must have timeouts, bounded retries with backoff/jitter, circuit breakers, and bulkheads.
-- Orders must flip readiness to refuse new traffic during shutdown while in-flight coroutine work drains or is cancelled cooperatively.
+- Orders must flip readiness to refuse new traffic during shutdown while in-flight coroutine work drains or is cancelled cooperatively. Orders drains: the record in progress finishes and the rest is redelivered and resumed from durable state ([orders-shutdown-and-replay.md](../operations/orders-shutdown-and-replay.md)).
 - Inventory and Payments must persist idempotency records so duplicate events or HTTP retries return the same outcome.
 - Orders persists checkout idempotency records for 24 hours, Inventory persists reservation idempotency records for 30 minutes, and Payments persists authorization idempotency records for 24 hours.
-- Inventory holds must expire after 10 minutes if payment does not complete, returning the seat to available state. Inventory idempotency retention must not renew an expired hold.
+- Inventory holds must expire after 10 minutes if payment does not complete, returning the seat to available state; a customer-hold reservation gets its one T2 window from the payment submission (ADR-016). Inventory idempotency retention must not renew an expired hold.
 - Reservation confirmation, expiration, and release must use atomic state transitions. Unknown confirmation outcomes are retried or reconciled; they are not treated as definitive failures.
 - Kafka retry exhaustion publishes to `order-placed.DLT`; a DLT consumer creates a reconciliation record without changing the durable checkout phase or issuing speculative compensation. Redrive uses the transactional outbox and resumes from the stored order state.
 - Notification failure is a degraded mode, not a checkout failure.

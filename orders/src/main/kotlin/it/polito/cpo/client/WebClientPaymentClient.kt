@@ -121,7 +121,7 @@ class WebClientPaymentClient(
     }
 
     private fun reversal(response: PaymentRefundResponse): ReversalOutcome = when (response.status) {
-        RefundStatus.REFUNDED -> ReversalOutcome.Reversed
+        RefundStatus.REFUNDED -> ReversalOutcome.Reversed(response.refundReference)
         RefundStatus.DEPENDENCY_FAILED -> error("Payments answered 200 with status ${response.status}")
         else -> ReversalOutcome.Failed(response.status.name, response.errorCode)
     }

@@ -2,6 +2,7 @@ package it.polito.cpo.event
 
 import io.micrometer.core.instrument.MeterRegistry
 import it.polito.cpo.contracts.events.OrderPlacedEvent
+import it.polito.cpo.model.OrderStatus
 import it.polito.cpo.observability.CorrelationId
 import it.polito.cpo.service.FailureClassifier
 import it.polito.cpo.service.OrderService
@@ -46,6 +47,8 @@ class OrderPlacedDeadLetterListener(
         @Header(KafkaHeaders.RECEIVED_KEY, required = false) recordKey: String?,
         @Header(KafkaHeaders.DLT_ORIGINAL_OFFSET, required = false) originalOffset: ByteArray?,
         @Header(KafkaHeaders.DLT_EXCEPTION_FQCN, required = false) exceptionFqcn: String?,
+        // What the listener actually threw: exceptionFqcn is the container's wrapper around it.
+        @Header(KafkaHeaders.DLT_EXCEPTION_CAUSE_FQCN, required = false) causeFqcn: String?,
         @Header(KafkaHeaders.DLT_EXCEPTION_MESSAGE, required = false) exceptionMessage: String?,
     ) {
         val event = try {
@@ -57,22 +60,44 @@ class OrderPlacedDeadLetterListener(
             count("poison")
             log.error(
                 "Poison record on {}: key={} originalOffset={} cause={}",
-                TOPIC, recordKey, originalOffset?.let { String(it) }, exceptionFqcn, ex,
+                TOPIC, recordKey, originalOffset?.let { String(it) }, causeFqcn ?: exceptionFqcn, ex,
             )
             return
         }
 
         MDC.putCloseable(CorrelationId.CONTEXT_KEY, event.correlationId).use {
-            runBlocking { record(event, exceptionFqcn, exceptionMessage) }
+            runBlocking { record(event, exceptionFqcn, causeFqcn, exceptionMessage) }
         }
     }
 
-    private suspend fun record(event: OrderPlacedEvent, exceptionFqcn: String?, exceptionMessage: String?) {
+    private suspend fun record(
+        event: OrderPlacedEvent,
+        exceptionFqcn: String?,
+        causeFqcn: String?,
+        exceptionMessage: String?,
+    ) {
         val order = orderService.getOrderById(event.orderId)
         if (order == null) {
             // An incident an operator cannot redrive is alert noise, so none is opened.
             count("unknown_order")
             log.error("Dead letter for unknown order {}", event.orderId)
+            return
+        }
+
+        if (order.status == OrderStatus.REFUNDING) {
+            // OrderStatus.isTerminal answers `true` here too, but only from the CHECKOUT consumer's
+            // point of view: the checkout itself plainly converged (REFUNDING is reachable only from
+            // CONFIRMED), so this order-placed delivery is stale for THAT reason -- but closeStaleFor
+            // closes every auto-resolvable kind, including SEAT_RETURN_FAILURE and
+            // PAYMENT_REVERSAL_FAILURE opened by a refund this dead letter knows nothing about and
+            // that may still be genuinely stuck. This exhausted checkout delivery is simply not
+            // evidence about the refund's own incident, so nothing is closed here; the refund's own
+            // dead-letter listener (`refund-requested-dlt`) owns that record.
+            count("stale_refunding")
+            log.info(
+                "Dead letter for order {} already REFUNDING; checkout itself converged, refund's own incident left untouched",
+                event.orderId,
+            )
             return
         }
 
@@ -92,7 +117,7 @@ class OrderPlacedDeadLetterListener(
             orderId = event.orderId,
             orderState = order.status.name,
             correlationId = event.correlationId,
-            failureClass = FailureClassifier.forDeadLetter(exceptionFqcn),
+            failureClass = FailureClassifier.forDeadLetter(exceptionFqcn, causeFqcn),
             detail = exceptionMessage,
         )
         count("recorded")

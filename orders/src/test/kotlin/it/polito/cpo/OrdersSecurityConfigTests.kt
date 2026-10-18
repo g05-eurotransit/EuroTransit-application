@@ -90,6 +90,31 @@ class OrdersSecurityConfigTests @Autowired constructor(
             .expectStatus().isOk
     }
 
+    // The collection path, not a sub-resource. The GET rule in SecurityConfig is written against the
+    // `/api/orders` prefix with a trailing double wildcard, and a PathPattern double wildcard is
+    // documented to match zero trailing segments — but "documented" is not "asserted". If that ever
+    // stopped holding, `anyExchange().denyAll()` would make the customer order history unreachable
+    // for everyone, rather than failing loudly here.
+    //
+    // (Line comments, not KDoc: Kotlin block comments nest, so a literal path pattern containing a
+    // slash-star sequence would open a nested comment that never closes.)
+    @Test
+    fun `the order list is reachable for the customer role`() {
+        webTestClient.get()
+            .uri("/api/orders")
+            .headers { it.setBearerAuth("customer-token") }
+            .exchange()
+            .expectStatus().isOk
+    }
+
+    @Test
+    fun `the order list rejects anonymous requests`() {
+        webTestClient.get()
+            .uri("/api/orders")
+            .exchange()
+            .expectStatus().isUnauthorized
+    }
+
     @Test
     fun `order creation rejects tokens without the customer role`() {
         webTestClient.post()
@@ -138,6 +163,43 @@ class OrdersSecurityConfigTests @Autowired constructor(
     }
 
     @Test
+    fun `refund is reachable for the customer role`() {
+        webTestClient.post()
+            .uri("/api/orders/order-123/refund")
+            .headers { it.setBearerAuth("customer-token") }
+            .exchange()
+            .expectStatus().isOk
+    }
+
+    @Test
+    fun `refund is reachable for the operations role`() {
+        webTestClient.post()
+            .uri("/api/orders/order-123/refund")
+            .headers { it.setBearerAuth("operations-token") }
+            .exchange()
+            .expectStatus().isOk
+    }
+
+    @Test
+    fun `refund rejects anonymous requests`() {
+        webTestClient.post()
+            .uri("/api/orders/order-123/refund")
+            .exchange()
+            .expectStatus().isUnauthorized
+    }
+
+    @Test
+    fun `refund rejects a service credential`() {
+        // Same rule as cancel: a service token drives internal calls and must not be able to refund
+        // a customer's order.
+        webTestClient.post()
+            .uri("/api/orders/order-123/refund")
+            .headers { it.setBearerAuth("service-token") }
+            .exchange()
+            .expectStatus().isForbidden
+    }
+
+    @Test
     fun `reconciliation redrive accepts only the operations role`() {
         webTestClient.post()
             .uri("/api/orders/order-123/reconciliation/redrive")
@@ -176,6 +238,69 @@ class OrdersSecurityConfigTests @Autowired constructor(
             .headers { it.setBearerAuth("service-token") }
             .exchange()
             .expectStatus().isForbidden
+    }
+
+    @Test
+    fun `the open-incident list accepts only the operations role`() {
+        webTestClient.get()
+            .uri("/api/orders/reconciliation")
+            .headers { it.setBearerAuth("operations-token") }
+            .exchange()
+            .expectStatus().isOk
+        // The order-read rule admits customers to GET under the same prefix; this rule must win, or
+        // any customer could read every customer's stuck orders.
+        webTestClient.get()
+            .uri("/api/orders/reconciliation")
+            .headers { it.setBearerAuth("customer-token") }
+            .exchange()
+            .expectStatus().isForbidden
+        webTestClient.get()
+            .uri("/api/orders/reconciliation")
+            .headers { it.setBearerAuth("service-token") }
+            .exchange()
+            .expectStatus().isForbidden
+        webTestClient.get()
+            .uri("/api/orders/reconciliation")
+            .exchange()
+            .expectStatus().isUnauthorized
+        // A trailing slash stays on the operator rule, not on the customer read rule.
+        webTestClient.get()
+            .uri("/api/orders/reconciliation/")
+            .headers { it.setBearerAuth("customer-token") }
+            .exchange()
+            .expectStatus().isForbidden
+    }
+
+    @Test
+    fun `abandoning an expired checkout accepts only the operations role`() {
+        webTestClient.post()
+            .uri("/api/orders/order-123/reconciliation/abandon")
+            .headers { it.setBearerAuth("operations-token") }
+            .exchange()
+            .expectStatus().isOk
+        listOf("customer-token", "service-token").forEach { token ->
+            webTestClient.post()
+                .uri("/api/orders/order-123/reconciliation/abandon")
+                .headers { it.setBearerAuth(token) }
+                .exchange()
+                .expectStatus().isForbidden
+        }
+    }
+
+    @Test
+    fun `settling an unknown payment outcome accepts only the operations role`() {
+        webTestClient.post()
+            .uri("/api/orders/order-123/reconciliation/rec-1/settle")
+            .headers { it.setBearerAuth("operations-token") }
+            .exchange()
+            .expectStatus().isOk
+        listOf("customer-token", "service-token").forEach { token ->
+            webTestClient.post()
+                .uri("/api/orders/order-123/reconciliation/rec-1/settle")
+                .headers { it.setBearerAuth(token) }
+                .exchange()
+                .expectStatus().isForbidden
+        }
     }
 
     @Test
@@ -218,10 +343,39 @@ class OrdersSecurityConfigTests @Autowired constructor(
             OrdersSecurityProbeController()
     }
 
+    @Test
+    fun `the seat map is not public`() {
+        // It is a step of the checkout, not browsing: the picker sits behind ProtectedRoute in the
+        // SPA. Serving it anonymously would also make Inventory's seat state enumerable through
+        // Orders by anyone, with no principal to rate-limit.
+        webTestClient.get()
+            .uri("/api/orders/seat-availability?routeId=R1&travelDate=2026-09-20")
+            .exchange()
+            .expectStatus().isUnauthorized
+    }
+
+    @Test
+    fun `a customer may read the seat map`() {
+        webTestClient.get()
+            .uri("/api/orders/seat-availability?routeId=R1&travelDate=2026-09-20")
+            .headers { it.setBearerAuth("customer-token") }
+            .exchange()
+            .expectStatus().isOk
+    }
+
     @RestController
     class OrdersSecurityProbeController {
         @PostMapping("/api/orders")
         fun createOrder(): Map<String, String> = mapOf("status" to "accepted")
+
+        @GetMapping("/api/orders")
+        fun listOrders(): Map<String, String> = mapOf("orders" to "[]")
+
+        @GetMapping("/api/orders/reconciliation")
+        fun openIncidents(): Map<String, String> = mapOf("incidents" to "[]")
+
+        @GetMapping("/api/orders/seat-availability")
+        fun seatAvailability(): Map<String, String> = mapOf("seats" to "[]")
 
         @GetMapping("/api/orders/{orderId}")
         fun readOrder(@PathVariable orderId: String): Map<String, String> = mapOf("orderId" to orderId)
@@ -229,8 +383,20 @@ class OrdersSecurityConfigTests @Autowired constructor(
         @PostMapping("/api/orders/{orderId}/cancel")
         fun cancelOrder(@PathVariable orderId: String): Map<String, String> = mapOf("orderId" to orderId)
 
+        @PostMapping("/api/orders/{orderId}/refund")
+        fun refundOrder(@PathVariable orderId: String): Map<String, String> = mapOf("orderId" to orderId)
+
         @PostMapping("/api/orders/{orderId}/reconciliation/redrive")
         fun redrive(@PathVariable orderId: String): Map<String, String> = mapOf("orderId" to orderId)
+
+        @PostMapping("/api/orders/{orderId}/reconciliation/{recordId}/settle")
+        fun settle(
+            @PathVariable orderId: String,
+            @PathVariable recordId: String,
+        ): Map<String, String> = mapOf("orderId" to orderId, "recordId" to recordId)
+
+        @PostMapping("/api/orders/{orderId}/reconciliation/abandon")
+        fun abandon(@PathVariable orderId: String): Map<String, String> = mapOf("orderId" to orderId)
 
         @PostMapping("/api/orders/{orderId}/reconciliation/{recordId}/resolve")
         fun resolve(

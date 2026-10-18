@@ -4,6 +4,7 @@ import java.math.BigDecimal
 
 interface IPaymentProvider {
     suspend fun authorize(
+        orderId: String,
         amount: BigDecimal,
         currency: String,
         paymentMethodToken: String,

@@ -21,6 +21,11 @@ spring:
     listener:
       # Joins the consumer span to the originating checkout trace (money-path tracing).
       observation-enabled: true
+      # On shutdown, finish the record in progress and stop: the rest of the polled batch stays
+      # uncommitted and is redelivered to the partition's next owner (this pod after a restart, or
+      # another replica during a rollout), where the pipeline resumes from the durable order state. The default finishes the whole batch, which with a slow dependency can outlast
+      # the shutdown phase and the pod's grace period (docs/operations/orders-shutdown-and-replay.md).
+      immediate-stop: true
   security:
     oauth2:
       resourceserver:
@@ -85,6 +90,7 @@ management:
       percentiles-histogram:
         http.server.requests: true
         orders.checkout.duration: true
+        orders.checkout.e2e.duration: true
   tracing:
     sampling:
       probability: 1.0
@@ -102,5 +108,15 @@ eurotransit:
   services:
     inventory:
       url: http://localhost:8082
+      # Seat-map reads only; includes service authentication and connection setup.
+      read-timeout-ms: ${ORDERS_INVENTORY_READ_TIMEOUT_MS:5000}
     payments:
       url: http://localhost:8085
+    # Resolved per checkout to price the offer and freeze its refund terms. Unlike inventory and
+    # payments this one needs no service credential: GET /api/catalog/** is permitAll.
+    #
+    # 8081 is the port catalog declares for itself. Note that a bare-metal local run collides with
+    # Keycloak, which the compose stack publishes on the same host port; inside compose there is no
+    # collision because EUROTRANSIT_SERVICES_CATALOG_URL points at http://catalog:8080.
+    catalog:
+      url: http://localhost:8081

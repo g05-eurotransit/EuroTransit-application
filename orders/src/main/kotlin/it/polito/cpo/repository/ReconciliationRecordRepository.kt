@@ -1,5 +1,6 @@
 package it.polito.cpo.repository
 
+import it.polito.cpo.model.OpenReconciliationIncident
 import it.polito.cpo.model.ReconciliationRecord
 import kotlinx.coroutines.flow.Flow
 import org.springframework.data.r2dbc.repository.Modifying
@@ -57,7 +58,12 @@ interface ReconciliationRecordRepository : CoroutineCrudRepository<Reconciliatio
      *
      * INVARIANT_VIOLATION is excluded on purpose: the order failing does not explain how the
      * impossible state arose, so it needs an operator. PAYMENT_REVERSAL_FAILURE is included because
-     * Orders only ever reaches a terminal state after the reversal succeeded.
+     * Orders only ever reaches a terminal state after the reversal succeeded. SEAT_RETURN_FAILURE is
+     * included for the same reason: REFUNDED is only ever committed after the seat return succeeded
+     * (RefundOrchestrator), so reaching it here means a previously-stuck seat return has since been
+     * resolved — by a redelivery, or by an operator retrying it. `REFUNDING` is not itself a
+     * "terminal transition" in the money sense, so this call must run from the REFUNDING -> REFUNDED
+     * commit specifically, not from entering REFUNDING.
      */
     @Modifying
     @Query(
@@ -66,7 +72,8 @@ interface ReconciliationRecordRepository : CoroutineCrudRepository<Reconciliatio
            SET status = 'RESOLVED', resolved_at = CURRENT_TIMESTAMP,
                resolved_by = 'system:terminal-state', updated_at = CURRENT_TIMESTAMP
          WHERE order_id = :orderId AND status = 'OPEN'
-           AND kind IN ('DELIVERY_EXHAUSTED', 'PAYMENT_REVERSAL_FAILURE')
+           AND kind IN ('DELIVERY_EXHAUSTED', 'PAYMENT_REVERSAL_FAILURE', 'SEAT_RETURN_FAILURE',
+                        'PAYMENT_OUTCOME_UNKNOWN')
         """,
     )
     suspend fun closeAutoResolvable(orderId: UUID): Long
@@ -93,6 +100,45 @@ interface ReconciliationRecordRepository : CoroutineCrudRepository<Reconciliatio
         evidenceReference: String,
     ): Long
 
+    /**
+     * Operator settlement of an unknown payment outcome (#140): the operator attests, from the provider,
+     * that no money is held for the order. Filtered to an open PAYMENT_OUTCOME_UNKNOWN of this order,
+     * the only kind it can close.
+     */
+    @Modifying
+    @Query(
+        """
+        UPDATE reconciliation_records
+           SET status = 'RESOLVED', resolved_at = CURRENT_TIMESTAMP,
+               resolved_by = :resolvedBy, evidence_reference = :evidenceReference,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id = :id AND order_id = :orderId
+           AND kind = 'PAYMENT_OUTCOME_UNKNOWN' AND status = 'OPEN'
+        """,
+    )
+    suspend fun settlePaymentOutcomeUnknown(
+        id: UUID,
+        orderId: UUID,
+        resolvedBy: String,
+        evidenceReference: String,
+    ): Long
+
+    /**
+     * Whether an operator has settled this order's unknown payment outcome with evidence. Read by the
+     * compensation, which only then fails an abandoned order whose authorization Payments cannot find.
+     * `resolved_by` excludes the automatic close, which never carries evidence.
+     */
+    @Query(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM reconciliation_records
+             WHERE order_id = :orderId AND kind = 'PAYMENT_OUTCOME_UNKNOWN' AND status = 'RESOLVED'
+               AND evidence_reference IS NOT NULL AND resolved_by <> 'system:terminal-state'
+        )
+        """,
+    )
+    suspend fun isPaymentOutcomeSettled(orderId: UUID): Boolean
+
     /** Records an operator redrive attempt against every open incident for the order. */
     @Modifying
     @Query(
@@ -106,6 +152,34 @@ interface ReconciliationRecordRepository : CoroutineCrudRepository<Reconciliatio
     suspend fun touchRedrive(orderId: UUID, correlationId: String): Long
 
     fun findAllByOrderIdAndStatus(orderId: UUID, status: String): Flow<ReconciliationRecord>
+
+    /**
+     * The open incidents for the operator list, most urgent first: those whose order still has a live
+     * seat hold, the nearest deadline first; then those with no hold deadline, oldest first; then those
+     * past their hold, which include the ones nothing will close (an expired `PAYMENT_PENDING`, an
+     * invariant violation). Sorting only by age would let those pile up at the top and push a fresh,
+     * still redrivable incident off the page.
+     *
+     * A left join: an incident is only opened for a known order, but a list that silently dropped one
+     * would hide exactly the incident nobody can explain.
+     */
+    @Query(
+        """
+        SELECT r.id, r.order_id, r.kind, r.order_state, o.status AS order_status, r.failure_class,
+               r.attempt_count, r.created_at, r.updated_at, o.reservation_expires_at
+          FROM reconciliation_records r
+          LEFT JOIN orders o ON o.id = r.order_id
+         WHERE r.status = 'OPEN'
+         ORDER BY CASE
+                      WHEN o.reservation_expires_at > CURRENT_TIMESTAMP THEN 0
+                      WHEN o.reservation_expires_at IS NULL THEN 1
+                      ELSE 2
+                  END,
+                  o.reservation_expires_at, r.created_at, r.id
+         LIMIT :limit
+        """,
+    )
+    fun findOpenIncidents(limit: Int): Flow<OpenReconciliationIncident>
 
     @Query("SELECT COUNT(*) FROM reconciliation_records WHERE status = 'OPEN' AND kind = :kind")
     suspend fun countOpenByKind(kind: String): Long

@@ -7,14 +7,10 @@ services:
   frontend:
     build:
       context: ./frontend
-      args:
-        # Public, non-secret build config (07b slide 25). Keycloak stays reachable at the
-        # host-facing 8081 for the browser redirect; API is same-origin via the gateway.
-        VITE_KEYCLOAK_ISSUER: http://localhost:8081/realms/eurotransit
-        VITE_KEYCLOAK_CLIENT_ID: eurotransit-frontend
-        VITE_API_BASE: /api
     image: eurotransit/frontend:local
     container_name: eurotransit-frontend
+    volumes:
+      - ./frontend/public/config/config.json:/usr/share/nginx/html/config/config.json:ro,Z
     expose:
       - "8080"
     labels:
@@ -41,6 +37,11 @@ services:
       MANAGEMENT_OTLP_METRICS_EXPORT_ENABLED: "false"
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8081/realms/eurotransit
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/eurotransit/protocol/openid-connect/certs
+      # The other four services already set this. Without it catalog falls back to the
+      # application.yaml default of localhost:4318, which inside a container is the container
+      # itself: the spans are produced and dropped, with no error to notice. Catalog was absent
+      # from every trace, and the offer lookup Orders makes during checkout ended in nothing.
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
     expose:
       - "8080"
     labels:
@@ -79,6 +80,7 @@ services:
       ORDERS_SERVICE_TOKEN_URI: http://keycloak:8080/realms/eurotransit/protocol/openid-connect/token
       EUROTRANSIT_SERVICES_INVENTORY_URL: http://inventory:8080
       EUROTRANSIT_SERVICES_PAYMENTS_URL: http://payments:8080
+      EUROTRANSIT_SERVICES_CATALOG_URL: http://catalog:8080
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
     expose:
       - "8080"
@@ -114,6 +116,7 @@ services:
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8081/realms/eurotransit
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/eurotransit/protocol/openid-connect/certs
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
+      INVENTORY_RESERVATION_EXPIRATION_ENABLED: "true"
     expose:
       - "8080"
     depends_on:
@@ -141,16 +144,13 @@ services:
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8081/realms/eurotransit
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/eurotransit/protocol/openid-connect/certs
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
-      # In-network broker address (compose PLAINTEXT listener). Without it the producer
-      # falls back to localhost, which does not resolve inside a container.
-      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      STRIPE_SANDBOX_URL: ${STRIPE_SANDBOX_URL:-https://api.stripe.com/v1}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-sk_test_1234567890}
     expose:
       - "8080"
     depends_on:
       postgres-init:
         condition: service_completed_successfully
-      kafka:
-        condition: service_started
     labels:
       - "traefik.enable=false"
 
@@ -170,6 +170,9 @@ services:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8081/realms/eurotransit
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/eurotransit/protocol/openid-connect/certs
+      # Trip context for notification messages. Not in depends_on on purpose: a notification is
+      # delivered without the route block when Catalog is unreachable, so it must not gate startup.
+      EUROTRANSIT_SERVICES_CATALOG_URL: http://catalog:8080
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
     expose:
       - "8080"
@@ -278,11 +281,18 @@ services:
       CONFIG_STORAGE_REPLICATION_FACTOR: 1
       OFFSET_STORAGE_REPLICATION_FACTOR: 1
       STATUS_STORAGE_REPLICATION_FACTOR: 1
-      # Per comodità di test evitiamo l'uso di schemi espliciti su Kafka
+      # Same converters as the cluster (EuroTransit-configuration,
+      # platform/connectors/base/orders-outbox-connect.yaml): the local stack is only a useful
+      # rehearsal for production if the outbox takes the same path through Connect.
       KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
-      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      # The CONNECT_ prefix is load-bearing, and its absence is invisible. The Debezium entrypoint
+      # maps a fixed set of bare names (BOOTSTRAP_SERVERS, GROUP_ID, KEY_CONVERTER, ...) and passes
+      # everything else through only when prefixed. Unprefixed, these two are silently dropped and
+      # JsonConverter keeps its default of wrapping every value in {"schema":..., "payload":...} —
+      # which the consumers cannot parse, so the order stops in ACCEPTED with no visible error.
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
     ports:
       - "8083:8083"
     depends_on:
@@ -297,6 +307,19 @@ services:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.web.address=:80"
+      # slo-observability.md requires every checkout trace to start with a gateway inbound span.
+      # Without these the gateway is invisible: it forwards the request but appears nowhere in
+      # Tempo, and the service span is the root of its own trace. Traefik also injects
+      # `traceparent` into the forwarded request, so the service span becomes its child.
+      - "--tracing.otlp=true"
+      - "--tracing.otlp.http=true"
+      # A base URL, not the signal path: the exporter appends /v1/traces itself. Spelled out
+      # because the default is https://localhost:4318 — https, and the wrong host.
+      - "--tracing.otlp.http.endpoint=http://tempo:4318"
+      - "--tracing.servicename=traefik"
+      # Sample everything: this is a local stack where a demo is a handful of requests, and a
+      # missed trace costs more than the storage. Tempo keeps blocks for 1h anyway.
+      - "--tracing.samplerate=1.0"
     ports:
       - "80:80"     # API Gateway entrypoint
       - "8080:8080" # Traefik dashboard
@@ -320,7 +343,7 @@ services:
     ports:
       - "8081:8080"
     volumes:
-      - ./infrastructure/local/keycloak:/opt/keycloak/data/import
+      - ./infrastructure/local/keycloak:/opt/keycloak/data/import:Z
 
 
   # ==========================================
@@ -332,7 +355,7 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./docker/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./docker/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro,Z
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -344,7 +367,7 @@ services:
       - "4318:4318" # OTLP HTTP ingest
       - "3200:3200" # Tempo query API
     volumes:
-      - ./docker/observability/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - ./docker/observability/tempo.yaml:/etc/tempo/tempo.yaml:ro,Z
 
   grafana:
     image: grafana/grafana:11.6.1
@@ -356,7 +379,7 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - ./docker/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/observability/grafana/provisioning:/etc/grafana/provisioning:ro,Z
     depends_on:
       - prometheus
       - tempo

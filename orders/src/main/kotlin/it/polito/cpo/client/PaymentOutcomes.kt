@@ -22,8 +22,16 @@ sealed interface AuthorizationOutcome {
  */
 sealed interface ReversalOutcome {
 
-    /** Definitively reversed. Only now may the order become FAILED (doc:150-152). */
-    data object Reversed : ReversalOutcome
+    /**
+     * Definitively reversed. Only now may checkout compensation become FAILED (doc:150-152) or a
+     * post-sale refund (ADR-015) return the seat.
+     *
+     * [providerReference] is `PaymentRefundResponse.refundReference`, carried through so the
+     * post-sale refund can persist it (V15's `refund_provider_reference`) for audit. Checkout
+     * compensation ignores it — nothing on `Order` records a compensation's provider reference,
+     * only a commercial refund's.
+     */
+    data class Reversed(val providerReference: String?) : ReversalOutcome
 
     /**
      * Definitive reversal failure. Deliberately a value and not an exception: rethrowing would burn
@@ -31,5 +39,19 @@ sealed interface ReversalOutcome {
      * will not change by retrying. The order stays COMPENSATING with a PAYMENT_REVERSAL_FAILURE
      * reconciliation record and an alert (doc:306).
      */
-    data class Failed(val code: String, val detail: String?) : ReversalOutcome
+    data class Failed(val code: String, val detail: String?) : ReversalOutcome {
+
+        /**
+         * Payments holds no authorization for the order: its refund answers `404` with status
+         * `NOT_FOUND` and error code `AUTHORIZATION_NOT_FOUND`. A 404 without that body (a route, a
+         * gateway) never gets here: it carries no refusal code, so the client treats it as unknown.
+         */
+        fun isNoAuthorization(): Boolean = code == "NOT_FOUND" && detail == "AUTHORIZATION_NOT_FOUND"
+
+        /**
+         * Payments holds an authorization for the order that is not `AUTHORIZED` (declined, or failed),
+         * so it refuses to reverse it: `422` with error code `INVALID_AUTHORIZATION_STATUS`.
+         */
+        fun isUnsettledAuthorization(): Boolean = code == "FAILED" && detail == "INVALID_AUTHORIZATION_STATUS"
+    }
 }

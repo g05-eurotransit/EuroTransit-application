@@ -46,5 +46,6 @@ data class PaymentRefundPayload(
     val refundReference: String?,
     val amount: BigDecimal?,
     val currency: String,
-    val errorCode: String? = null
+    val errorCode: String? = null,
+    val reason: String? = null // "COMPENSATION" | "COMMERCIAL" | "UNKNOWN"
 )

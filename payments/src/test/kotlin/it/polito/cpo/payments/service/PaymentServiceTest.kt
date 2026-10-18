@@ -4,9 +4,11 @@ import tools.jackson.databind.ObjectMapper
 import it.polito.cpo.contracts.payments.PaymentResponse
 import it.polito.cpo.contracts.payments.PaymentStatus
 import it.polito.cpo.payments.model.IdempotencyRecord
+import it.polito.cpo.payments.model.OutboxEvent
 import it.polito.cpo.payments.model.PaymentAuthorization
 import it.polito.cpo.payments.model.PaymentRefund
 import it.polito.cpo.payments.repository.IdempotencyRepository
+import it.polito.cpo.payments.repository.OutboxEventRepository
 import it.polito.cpo.payments.repository.PaymentAuthorizationRepository
 import it.polito.cpo.payments.repository.PaymentRefundRepository
 import it.polito.cpo.payments.service.payment.PaymentService
@@ -19,7 +21,6 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.springframework.http.HttpStatus
-import org.springframework.kafka.core.KafkaTemplate
 import org.springframework.transaction.ReactiveTransaction
 import org.springframework.transaction.ReactiveTransactionManager
 import org.springframework.transaction.TransactionDefinition
@@ -37,8 +38,8 @@ class PaymentServiceTest {
     private val idempotencyRepository = FakeIdempotencyRepository()
     private val paymentAuthorizationRepository = FakePaymentAuthorizationRepository()
     private val paymentRefundRepository = FakePaymentRefundRepository()
+    private val outboxEventRepository = FakeOutboxEventRepository()
 
-    private val kafkaTemplate = mockKafkaTemplate()
     private val objectMapper = org.mockito.Mockito.mock(ObjectMapper::class.java).apply {
         org.mockito.Mockito.`when`(this.writeValueAsString(org.mockito.Mockito.any())).thenReturn("{}")
         org.mockito.Mockito.`when`(this.readValue(org.mockito.Mockito.anyString(), org.mockito.Mockito.eq(PaymentResponse::class.java)))
@@ -50,14 +51,10 @@ class PaymentServiceTest {
         idempotencyRepository as IdempotencyRepository,
         paymentAuthorizationRepository as PaymentAuthorizationRepository,
         paymentRefundRepository as PaymentRefundRepository,
-        kafkaTemplate,
+        outboxEventRepository as OutboxEventRepository,
         objectMapper,
         NoopReactiveTransactionManager()
     )
-
-    private fun mockKafkaTemplate(): KafkaTemplate<String, String> {
-        return org.mockito.Mockito.mock(KafkaTemplate::class.java) as KafkaTemplate<String, String>
-    }
 
     @Test
     fun `authorize - successful payment hold`() = runTest {
@@ -66,6 +63,12 @@ class PaymentServiceTest {
         assertEquals("ch_123", response.providerReference)
         assertEquals(1, paymentAuthorizationRepository.saved.size)
         assertEquals(1, idempotencyRepository.saved.size)
+        assertEquals(listOf("order-123"), providerAdapter.authorizedOrderIds)
+
+        assertEquals(1, outboxEventRepository.saved.size)
+        val row = outboxEventRepository.saved.single()
+        assertEquals("payment-authorized", row.type)
+        assertEquals("order-123", row.aggregateId)
     }
 
     @Test
@@ -85,6 +88,143 @@ class PaymentServiceTest {
         assertEquals(IPaymentService.RefundStatus.REFUNDED, response.status)
         assertEquals(1, paymentRefundRepository.saved.size)
         assertEquals(1, idempotencyRepository.saved.size)
+
+        val row = outboxEventRepository.saved.single()
+        assertEquals("payment-refunded", row.type)
+        assertEquals("order-123", row.aggregateId)
+    }
+
+    @Test
+    fun `refund - a declined refund is not cached, so an identical retry is a real attempt`() = runTest {
+        paymentAuthorizationRepository.saved.add(
+            PaymentAuthorization(
+                orderId = "order-123",
+                principalId = "user1",
+                amount = BigDecimal.TEN,
+                currency = "EUR",
+                status = PaymentAuthorization.STATUS_AUTHORIZED,
+                providerReference = "ch_123",
+                idempotencyKey = "key-123"
+            )
+        )
+        providerAdapter.refundSucceeds = false
+
+        val first = paymentService.refund("order-123", BigDecimal.TEN, "pay-refund-order-123")
+        val second = paymentService.refund("order-123", BigDecimal.TEN, "pay-refund-order-123")
+
+        assertEquals(IPaymentService.RefundStatus.FAILED, first.status)
+        assertEquals(IPaymentService.RefundStatus.FAILED, second.status)
+        // The point: the retry reached the provider instead of replaying the decline.
+        assertEquals(2, providerAdapter.refundCalls)
+        assertEquals(0, idempotencyRepository.saved.size)
+        // Both attempts on record, keyless so the FK holds.
+        assertEquals(2, paymentRefundRepository.saved.size)
+        org.junit.jupiter.api.Assertions.assertTrue(paymentRefundRepository.saved.all { it.idempotencyKey == null })
+        org.junit.jupiter.api.Assertions.assertTrue(
+            paymentRefundRepository.saved.all { it.requestKey == "pay-refund-order-123" }
+        )
+    }
+
+    @Test
+    fun `refund - a successful refund is still replayed rather than refunding twice`() = runTest {
+        // The property the key exists for, which the fix must not cost us.
+        org.mockito.Mockito.`when`(
+            objectMapper.readValue(
+                org.mockito.Mockito.anyString(),
+                org.mockito.Mockito.eq(it.polito.cpo.payments.dto.PaymentRefundResponse::class.java)
+            )
+        ).thenReturn(
+            it.polito.cpo.payments.dto.PaymentRefundResponse(IPaymentService.RefundStatus.REFUNDED, "re_123", null)
+        )
+        paymentAuthorizationRepository.saved.add(
+            PaymentAuthorization(
+                orderId = "order-123",
+                principalId = "user1",
+                amount = BigDecimal.TEN,
+                currency = "EUR",
+                status = PaymentAuthorization.STATUS_AUTHORIZED,
+                providerReference = "ch_123",
+                idempotencyKey = "key-123"
+            )
+        )
+
+        paymentService.refund("order-123", BigDecimal.TEN, "pay-refund-order-123")
+        val replay = paymentService.refund("order-123", BigDecimal.TEN, "pay-refund-order-123")
+
+        assertEquals(IPaymentService.RefundStatus.REFUNDED, replay.status)
+        assertEquals(1, providerAdapter.refundCalls)
+        assertEquals(1, paymentRefundRepository.saved.size)
+        assertEquals(1, idempotencyRepository.saved.size)
+    }
+
+    @Test
+    fun `refund - a retry after a decline reaches the provider with a different idempotency key`() = runTest {
+        paymentAuthorizationRepository.saved.add(
+            PaymentAuthorization(
+                orderId = "order-123",
+                principalId = "user1",
+                amount = BigDecimal.TEN,
+                currency = "EUR",
+                status = PaymentAuthorization.STATUS_AUTHORIZED,
+                providerReference = "ch_123",
+                idempotencyKey = "key-123"
+            )
+        )
+        providerAdapter.refundSucceeds = false
+
+        paymentService.refund("order-123", BigDecimal.TEN, "pay-refund-order-123")
+        paymentService.refund("order-123", BigDecimal.TEN, "pay-refund-order-123")
+
+        // Stripe caches a decline for 24h; same key would replay it and the redrive stays a no-op.
+        assertEquals(2, providerAdapter.refundKeys.size)
+        // First attempt unsuffixed, so a refund in flight across this change still dedupes.
+        assertEquals("pay-refund-order-123", providerAdapter.refundKeys[0])
+        org.junit.jupiter.api.Assertions.assertNotEquals(
+            providerAdapter.refundKeys[0], providerAdapter.refundKeys[1]
+        )
+    }
+
+    @Test
+    fun `refund - a retry after an unknown outcome keeps the same provider key`() = runTest {
+        paymentAuthorizationRepository.saved.add(
+            PaymentAuthorization(
+                orderId = "order-123",
+                principalId = "user1",
+                amount = BigDecimal.TEN,
+                currency = "EUR",
+                status = PaymentAuthorization.STATUS_AUTHORIZED,
+                providerReference = "ch_123",
+                idempotencyKey = "key-123"
+            )
+        )
+        providerAdapter.refundThrows = true
+
+        val first = paymentService.refund("order-123", BigDecimal.TEN, "pay-refund-order-123")
+        paymentService.refund("order-123", BigDecimal.TEN, "pay-refund-order-123")
+
+        // The refund may have gone through: a fresh key would let Stripe run it a second time.
+        assertEquals(IPaymentService.RefundStatus.DEPENDENCY_FAILED, first.status)
+        assertEquals(providerAdapter.refundKeys[0], providerAdapter.refundKeys[1])
+    }
+
+    @Test
+    fun `refund - classifies the two idempotency namespaces and persists the reason`() = runTest {
+        val auth = PaymentAuthorization(
+            orderId = "order-123",
+            principalId = "user1",
+            amount = BigDecimal.TEN,
+            currency = "EUR",
+            status = PaymentAuthorization.STATUS_AUTHORIZED,
+            providerReference = "ch_123",
+            idempotencyKey = "key-123"
+        )
+        paymentAuthorizationRepository.saved.add(auth)
+
+        paymentService.refund("order-123", BigDecimal.TEN, "pay-refund-order-123")
+        assertEquals("COMMERCIAL", paymentRefundRepository.saved.last().reason)
+
+        paymentService.refund("order-123", BigDecimal.TEN, "refund-order-123")
+        assertEquals("COMPENSATION", paymentRefundRepository.saved.last().reason)
     }
 
     @Test
@@ -178,31 +318,26 @@ class PaymentServiceTest {
 
     @Test
     fun `publishEvent - serializes the typed event with java-time fields to a JSON string via the real ObjectMapper`() = runTest {
-        // Regression test for the original review concern: the Kafka value serializer is a plain
-        // StringSerializer, so the event must be pre-serialized to JSON; and the typed event envelope
-        // carries an occurredAt LocalDateTime, which must round-trip through the real (non-mocked) ObjectMapper.
+        // Real (non-mocked) ObjectMapper: must round-trip occurredAt (a LocalDateTime) without crashing.
         val realObjectMapper = JsonMapper.builder().addModule(kotlinModule()).build()
-        val localKafkaTemplate = mockKafkaTemplate()
+        val localOutboxEventRepository = FakeOutboxEventRepository()
         val service = PaymentService(
             FakePaymentProvider(),
             FakeIdempotencyRepository() as IdempotencyRepository,
             FakePaymentAuthorizationRepository() as PaymentAuthorizationRepository,
             FakePaymentRefundRepository() as PaymentRefundRepository,
-            localKafkaTemplate,
+            localOutboxEventRepository as OutboxEventRepository,
             realObjectMapper,
             NoopReactiveTransactionManager()
         )
 
         service.authorize("order-json", "user1", BigDecimal.TEN, "EUR", "tok_visa", "key-json")
 
-        val captor = org.mockito.ArgumentCaptor.forClass(String::class.java)
-        org.mockito.Mockito.verify(localKafkaTemplate).send(
-            org.mockito.Mockito.eq("payment-authorized"),
-            org.mockito.Mockito.eq("order-json"),
-            captor.capture()
-        )
+        val row = localOutboxEventRepository.saved.single()
+        assertEquals("payment-authorized", row.type)
+        assertEquals("order-json", row.aggregateId)
 
-        val parsed = realObjectMapper.readTree(captor.value)
+        val parsed = realObjectMapper.readTree(row.payload.asString())
         assertEquals("payment-authorized", parsed.get("eventType").asText())
         assertEquals("order-json", parsed.get("orderId").asText())
         // occurredAt is a LocalDateTime serialized by the real Jackson 3 mapper (ISO-8601, no crash).
@@ -213,10 +348,30 @@ class PaymentServiceTest {
     }
 
     class FakePaymentProvider : IPaymentProvider {
-        override suspend fun authorize(amount: BigDecimal, currency: String, token: String, idempotencyKey: String) =
-            ProviderAuthorizationResult(true, "ch_123", null)
-        override suspend fun refund(ref: String, amount: BigDecimal?, idempotencyKey: String) =
-            ProviderRefundResult(true, "re_123", null)
+        var refundSucceeds = true
+        var refundThrows = false
+        var refundCalls = 0
+        val refundKeys = mutableListOf<String>()
+        val authorizedOrderIds = mutableListOf<String>()
+
+        override suspend fun authorize(
+            orderId: String,
+            amount: BigDecimal,
+            currency: String,
+            token: String,
+            idempotencyKey: String,
+        ): ProviderAuthorizationResult {
+            authorizedOrderIds.add(orderId)
+            return ProviderAuthorizationResult(true, "ch_123", null)
+        }
+
+        override suspend fun refund(ref: String, amount: BigDecimal?, idempotencyKey: String): ProviderRefundResult {
+            refundCalls++
+            refundKeys.add(idempotencyKey)
+            if (refundThrows) throw RuntimeException("provider unreachable")
+            return if (refundSucceeds) ProviderRefundResult(true, "re_123", null)
+            else ProviderRefundResult(false, null, "CARD_DECLINED")
+        }
     }
 
     // A minimal proxy that implements the Spring Data repository interface by throwing exceptions 
@@ -236,6 +391,13 @@ class PaymentServiceTest {
     open class FakePaymentRefundRepository : PaymentRefundRepository by org.mockito.Mockito.mock(PaymentRefundRepository::class.java) {
         val saved = mutableListOf<PaymentRefund>()
         override suspend fun <S : PaymentRefund> save(entity: S): S { saved.add(entity); return entity }
+        override suspend fun countByRequestKeyAndStatus(requestKey: String, status: String): Long =
+            saved.count { it.requestKey == requestKey && it.status == status }.toLong()
+    }
+
+    open class FakeOutboxEventRepository : OutboxEventRepository by org.mockito.Mockito.mock(OutboxEventRepository::class.java) {
+        val saved = mutableListOf<OutboxEvent>()
+        override suspend fun <S : OutboxEvent> save(entity: S): S { saved.add(entity); return entity }
     }
 
     // Runs the transactional block without a real DB transaction, since these are in-memory fakes.

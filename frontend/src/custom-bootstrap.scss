@@ -1,0 +1,53 @@
+@import "bootstrap/scss/functions";
+
+$primary: #1b4332;
+$secondary: #40916c;
+$body-bg: #e9ecef;
+$card-bg: #fff;
+$body-color: #1b4332;
+$border-radius: 0.5rem;
+$border-radius-lg: 0.75rem;
+$card-spacer-y: 1.5rem;
+$font-family-sans-serif: "Montserrat", sans-serif;
+$headings-font-weight: 800;
+
+@import "bootstrap/scss/variables";
+@import "bootstrap/scss/variables-dark";
+
+$accent: #c9a227;
+$theme-colors: map-merge($theme-colors, ("accent": $accent));
+
+@import "bootstrap/scss/maps";
+
+$accent-text-emphasis: shade-color($accent, 60%);
+$accent-bg-subtle: tint-color($accent, 80%);
+$accent-border-subtle: tint-color($accent, 60%);
+
+$theme-colors-text: map-merge($theme-colors-text, ("accent": $accent-text-emphasis));
+$theme-colors-bg-subtle: map-merge($theme-colors-bg-subtle, ("accent": $accent-bg-subtle));
+$theme-colors-border-subtle: map-merge($theme-colors-border-subtle, ("accent": $accent-border-subtle));
+
+$utilities-text-emphasis-colors: map-merge(
+  $utilities-text-emphasis-colors,
+  ("accent-emphasis": var(--#{$prefix}accent-text-emphasis))
+);
+$utilities-bg-subtle: map-merge($utilities-bg-subtle, ("accent-subtle": var(--#{$prefix}accent-bg-subtle)));
+$utilities-border-subtle: map-merge(
+  $utilities-border-subtle,
+  ("accent-subtle": var(--#{$prefix}accent-border-subtle))
+);
+
+@import "bootstrap/scss/bootstrap";
+
+body {
+  overflow-x: hidden;
+}
+
+.nav-link-tickets {
+  transition: color 0.15s ease-in-out, transform 0.15s ease-in-out;
+
+  &:hover {
+    color: var(--bs-primary) !important;
+    transform: translateY(-1px);
+  }
+}

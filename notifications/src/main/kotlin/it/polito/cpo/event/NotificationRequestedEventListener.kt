@@ -1,9 +1,12 @@
 package it.polito.cpo.event
 
 import io.micrometer.core.instrument.MeterRegistry
+import it.polito.cpo.catalog.CatalogRouteResolver
 import it.polito.cpo.contracts.events.NotificationRequestedEvent
+import it.polito.cpo.contracts.events.NotificationRequestedPayload
 import it.polito.cpo.notification.NotificationView
 import it.polito.cpo.notification.NotificationStore
+import it.polito.cpo.notification.RouteView
 import it.polito.cpo.observability.CorrelationId
 import org.slf4j.LoggerFactory
 import org.slf4j.MDC
@@ -34,6 +37,7 @@ class NotificationRequestedEventListener(
     private val store: NotificationStore,
     private val duplicateGuard: DuplicateEventGuard,
     private val meterRegistry: MeterRegistry,
+    private val catalogRouteResolver: CatalogRouteResolver,
 ) {
     private val log = LoggerFactory.getLogger(NotificationRequestedEventListener::class.java)
     private val topic = "notification-requested"
@@ -64,11 +68,36 @@ class NotificationRequestedEventListener(
                     recipientEmail = event.payload.recipientEmail,
                     occurredAt = event.occurredAt,
                     receivedAt = LocalDateTime.now(),
+                    type = event.payload.type,
+                    failureCode = event.payload.failureCode,
+                    route = resolveRoute(event.payload),
                 ),
             )
             log.info("Recorded notification for order {}", event.orderId)
             count("processed")
         }
+    }
+
+    /**
+     * The trip context, when the producer sent identifiers for it and Catalog can resolve them.
+     *
+     * Every step here is allowed to yield nothing, and the notification is recorded either way. An
+     * event from before this contract carries no route ids; Catalog may be down. Neither is a
+     * reason to drop a confirmation the customer is waiting for — the message alone still says what
+     * happened, which is why it stays a complete sentence.
+     */
+    private fun resolveRoute(payload: NotificationRequestedPayload): RouteView? {
+        val routeId = payload.routeId ?: return null
+        val travelDate = payload.travelDate ?: return null
+        val route = catalogRouteResolver.resolve(routeId) ?: return null
+
+        return RouteView(
+            routeId = route.routeId,
+            origin = route.origin,
+            destination = route.destination,
+            travelDate = travelDate,
+            departureTime = route.departureTime,
+        )
     }
 
     private fun count(result: String) {

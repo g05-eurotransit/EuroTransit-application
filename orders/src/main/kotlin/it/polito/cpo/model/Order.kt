@@ -5,7 +5,9 @@ import org.springframework.data.annotation.Transient
 import org.springframework.data.domain.Persistable
 import org.springframework.data.relational.core.mapping.Table
 import java.math.BigDecimal
+import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.OffsetDateTime
 import java.util.UUID
 
 @Table("orders")
@@ -15,7 +17,17 @@ class Order(
     var status: OrderStatus,
     val routeId: String,
     val seats: String, // comma-separated seats
+    // The day being travelled, which together with routeId and seats identifies what was bought.
+    // Without it a seat is sold once and for all rather than for one run (issue #64).
+    val travelDate: LocalDate,
     val totalAmount: BigDecimal,
+    // The currency of [totalAmount]. Required and deliberately not defaulted: a default here is what
+    // would quietly restore the bug the column exists to remove — the authorization used to carry a
+    // hardcoded "EUR" beside an amount that came from somewhere else entirely.
+    //
+    // Resolved from the offer when the checkout carried one. A checkout without an offer writes
+    // "EUR" explicitly at the call site, so the assumption is recorded rather than implied.
+    val currency: String,
     val createdAt: LocalDateTime,
     // Sandbox payment reference kept only until the order reaches a terminal state, so the
     // asynchronous pipeline can reconstruct the payment request. Cleared on CONFIRMED/FAILED.
@@ -26,10 +38,64 @@ class Order(
     // Inventory reservation id, set once seats are held in the async pipeline. Enables a
     // pre-payment cancellation to release the held seats. Null before RESERVING completes.
     var reservationId: String? = null,
+    // When that hold expires, as decided by the Inventory database clock. Stored alongside the
+    // reservation id in the same atomic transition so the two can never disagree, and exposed to the
+    // customer as the checkout countdown. Null before RESERVING completes.
+    var reservationExpiresAt: OffsetDateTime? = null,
     // Why the checkout entered COMPENSATING, so a redelivery that resumes after a crash can pick
     // the right reconciliation record kind and know whether releasing the hold is safe at all.
     // Null outside COMPENSATING.
     var compensationReason: String? = null,
+    // The customer-visible reason the checkout failed, from the closed CustomerFailureCode set.
+    // Distinct from compensationReason, which is the internal operator vocabulary: this one is
+    // returned by the public API, so it never carries an invariant violation or a provider code.
+    // Set only on the terminal FAILED transition; null in every other state.
+    var failureCode: String? = null,
+    // Which offer was bought. Resolved against Catalog at checkout: it exists, it belongs to
+    // routeId, and its price is the one in totalAmount — so unlike in V13, this is a validated value
+    // and the fields below were read from it.
+    //
+    // The API field is required since #84 shipped, but this column stays nullable and the comment in
+    // V13 claiming it would be tightened to NOT NULL is wrong: orders placed before that change hold
+    // NULL and there is nothing to backfill them with, so the migration would fail on the first one.
+    // The correction lives here rather than in V13 because editing an applied migration changes its
+    // Flyway checksum and breaks startup on every environment that already ran it.
+    // An order with no offer has no refund terms, and the refund endpoint refuses it.
+    val offerId: String? = null,
+    // The refund rule the customer accepted, resolved from the offer at checkout and frozen here.
+    //
+    // Stored as the rule and not merely as [offerTermsVersion] because Catalog keeps no history: it
+    // resolves offers from a flat list of current ones, so a version marker alone would point at
+    // terms that may since have been edited. ADR-015's goal, by the means that reaches it.
+    //
+    // Null together, for an order placed without an offer: it has no refund terms and the refund
+    // endpoint refuses it.
+    val refundable: Boolean? = null,
+    val refundCutoffMinutesBeforeDeparture: Int? = null,
+    // Audit marker for which revision of the rule above was accepted. Not a substitute for it.
+    val offerTermsVersion: Int? = null,
+    // When this run departs, composed once at checkout as travelDate + the offer's departure time in
+    // the departure station's zone. The refund compares this one stored instant against the database
+    // clock: no zone arithmetic on the refund path, and no dependency on Catalog being reachable then.
+    val departureAt: OffsetDateTime? = null,
+    // The refund's own bookkeeping (ADR-015, V15). None of these decide eligibility — that is
+    // refundable/refundCutoffMinutesBeforeDeparture/departureAt above, evaluated against the database
+    // clock at the moment of the CONFIRMED -> REFUNDING transition. These three only record what
+    // happened once a refund was accepted: when, and (once the reversal succeeds) the provider
+    // reference and when it completed. Written by the database clock (CURRENT_TIMESTAMP), not the
+    // JVM, for the same reason departureAt is compared against it rather than against `now()`.
+    var refundRequestedAt: OffsetDateTime? = null,
+    var refundedAt: OffsetDateTime? = null,
+    var refundProviderReference: String? = null,
+    // ADR-016 (V19). Whether this order follows the customer-hold flow: placed without a payment token,
+    // it stops in HELD_AWAITING_PAYMENT until the customer pays. False for the direct flow.
+    val paymentDeferred: Boolean = false,
+    // When the customer's payment was accepted, by the database clock. Null for a direct-flow order,
+    // whose payment arrived with the order: measurements that start here fall back to createdAt.
+    var paymentSubmittedAt: OffsetDateTime? = null,
+    // Inventory opened the one-time T2 window and its deadline is in reservationExpiresAt. Set before
+    // Payments is called, so once true an authorization may have been attempted.
+    var paymentWindowOpened: Boolean = false,
 ) : Persistable<UUID> {
 
     @Transient

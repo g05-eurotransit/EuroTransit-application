@@ -1,0 +1,496 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "EuroTransit microservices",
+    "subtitle": "Implemented interactions; checkout-focused view",
+    "output": "docs/diagrams/microservices/architecture.html",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "visual_preset": "blueprint",
+    "repository": {
+      "url": "git@github.com:g05-eurotransit/EuroTransit-application.git",
+      "revision": "e2a70d1d46070bd63e287353f3effac0f4d84976",
+      "link_mode": "local-only"
+    }
+  },
+  "components": [
+    {
+      "id": "storefront",
+      "type": "frontend",
+      "label": "React storefront",
+      "sublabel": "Browser application",
+      "pos": [
+        40,
+        40
+      ],
+      "size": [
+        160,
+        68
+      ],
+      "sources": [
+        {
+          "path": "frontend/src/api/client.ts",
+          "line": 66,
+          "end_line": 85
+        },
+        {
+          "path": "frontend/src/auth/oidcConfig.ts",
+          "line": 18,
+          "end_line": 40
+        },
+        {
+          "path": "frontend/src/api/notifications.ts",
+          "line": 59,
+          "end_line": 83
+        }
+      ]
+    },
+    {
+      "id": "identity",
+      "type": "security",
+      "label": "Keycloak",
+      "sublabel": "User + service identity",
+      "pos": [
+        40,
+        250
+      ],
+      "size": [
+        160,
+        68
+      ],
+      "sources": [
+        {
+          "path": "docker-compose.yml",
+          "line": 313,
+          "end_line": 330
+        },
+        {
+          "path": "orders/src/main/resources/application.yaml",
+          "line": 24,
+          "end_line": 41
+        }
+      ]
+    },
+    {
+      "id": "gateway",
+      "type": "cloud",
+      "label": "Traefik",
+      "sublabel": "Public API entry",
+      "pos": [
+        330,
+        40
+      ],
+      "size": [
+        160,
+        68
+      ],
+      "sources": [
+        {
+          "path": "docker-compose.yml",
+          "line": 7,
+          "end_line": 46
+        },
+        {
+          "path": "docker-compose.yml",
+          "line": 85,
+          "end_line": 91
+        },
+        {
+          "path": "docker-compose.yml",
+          "line": 146,
+          "end_line": 182
+        }
+      ]
+    },
+    {
+      "id": "catalog",
+      "type": "backend",
+      "label": "Catalog",
+      "sublabel": "Seeded in-memory offers",
+      "pos": [
+        620,
+        190
+      ],
+      "size": [
+        160,
+        68
+      ],
+      "sources": [
+        {
+          "path": "catalog/src/main/kotlin/it/polito/cpo/controller/CatalogController.kt",
+          "line": 1,
+          "end_line": 50
+        },
+        {
+          "path": "catalog/src/main/kotlin/it/polito/cpo/repository/InMemoryCatalogRepository.kt",
+          "line": 21,
+          "end_line": 42
+        }
+      ]
+    },
+    {
+      "id": "orders",
+      "type": "backend",
+      "label": "Orders",
+      "sublabel": "Durable checkout workflow",
+      "pos": [
+        330,
+        330
+      ],
+      "size": [
+        160,
+        68
+      ],
+      "sources": [
+        {
+          "path": "orders/src/main/kotlin/it/polito/cpo/service/CheckoutOrchestrator.kt",
+          "line": 117,
+          "end_line": 280
+        },
+        {
+          "path": "orders/src/main/kotlin/it/polito/cpo/service/CheckoutOrchestrator.kt",
+          "line": 392,
+          "end_line": 625
+        },
+        {
+          "path": "orders/src/main/kotlin/it/polito/cpo/event/OrderPlacedEventListener.kt",
+          "line": 31,
+          "end_line": 58
+        }
+      ]
+    },
+    {
+      "id": "inventory",
+      "type": "backend",
+      "label": "Inventory",
+      "sublabel": "Seat consistency boundary",
+      "pos": [
+        40,
+        430
+      ],
+      "size": [
+        160,
+        68
+      ],
+      "sources": [
+        {
+          "path": "inventory/src/main/kotlin/it/polito/cpo/service/ReservationService.kt",
+          "line": 33,
+          "end_line": 95
+        },
+        {
+          "path": "inventory/src/main/resources/application.yaml",
+          "line": 7,
+          "end_line": 21
+        }
+      ]
+    },
+    {
+      "id": "payments",
+      "type": "backend",
+      "label": "Payments",
+      "sublabel": "Provider adapter + records",
+      "pos": [
+        40,
+        620
+      ],
+      "size": [
+        160,
+        68
+      ],
+      "sources": [
+        {
+          "path": "payments/src/main/kotlin/it/polito/cpo/payments/service/payment/PaymentService.kt",
+          "line": 70,
+          "end_line": 135
+        },
+        {
+          "path": "payments/src/main/kotlin/it/polito/cpo/payments/service/provider/StripeSandboxProvider.kt",
+          "line": 55,
+          "end_line": 77
+        }
+      ]
+    },
+    {
+      "id": "stripe",
+      "type": "external",
+      "label": "Stripe sandbox",
+      "sublabel": "External payment effects",
+      "pos": [
+        40,
+        820
+      ],
+      "size": [
+        160,
+        68
+      ],
+      "sources": [
+        {
+          "path": "payments/src/main/kotlin/it/polito/cpo/payments/service/provider/StripeSandboxProvider.kt",
+          "line": 27,
+          "end_line": 77
+        }
+      ]
+    },
+    {
+      "id": "database",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "Three owned databases",
+      "pos": [
+        330,
+        620
+      ],
+      "size": [
+        160,
+        68
+      ],
+      "sources": [
+        {
+          "path": "docker-compose.yml",
+          "line": 60,
+          "end_line": 78
+        },
+        {
+          "path": "docker-compose.yml",
+          "line": 100,
+          "end_line": 142
+        }
+      ]
+    },
+    {
+      "id": "relay",
+      "type": "backend",
+      "label": "Debezium Connect",
+      "sublabel": "Orders outbox relay",
+      "pos": [
+        620,
+        620
+      ],
+      "size": [
+        160,
+        68
+      ],
+      "sources": [
+        {
+          "path": "scripts/init-local-debezium.sh",
+          "line": 108,
+          "end_line": 133
+        }
+      ]
+    },
+    {
+      "id": "kafka",
+      "type": "messagebus",
+      "label": "Kafka",
+      "sublabel": "Durable event delivery",
+      "pos": [
+        910,
+        620
+      ],
+      "size": [
+        160,
+        68
+      ],
+      "sources": [
+        {
+          "path": "orders/src/main/kotlin/it/polito/cpo/event/OrderPlacedEventListener.kt",
+          "line": 31,
+          "end_line": 58
+        },
+        {
+          "path": "notifications/src/main/kotlin/it/polito/cpo/event/NotificationRequestedEventListener.kt",
+          "line": 35,
+          "end_line": 79
+        }
+      ]
+    },
+    {
+      "id": "notifications",
+      "type": "backend",
+      "label": "Notifications",
+      "sublabel": "In-memory history + SSE",
+      "pos": [
+        910,
+        40
+      ],
+      "size": [
+        160,
+        68
+      ],
+      "sources": [
+        {
+          "path": "notifications/src/main/kotlin/it/polito/cpo/event/NotificationRequestedEventListener.kt",
+          "line": 35,
+          "end_line": 100
+        },
+        {
+          "path": "notifications/src/main/kotlin/it/polito/cpo/notification/NotificationStore.kt",
+          "line": 8,
+          "end_line": 37
+        },
+        {
+          "path": "notifications/src/main/kotlin/it/polito/cpo/catalog/CatalogRouteResolver.kt",
+          "line": 32,
+          "end_line": 68
+        }
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "storefront-to-gateway",
+      "from": "storefront",
+      "to": "gateway",
+      "label": "HTTP API",
+      "variant": "default"
+    },
+    {
+      "id": "storefront-to-identity",
+      "from": "storefront",
+      "to": "identity",
+      "label": "OIDC / PKCE",
+      "variant": "security"
+    },
+    {
+      "id": "gateway-to-catalog",
+      "from": "gateway",
+      "to": "catalog",
+      "label": "Catalog API",
+      "variant": "default"
+    },
+    {
+      "id": "gateway-to-orders",
+      "from": "gateway",
+      "to": "orders",
+      "label": "Orders API",
+      "variant": "default"
+    },
+    {
+      "id": "gateway-to-notifications",
+      "from": "gateway",
+      "to": "notifications",
+      "label": "History / SSE",
+      "variant": "default"
+    },
+    {
+      "id": "orders-to-identity",
+      "from": "orders",
+      "to": "identity",
+      "label": "Service token",
+      "variant": "security"
+    },
+    {
+      "id": "orders-to-catalog",
+      "from": "orders",
+      "to": "catalog",
+      "label": "Resolve offer",
+      "variant": "default"
+    },
+    {
+      "id": "orders-to-inventory",
+      "from": "orders",
+      "to": "inventory",
+      "label": "Hold / confirm",
+      "variant": "default"
+    },
+    {
+      "id": "orders-to-payments",
+      "from": "orders",
+      "to": "payments",
+      "label": "Authorize / reverse",
+      "variant": "default"
+    },
+    {
+      "id": "payments-to-stripe",
+      "from": "payments",
+      "to": "stripe",
+      "label": "HTTPS charges",
+      "variant": "default"
+    },
+    {
+      "id": "orders-to-database",
+      "from": "orders",
+      "to": "database",
+      "label": "Orders SQL",
+      "variant": "default"
+    },
+    {
+      "id": "inventory-to-database",
+      "from": "inventory",
+      "to": "database",
+      "label": "Inventory SQL",
+      "variant": "default"
+    },
+    {
+      "id": "payments-to-database",
+      "from": "payments",
+      "to": "database",
+      "label": "Payments SQL",
+      "variant": "default"
+    },
+    {
+      "id": "database-to-relay",
+      "from": "database",
+      "to": "relay",
+      "label": "Outbox WAL",
+      "variant": "dashed"
+    },
+    {
+      "id": "relay-to-kafka",
+      "from": "relay",
+      "to": "kafka",
+      "label": "Publish events",
+      "variant": "dashed"
+    },
+    {
+      "id": "kafka-to-orders",
+      "from": "kafka",
+      "to": "orders",
+      "label": "order-placed",
+      "variant": "dashed"
+    },
+    {
+      "id": "kafka-to-notifications",
+      "from": "kafka",
+      "to": "notifications",
+      "label": "notification-requested",
+      "variant": "dashed"
+    },
+    {
+      "id": "notifications-to-catalog",
+      "from": "notifications",
+      "to": "catalog",
+      "label": "Trip context",
+      "variant": "default"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Checkout authority",
+      "items": [
+        "Orders accepts and persists before Kafka processing.",
+        "Inventory confirms the sale before Orders confirms checkout."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Persistence limits",
+      "items": [
+        "Catalog and Notifications use process-local memory.",
+        "Inventory and Payments outbox relays are omitted here."
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Trust and effects",
+      "items": [
+        "Services enforce JWT roles and resource ownership.",
+        "Provider authorization uses a captured sandbox charge."
+      ]
+    }
+  ],
+  "boundaries": []
+}

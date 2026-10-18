@@ -14,12 +14,12 @@ import it.polito.cpo.payments.model.IdempotencyRecord
 import it.polito.cpo.payments.model.PaymentAuthorization
 import it.polito.cpo.payments.model.PaymentRefund
 import it.polito.cpo.payments.repository.IdempotencyRepository
+import it.polito.cpo.payments.repository.OutboxEventRepository
 import it.polito.cpo.payments.repository.PaymentAuthorizationRepository
 import kotlinx.coroutines.reactor.awaitSingleOrNull
 import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import org.springframework.http.HttpStatus
-import org.springframework.kafka.core.KafkaTemplate
 import org.springframework.stereotype.Service
 import org.springframework.transaction.ReactiveTransactionManager
 import org.springframework.transaction.reactive.TransactionalOperator
@@ -34,7 +34,7 @@ class PaymentService(
     private val idempotencyRepository: IdempotencyRepository,
     private val paymentAuthorizationRepository: PaymentAuthorizationRepository,
     private val paymentRefundRepository: it.polito.cpo.payments.repository.PaymentRefundRepository,
-    private val kafkaTemplate: KafkaTemplate<String, String>,
+    private val outboxEventRepository: OutboxEventRepository,
     private val objectMapper: ObjectMapper,
     transactionManager: ReactiveTransactionManager
 ) : IPaymentService {
@@ -78,7 +78,7 @@ class PaymentService(
 
         // 2. Call provider (outside any DB transaction)
         val result = try {
-            providerAdapter.authorize(amount, currency, paymentMethodToken, idempotencyKey)
+            providerAdapter.authorize(orderId, amount, currency, paymentMethodToken, idempotencyKey)
         } catch (e: Exception) {
             log.error("Payment provider failed", e)
             return PaymentResponse(PaymentStatus.DEPENDENCY_FAILED, null, "PROVIDER_UNAVAILABLE")
@@ -107,17 +107,30 @@ class PaymentService(
             createdAt = LocalDateTime.now()
         ).apply { setAsNew(true) }
 
-        // 3+4. Persist idempotency record and authorization atomically, in a short transaction.
-        // Order matters: payment_authorizations.idempotency_key has a FK to
-        // idempotency_records(idempotency_key), so the idempotency record must be inserted first.
+        // 5. Written as an outbox row (below), not published directly — see event-publishing-durability.md.
+        val eventType = if (result.success) "payment-authorized" else "payment-declined"
+        val event = PaymentAuthorizationEvent(
+            eventType = eventType,
+            correlationId = MDC.get(CorrelationId.CONTEXT_KEY) ?: "",
+            orderId = orderId,
+            principalId = principalId,
+            payload = PaymentAuthorizationPayload(
+                status = authorization.status,
+                providerReference = authorization.providerReference,
+                amount = authorization.amount,
+                currency = authorization.currency,
+                errorCode = authorization.errorCode
+            )
+        )
+
+        // 3+4+5. Idempotency record first: payment_authorizations.idempotency_key has a FK to it.
         txOperator.executeAndAwait {
             idempotencyRepository.save(idempotencyRecord)
             paymentAuthorizationRepository.save(authorization)
+            outboxEventRepository.save(
+                paymentOutboxRow(objectMapper, "PaymentAuthorization", orderId, eventType, event)
+            )
         }
-
-        // 5. Emit event
-        val eventType = if (result.success) "payment-authorized" else "payment-declined"
-        publishAuthorizationEvent(eventType, orderId, principalId, authorization)
 
         return response
     }
@@ -154,15 +167,25 @@ class PaymentService(
             return it.polito.cpo.payments.dto.PaymentRefundResponse(IPaymentService.RefundStatus.FAILED, null, "INVALID_AUTHORIZATION_STATUS")
         }
 
+        // Stripe caches a decline under its idempotency key for 24h, so a retry would replay it.
+        // Only a recorded decline moves this; an unknown outcome writes no row and keeps the key.
+        val failedAttempts = paymentRefundRepository.countByRequestKeyAndStatus(
+            idempotencyKey, IPaymentService.RefundStatus.FAILED.name
+        )
+        // Unsuffixed on the first attempt: an in-flight refund from before this change must still
+        // dedupe against the key the old code sent.
+        val providerKey = if (failedAttempts == 0L) idempotencyKey else "${idempotencyKey}_$failedAttempts"
+
         // 3. Call provider (outside any DB transaction)
         val result = try {
-            providerAdapter.refund(authorization.providerReference, amount, idempotencyKey)
+            providerAdapter.refund(authorization.providerReference, amount, providerKey)
         } catch (e: Exception) {
             log.error("Payment provider failed on refund", e)
             return it.polito.cpo.payments.dto.PaymentRefundResponse(IPaymentService.RefundStatus.DEPENDENCY_FAILED, null, "PROVIDER_UNAVAILABLE")
         }
 
         val refundStatus = if (result.success) IPaymentService.RefundStatus.REFUNDED else IPaymentService.RefundStatus.FAILED
+        val reason = RefundReason.fromIdempotencyKey(idempotencyKey)
 
         val paymentRefund = it.polito.cpo.payments.model.PaymentRefund(
             authorizationId = authorization.getId(), // We must use getId() since id is private
@@ -170,78 +193,53 @@ class PaymentService(
             currency = authorization.currency,
             status = refundStatus.name,
             providerReference = result.refundReference,
-            idempotencyKey = idempotencyKey
+            idempotencyKey = if (result.success) idempotencyKey else null,
+            requestKey = idempotencyKey,
+            reason = reason.name
         ).apply { setAsNew(true) }
 
         val response = it.polito.cpo.payments.dto.PaymentRefundResponse(refundStatus, result.refundReference, result.errorCode)
-        val idempotencyRecord = IdempotencyRecord(
-            idempotencyKey = idempotencyKey,
-            operation = "refund",
-            principalId = authorization.principalId,
-            requestFingerprint = fingerprint,
-            responseCode = if (result.success) 200 else 422,
-            responseBody = objectMapper.writeValueAsString(response),
-            createdAt = LocalDateTime.now()
-        ).apply { setAsNew(true) }
-
-        // 4+5. Persist idempotency record and refund atomically, in a short transaction.
-        // Order matters: payment_refunds.idempotency_key has a FK to
-        // idempotency_records(idempotency_key), so the idempotency record must be inserted first.
-        txOperator.executeAndAwait {
-            idempotencyRepository.save(idempotencyRecord)
-            paymentRefundRepository.save(paymentRefund)
+        // Only a success is settled: caching a decline replays it forever under the key the caller
+        // is told to retry with. authorize() caches declines on purpose — different question.
+        val idempotencyRecord = if (result.success) {
+            IdempotencyRecord(
+                idempotencyKey = idempotencyKey,
+                operation = "refund",
+                principalId = authorization.principalId,
+                requestFingerprint = fingerprint,
+                responseCode = 200,
+                responseBody = objectMapper.writeValueAsString(response),
+                createdAt = LocalDateTime.now()
+            ).apply { setAsNew(true) }
+        } else {
+            null
         }
 
-        // 6. Emit event
+        // 6. Written as an outbox row (below), same as authorize() above.
         val eventType = if (result.success) "payment-refunded" else "payment-refund-failed"
-        publishRefundEvent(eventType, orderId, authorization.principalId, paymentRefund)
-
-        return response
-    }
-
-    // Events are typed contracts (money-path-contracts) pre-serialized to a JSON String with the app's
-    // Jackson 3 ObjectMapper, then sent through the StringSerializer producer — symmetric with the
-    // String-based consumers (orders/notifications) and aligned with ADR-010 (shared envelope, no drift).
-    private fun publishAuthorizationEvent(
-        eventType: String,
-        orderId: String,
-        principalId: String,
-        authorization: PaymentAuthorization
-    ) {
-        val event = PaymentAuthorizationEvent(
-            eventType = eventType,
-            correlationId = MDC.get(CorrelationId.CONTEXT_KEY) ?: "",
-            orderId = orderId,
-            principalId = principalId,
-            payload = PaymentAuthorizationPayload(
-                status = authorization.status,
-                providerReference = authorization.providerReference,
-                amount = authorization.amount,
-                currency = authorization.currency,
-                errorCode = authorization.errorCode
-            )
-        )
-        kafkaTemplate.send(eventType, orderId, objectMapper.writeValueAsString(event))
-    }
-
-    private fun publishRefundEvent(
-        eventType: String,
-        orderId: String,
-        principalId: String,
-        refund: PaymentRefund
-    ) {
         val event = PaymentRefundEvent(
             eventType = eventType,
             correlationId = MDC.get(CorrelationId.CONTEXT_KEY) ?: "",
             orderId = orderId,
-            principalId = principalId,
+            principalId = authorization.principalId,
             payload = PaymentRefundPayload(
-                status = refund.status,
-                refundReference = refund.providerReference,
-                amount = refund.amount,
-                currency = refund.currency
+                status = paymentRefund.status,
+                refundReference = paymentRefund.providerReference,
+                amount = paymentRefund.amount,
+                currency = paymentRefund.currency,
+                reason = paymentRefund.reason
             )
         )
-        kafkaTemplate.send(eventType, orderId, objectMapper.writeValueAsString(event))
+
+        // 4+5+6. Idempotency record first: payment_refunds.idempotency_key has a FK to it.
+        txOperator.executeAndAwait {
+            idempotencyRecord?.let { idempotencyRepository.save(it) }
+            paymentRefundRepository.save(paymentRefund)
+            outboxEventRepository.save(
+                paymentOutboxRow(objectMapper, "PaymentRefund", orderId, eventType, event)
+            )
+        }
+
+        return response
     }
 }

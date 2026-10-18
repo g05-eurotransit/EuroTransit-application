@@ -5,12 +5,30 @@ import org.springframework.data.r2dbc.repository.Modifying
 import org.springframework.data.r2dbc.repository.Query
 import org.springframework.data.repository.kotlin.CoroutineCrudRepository
 import org.springframework.stereotype.Repository
+import kotlinx.coroutines.flow.Flow
+import java.time.LocalDate
 
 @Repository
 interface SeatRepository : CoroutineCrudRepository<Seat, String> {
 
     /**
-     * Updates available seats to held for a route and reservation when all seats are available.
+     * Retrieves all seats for a specific route and travel date.
+     */
+    fun findByRouteIdAndTravelDate(routeId: String, travelDate: LocalDate): Flow<Seat>
+
+    /**
+     * Checks if any seats exist for a given route across all dates.
+     */
+    suspend fun existsByRouteId(routeId: String): Boolean
+
+    /**
+     * Retrieves the current database date.
+     */
+    @Query("SELECT CURRENT_DATE")
+    suspend fun getCurrentDate(): LocalDate
+
+    /**
+     * Updates available seats to held for a route, date and reservation when all seats are available.
      */
     @Modifying
     @Query("""
@@ -18,6 +36,7 @@ interface SeatRepository : CoroutineCrudRepository<Seat, String> {
             SELECT seat_id 
             FROM seats 
             WHERE route_id = :routeId 
+              AND travel_date = :travelDate
               AND seat_id IN (:seatIds) 
               AND status = 'AVAILABLE' 
             FOR UPDATE
@@ -25,11 +44,13 @@ interface SeatRepository : CoroutineCrudRepository<Seat, String> {
         UPDATE seats 
         SET status = 'HELD', reservation_id = :reservationId 
         WHERE route_id = :routeId 
+          AND travel_date = :travelDate
           AND seat_id IN (SELECT seat_id FROM available_seats) 
           AND (SELECT COUNT(*) FROM available_seats) = :expectedCount
     """)
     suspend fun holdSeats(
         routeId: String,
+        travelDate: LocalDate,
         seatIds: List<String>,
         reservationId: String,
         expectedCount: Int = seatIds.size
@@ -55,6 +76,13 @@ interface SeatRepository : CoroutineCrudRepository<Seat, String> {
     @Modifying
     @Query("UPDATE seats SET status = 'SOLD' WHERE reservation_id = :reservationId AND status = 'HELD'")
     suspend fun confirmSeats(reservationId: String): Int
+    
+    /**
+     * Updates sold seats for a refunded reservation back to available.
+     */
+    @Modifying
+    @Query("UPDATE seats SET status = 'AVAILABLE', reservation_id = NULL WHERE reservation_id = :reservationId AND status = 'SOLD'")
+    suspend fun refundSeats(reservationId: String): Int
     
     /**
      * Counts the number of seats assigned to a reservation.

@@ -196,6 +196,24 @@ class ReconciliationRecordRepositoryIntegrationTest {
     }
 
     @Test
+    fun `the operator list shows only open incidents, oldest first, up to the limit`() = runBlocking {
+        val first = open(UUID.randomUUID(), ReconciliationKind.DELIVERY_EXHAUSTED, "dependency_error")
+        val second = open(UUID.randomUUID(), ReconciliationKind.INVARIANT_VIOLATION, "reservation_not_found")
+        val closedOrder = UUID.randomUUID()
+        open(closedOrder, ReconciliationKind.DELIVERY_EXHAUSTED, "dependency_error")
+        records.closeAutoResolvable(closedOrder)
+
+        val listed = records.findOpenIncidents(limit = 10).toList()
+
+        assertEquals(listOf(first.id, second.id), listed.map { it.id })
+        assertEquals("dependency_error", listed.first().failureClass)
+        // No order row behind these: the left join still lists them, without a status or hold deadline.
+        assertEquals(null, listed.first().orderStatus)
+        assertEquals(null, listed.first().reservationExpiresAt)
+        assertEquals(listOf(first.id), records.findOpenIncidents(limit = 1).toList().map { it.id })
+    }
+
+    @Test
     fun `the gauges report open incidents and their age`() = runBlocking {
         val orderId = UUID.randomUUID()
         open(orderId, ReconciliationKind.INVARIANT_VIOLATION, "reservation_seat_conflict")

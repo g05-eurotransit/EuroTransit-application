@@ -1,0 +1,6 @@
+{
+  "keycloakIssuer": "http://localhost:8081/realms/eurotransit",
+  "keycloakClientId": "eurotransit-frontend",
+  "apiBase": "/api",
+  "stripePublishableKey": "pk_test_51TqEM0Jy7wiWeUdBtmQuEie1l4VxcLYC6LMJbAumROdVx89kWdB5LSWNn3DW2l1rxBCyZyUZwuRi4KElmUvx5yWb00aDZTVy9M"
+}

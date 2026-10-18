@@ -12,7 +12,7 @@ Orders owns the customer order state and the required PostgreSQL order database 
 
 - Use PostgreSQL atomic updates or a reservation state machine as the Inventory source of truth for seat holds. This is separate from Orders' order-state database ownership.
 - Seat selection in the UI is tentative and does not reserve inventory.
-- Checkout creates a strongly consistent 10-minute hold only if the seat is available.
+- Checkout creates a strongly consistent 10-minute hold only if the seat is available for the given travel date.
 - Payment is attempted only after the hold succeeds.
 - If payment is authorized and Inventory confirms the still-valid hold before it expires, the seat transitions to sold.
 - If payment fails, the order is cancelled, or the 10-minute hold expires, the seat returns to available.
@@ -123,6 +123,31 @@ This gives the project a realistic external dependency, secret-management requir
 - **Pure internal payment mock:** Easy to implement, but too weak for an enterprise-grade target because it avoids provider credentials, external latency, provider idempotency behavior, and realistic failure handling.
 - **Live payment integration:** More realistic, but inappropriate for the project because it introduces real financial risk, compliance concerns, and unnecessary secret exposure.
 
+### What "authorize" means here, and why it is not a hold
+
+`StripeSandboxProvider.authorize` posts to the Charges API with `capture` defaulting to true: **the
+money moves at authorization time**, and a checkout compensation issues a refund. It is deliberately
+not an uncaptured authorization completed by a later capture — even though the vocabulary across this
+repository (`payment_authorizations`, a status of `AUTHORIZED`, "reversal", and a
+`CONFIRMING_INVENTORY` phase that exists so money commits only after Inventory confirms) reads as
+though it were.
+
+Deferring the capture was considered and rejected. Payments has no way to know when Inventory has
+confirmed, so Orders would have to call a capture between `stageConfirmInventory` succeeding and the
+order reaching `CONFIRMED`: a new remote call on the money path, with its own durable phase and its
+own unknown-outcome handling under invariant 8. Worse, it introduces a failure the current ordering
+makes impossible — a capture that fails **after** Inventory has committed the sale leaves the seat
+`SOLD` with no money taken. Taking the money first means a sale is never confirmed that cannot be
+charged for.
+
+What the current ordering costs is visible only on a compensated checkout: the customer sees two
+movements on their statement, a charge and a refund, where a voided authorization would leave none.
+That is the rare path, and it is the accepted trade.
+
+Written down because the gap between the vocabulary and the behaviour is easy to notice and looks
+like a bug worth fixing. It is not. "Fixing" it moves the money after the seat, which is the weaker
+ordering, and it is the reason the naming was left alone rather than the behaviour changed.
+
 ## ADR-007: Async Cost and Scaling Model
 
 **Decision:** Use Kotlin coroutines/flows for I/O-bound and event-driven checkout work, while keeping correctness boundaries explicit and synchronous where an immediate business decision is required.
@@ -133,7 +158,7 @@ This gives the project a realistic external dependency, secret-management requir
 - HTTP calls from Orders to Inventory and Payments are I/O-bound. Suspending while waiting for those responses reduces blocked threads under latency or provider slowdown.
 - Kafka publishing and consuming are I/O-bound and benefit from coroutine-based backpressure, structured cancellation, and bounded concurrency.
 - Notification processing is naturally asynchronous because customer notification must not determine checkout success.
-- Graceful shutdown is easier to reason about when the Orders pipeline has an explicit coroutine scope as a failure domain and can stop accepting new work while draining or cancelling in-flight tasks.
+- Graceful shutdown is easier to reason about when the Orders pipeline has a clear failure domain and can stop accepting new work while in-flight work drains. Since ADR-011 that domain is one Kafka record: each pipeline runs inside the listener call that received it, and nothing is held in a detached scope ([orders-shutdown-and-replay.md](../operations/orders-shutdown-and-replay.md)).
 
 ### Where Async Does Not Help
 
@@ -145,7 +170,7 @@ This gives the project a realistic external dependency, secret-management requir
 ### Operational Consequences
 
 - Bound coroutine concurrency for the checkout pipeline instead of allowing unbounded fan-out.
-- Propagate cancellation on SIGTERM and flip readiness before draining.
+- Flip readiness on SIGTERM, finish the record in progress, and leave everything not started to Kafka redelivery — the pipeline resumes from durable state, so draining needs no cancellation (ADR-011; `spring.kafka.listener.immediate-stop`).
 - Track queue depth, coroutine failures, Kafka lag, and terminal order states so async work is observable.
 - Treat blocking calls inside coroutine paths as defects unless they are explicitly isolated on a bounded dispatcher.
 
@@ -178,7 +203,8 @@ This gives the team clear service ownership, permission isolation, migration bou
 
 ### Selected Option: Embedded Flyway
 
-- Versioned SQL migrations live with the code in `src/main/resources/db/migration` (`V1__init.sql`, `V2__…`), tracked in the `flyway_schema_history` table.
+- Versioned SQL migrations live with the code in `src/main/resources/db/migration` (`V1__init.sql`, `V2__…`), tracked in the `flyway_schema_history` table. Demo data is not assigned a synthetic high migration version: Docker Compose loads its idempotent repeatable script from `db/local-seed`, while Kubernetes runs an ordered bootstrap Job after Inventory has completed its schema migrations.
+- Existing developer volumes that already recorded the retired V999/V1000 seed migrations must be recreated once (`docker compose down -v`) before starting the updated Inventory image. This is intentionally a development-only reset; versioned schema migrations are never repaired or reordered in place.
 - Flyway runs during startup, before WebFlux accepts requests; there is no separate migration Job or init container.
 - Connection parts are externalized as env vars (see the Database conventions), so Flyway (JDBC) and R2DBC (runtime) build their URLs from the same source.
 
@@ -237,6 +263,7 @@ The module is shared: changes go through a PR reviewed by the owner of any affec
 - The payment method token (a sandbox reference, not card data) is persisted on the order so the async pipeline can rebuild the payment request, and is cleared once the order reaches a terminal state. It is **not** placed on any Kafka event.
 - Synchronous calls to Inventory and Payments are wrapped with Resilience4j (timeout, bounded retry with backoff/jitter on transient faults only, circuit breaker, bulkhead) — see `ResilienceConfiguration`. A payment decline is a normal HTTP 200 result, so it never trips the breaker.
 - `order-placed` is persisted through the Orders transactional outbox and relayed by Debezium, closing the order-commit/event-publish gap. Exhausted consumer retries publish to `order-placed.DLT`; reconciliation preserves and redrives the durable Orders phase.
+- Retries before the dead letter depend on why the delivery failed (2026-10-13): six jittered redeliveries, about a minute of waits, when waiting can fix it (a dependency not available), so a short outage or a failover converges without an operator; three a second apart for anything else, including a deployment or data bug labelled as a dependency failure. Not longer, because the retry blocks the checkouts behind the record on that pod and delays the incident towards the ten-minute seat hold. See [orders-recovery-runbook.md](../operations/orders-recovery-runbook.md).
 
 ### Alternatives Considered
 
@@ -317,3 +344,312 @@ The complete protocol, failure matrix, API shape, and acceptance criteria are do
   Inventory has accepted the sale. A fully asynchronous confirmation saga is possible, but it requires
   additional intermediate states, response events, timeouts, deduplication, and reconciliation without
   a clear benefit for the current money path.
+
+## ADR-014: Post-Sale Seat Refund Transition
+
+**Decision:** Allow a dedicated post-sale transition that returns `SOLD` seats to `AVAILABLE` status upon order cancellation/refund, while strictly preserving Invariant 5 for checkout compensation.
+
+`reservation-confirmation.md` originally excluded returning a confirmed seat to available, treating `SOLD` as terminal to protect against checkout compensation bugs. However, the business requires refunded tickets to be resold.
+
+### Selected Option: Dedicated Post-Sale Transition
+
+- Introduce a new reservation state transition (e.g., `CONFIRMED -> REFUNDED`) and seat transition (`SOLD -> AVAILABLE`) triggered by a distinct, dedicated internal operation.
+- This operation must use the same reservation-row concurrency lock as confirmation, release, and expiration.
+- The operation must be strictly idempotent by reservation and order.
+- The existing `release` (used for checkout compensation) and `expiration` operations must **remain completely unable to modify a `CONFIRMED` reservation or a `SOLD` seat** (maintaining Invariant 5).
+- Seats of a departed train will theoretically return to `AVAILABLE` in the database, but must be filtered out at read-time by the availability endpoint rather than blocked during the transition, separating data consistency from business visibility.
+
+### Why This Is Better
+
+This fulfills the business requirement of reselling refunded tickets without compromising the safety of the critical checkout money path. By creating a completely separate API and state transition for post-sale refunds, we guarantee that a delayed or erroneous checkout compensation (`release`) cannot accidentally un-sell a confirmed ticket.
+
+### Alternatives Considered
+
+- **Reusing the existing checkout `release` operation:** Allowing `DELETE /api/inventory/reservations/{reservationId}` to also transition `CONFIRMED -> CANCELLED` and return `SOLD` seats to `AVAILABLE`. This would avoid introducing a new endpoint and state transition, but it fatally weakens Invariant 5 ("Never release a confirmed reservation or a sold seat through checkout compensation"). A delayed, out-of-order, or replayed checkout compensation call — triggered by a transient network error or a race condition during payment authorization — could accidentally un-sell a confirmed ticket belonging to a completed sale. Keeping post-sale refunds on a dedicated endpoint and separate state transition ensures that checkout compensation can never mutate sold seats under any failure scenario.
+- **Treating `SOLD` as strictly terminal (never returning seats to available):** Preserving the original rule where a sold seat is never returned to `AVAILABLE`, handling order refunds purely as financial reversals without freeing seat capacity. While this protects Invariant 5 by construction, it directly contradicts the railway business requirement: passenger train capacity is strictly finite, and withholding refunded seats from resale causes permanent capacity loss and unrecoverable revenue loss for the operator.
+- **Blocking the refund transition at write-time for departed trains:** Refusing the `SOLD -> AVAILABLE` transition in Inventory if the train has already departed. This would require Inventory to know route departure times and station timezones, coupling the transactional consistency boundary to scheduling data. Returning the seat to `AVAILABLE` unconditionally in the database and filtering out departed runs at the read boundary (`GET /api/orders/seat-availability`) cleanly decouples datastore consistency from time-dependent customer visibility.
+
+## ADR-015: Orders-Side Post-Sale Refund
+
+**Decision:** A refund of a confirmed order is a distinct business process owned by Orders, with its
+own durable states, its own trigger, and its own idempotency namespace. It reverses the money first
+and returns the seat second, and it never reaches a terminal state while money or seat is unresolved.
+
+ADR-014 records the Inventory half: a dedicated `CONFIRMED -> REFUNDED` reservation transition that
+returns `SOLD` seats to `AVAILABLE` without weakening Invariant 5. This ADR records the Orders half,
+which decides *whether* a refund is allowed, in *what order* the reversal happens, and *what state
+the order is left in* when part of it fails.
+
+### Selected Option: A Separate Durable Process Beside the Checkout Pipeline
+
+**States.** `CONFIRMED -> REFUNDING -> REFUNDED`, added to the durable `OrderStatus` phases.
+`REFUNDING` is the resume point: it means the refund was authorized by policy and committed as
+intended, and that the reversal, the seat return, or both may still be outstanding.
+
+There is deliberately **no** `REFUND_FAILED`. An order whose money or seat is unresolved stays in
+`REFUNDING` with an open reconciliation record, exactly as `COMPENSATING` does on the checkout path
+(ADR-011, and the `COMPENSATING` rationale in `OrderStatus`). A terminal failure state would let an
+order with a stuck reversal read as finished, which is the one thing the money path must never do.
+
+**Trigger.** The refund has its own outbox event and its own consumer, **not** the `order-placed`
+pipeline. That pipeline's terminal-state rule stays exactly as it is: `CONFIRMED` is terminal, and a
+redelivered `order-placed` for a confirmed order acknowledges without a remote call (invariant, and
+`OrderStatus.isTerminal`). Routing the refund through it would require `CONFIRMED` to become
+resumable, and a Kafka redelivery of an old checkout event would then restart a completed checkout.
+
+**Order of operations: money first, seat second.** The reversal to Payments happens before the
+post-sale transition in Inventory. If the seat return then fails definitively, the customer already
+has their money and a `SEAT_RETURN_FAILURE` reconciliation record stays open for an operator: one
+resaleable seat is withheld from inventory until someone looks. The opposite order would put the
+seat back on sale while the refund is still unresolved, so a failed reversal would leave a customer
+without both ticket and money.
+
+**Idempotency key: `pay-refund-{orderId}`.** A new namespace, not the existing `refund-{orderId}`,
+which checkout compensation already consumes. Payments keys idempotency by the record's primary key,
+so reusing the compensation's key for a commercial refund would replay the compensation's stored
+result: Payments would answer `200` and no money would move, while Orders recorded a completed
+refund. The two keys must not alias. This is representable today — `payment_refunds` has no
+uniqueness constraint on the authorization, so a second refund per order is a valid row (ADR-006's
+sandbox adapter, `payments` `V1__init.sql`).
+
+**The cutoff is evaluated with the Orders database clock.** Eligibility compares the departure
+instant — `travelDate` plus the route's departure time in the route's zone — against the database
+clock, not a JVM clock, for the same reason Invariant 4 evaluates hold expiry with the Inventory
+database clock (`reservation-confirmation.md`): replicas disagree by seconds, and at the boundary
+two identical requests to two pods would otherwise get opposite answers.
+
+**A replay is not a new request.** An idempotency key already accepted *before* the cutoff returns
+its original result even when the replay arrives after the cutoff. A *new* request after the cutoff
+is refused. These are two opposite behaviours on the same time condition, and the idempotency record
+is what distinguishes them: without that rule, a client retrying a network timeout across the cutoff
+boundary would be told its own accepted refund is too late.
+
+**Policy comes from the offer terms captured at checkout,** not from the offer as it reads today:
+the order persists which offer was bought and which version of its terms the customer accepted, so
+editing an offer cannot retroactively change what a past customer agreed to. Orders therefore needs
+`offerId` on the order before any of the above can be implemented, which is why it lands first and
+separately.
+
+### Amended when the Catalog client landed
+
+Three things were decided while implementing the offer resolution that this ADR should carry, because
+each of them is easier to undo than to rediscover.
+
+**The refund rule is persisted, not only its version.** The paragraph above asks for `termsVersion`
+so a later catalogue edit cannot rewrite what a customer accepted. A version marker only achieves
+that if the catalogue keeps its history, and it does not: `InMemoryCatalogRepository.findOfferById`
+resolves against a flat list of *current* offers, and no previous revision is stored anywhere — so
+the marker would point at terms nobody can produce. The order therefore persists the rule itself
+(`refundable`, `refund_cutoff_minutes_before_departure`) and keeps `offer_terms_version` beside it as
+an audit marker. Same goal as above, by the only means that reaches it.
+
+**The departure instant is composed once, at checkout.** Catalog returns a duration before departure
+and the route's zone-less `departureTime` plus its IANA zone, deliberately not a precomputed instant
+— Catalog knows nothing about orders. Orders composes `travelDate + departureTime` in that zone at
+checkout and stores it as `TIMESTAMPTZ`. The refund then compares one stored instant against the
+database clock: no zone arithmetic on the refund path, and no dependency on Catalog being reachable
+at refund time, which is when a customer is least willing to hear about a broken dependency.
+
+**Offer resolution fails closed at checkout.** The price and the refund terms are resolved in the
+synchronous checkout entry, and if Catalog cannot be reached the checkout is refused with
+`503 OFFER_UNRESOLVABLE` rather than accepted on trust. The cost is real and worth stating: while
+Catalog is unavailable, new checkouts carrying an offer stop. The alternative — trusting the client's
+amount when the check cannot be made — restores the bug the resolution exists to remove (issue #93)
+at precisely the moment nobody is watching, and it would do so silently. Checkouts without an
+`offerId` are unaffected, because nothing is resolved for them.
+
+### Why This Is Better
+
+Every part of this keeps unresolved money visible and keeps the checkout path untouched. A separate
+consumer means the refund cannot destabilise checkout redelivery semantics; a separate idempotency
+namespace means Payments cannot confuse a compensation with a sale reversal; no terminal failure
+state means an operator, not a customer, discovers a stuck reversal.
+
+### Alternatives Considered
+
+- **`REFUND_FAILED` as a terminal state.** Simpler to query and to display, and wrong for the same
+  reason `COMPENSATING` is non-terminal: it reports an order as finished while money is in doubt.
+- **Reusing the `order-placed` consumer.** No new topic or listener, but it forces `CONFIRMED` to be
+  a resumable state, which makes a redelivered checkout event able to restart a completed sale.
+- **Returning the seat before reversing the payment.** Puts a resaleable seat back on sale sooner,
+  at the cost of a window where a customer has neither ticket nor refund.
+- **Reusing `refund-{orderId}`.** One key scheme instead of two, but it makes Payments replay the
+  compensation result for a commercial refund — a silent no-op reported as success.
+
+### Amended when the endpoint was implemented
+
+Four things were decided while building the state machine and the endpoint that this ADR should
+carry, because each is easier to undo than to rediscover.
+
+**`REFUNDING` and `REFUNDED` both answer `true` from `OrderStatus.isTerminal`, but the refund's own
+consumer never asks that predicate.** The checkout consumer's `order-placed` redelivery guard
+(`isTerminal`) has to say "yes, leave this alone" for both new states, or a stale `order-placed`
+redelivery would try to restart an order that has since been refunded. `REFUNDING` is nonetheless the
+resume point for a *different* consumer — `RefundOrchestrator`'s own, triggered by `refund-requested`
+— which decides whether to resume by comparing `order.status` against `REFUNDING` directly, never by
+negating `isTerminal`. Overloading one predicate with two questions ("is the checkout done" and "is
+the refund done") would have made the second one silently wrong the moment the first one had to be
+`true` for `REFUNDING`.
+
+**Both remote calls are safe to repeat unconditionally on every delivery, so the resume needs no
+"which step already ran" bookkeeping.** `pay-refund-{orderId}` is a deterministic idempotency key at
+Payments; Inventory's refund endpoint is idempotent by reservation state, not by key. A redelivery —
+whether it arrives before either call ran, after the reversal alone succeeded, or after both did —
+simply repeats both, exactly as `stageHold`/`stageCompensate` already rely on their own downstream
+idempotency rather than tracking progress locally.
+
+**A failed *payment* reversal during a commercial refund reuses `PAYMENT_REVERSAL_FAILURE`, the same
+kind checkout compensation opens.** Nothing about that reconciliation kind is specific to
+`COMPENSATING`; the record layout takes an `orderState` precisely so the same kind can describe either
+non-terminal money-in-doubt state. `SEAT_RETURN_FAILURE` is the only genuinely new kind, because
+nothing on the checkout side ever asks Inventory to un-sell a seat — release only ever touches a
+`HELD` row.
+
+**A closed set enumerated in a `CHECK` constraint needs a migration, not just a new enum value.**
+`reconciliation_records.kind` is constrained to the three names known when `V8` was written; adding
+`SEAT_RETURN_FAILURE` to `ReconciliationKind` without widening that constraint would have made the
+first seat-return failure of a real refund fail its own incident write with a constraint violation —
+discovered in a cluster, not at compile time, since nothing before this feature ever inserted a fourth
+kind. `V16` widens it.
+
+### Corrected after an adversarial review
+
+The paragraph above states that the refund's own consumer decides whether to resume "never by
+negating `isTerminal`" — correct, and the reason it had to be written down at all is that the
+operator-facing redrive endpoint initially got it wrong in exactly the way this paragraph warns
+against. `ReconciliationOperationsService.redrive` reused `isTerminal` directly, so a `REFUNDING`
+order hit the same terminal branch a truly finished order does, calling `closeStaleFor` — which now
+also closes `SEAT_RETURN_FAILURE` — before refusing the redrive. An operator retrying a stuck refund
+would have destroyed the incident that said one was stuck: gauge to zero, alert clears, seat left
+`SOLD` forever. `OrderPlacedDeadLetterListener` had the identical shape of bug on a narrower path.
+Both now resolve `REFUNDING` to its own case before the generic terminal branch, and `redrive`
+re-emits `refund-requested` for it rather than closing anything.
+
+**That makes redrive a retry path for a stuck refund, but not for every way one gets stuck, and the
+difference is worth stating rather than discovering during an incident.** A seat return that failed
+and a delivery that exhausted its retries are both genuinely retried: the pipeline re-runs from the
+durable `REFUNDING` row and can converge. A payment reversal Payments refused *definitively* is not.
+`PaymentService` stores an idempotency record for that failure — the `FAILED` branch writes
+`responseCode = 422` and saves it — so the redrive re-sends the same deterministic
+`pay-refund-{orderId}` key, Payments replays the stored `FAILED`, and `runRefundPipeline` opens the
+same incident again. Nothing else can close it either: `closeAutoResolvable` runs only inside the
+`markRefunded` commit, which that order never reaches; every caller of `closeStaleFor` excludes
+`REFUNDING`; and `resolve` is filtered to `INVARIANT_VIOLATION`. Such an order has no exit from
+Orders at all.
+
+The dead end is not introduced here — checkout compensation has the same shape against
+`refund-{orderId}` — but the claim that redrive is *the* operator's retry path was, and it is
+withdrawn. The real fix is in Payments: a provider-declined refund should not be cached as a settled
+result under a key the caller is expected to retry. That is another slice's decision and is left as
+one.
+
+> **Resolved 2026-10-07 by #122 (closes #111).** Payments now writes an idempotency record only for a
+> successful refund, and sends the provider `<key>` on the first attempt and `<key>_<n>` after `n`
+> recorded declines, so neither its own cache nor the provider's 24-hour idempotency cache replays the
+> decline. A redrive of a refund stuck on a definitive decline is therefore a real attempt; the same
+> holds for checkout compensation under `refund-{orderId}`. The paragraphs above are kept as the
+> record of why the change was needed. A decline cached *before* #122 is still replayed: V4 does not
+> remove those idempotency records.
+
+Separately, `refund-requested-dlt` initially had no consumer. The shared error handler exhausts in
+about three seconds, so a dependency blip ordinary enough to be routine (an Inventory pod roll) could
+strand an order in `REFUNDING` with no reconciliation record at all — `recordSeatReturnFailure` only
+runs on a *definitive* refusal, never on an outcome that merely timed out. `RefundRequestedDeadLetterListener`,
+modelled on `OrderPlacedDeadLetterListener`, closes that gap by opening `DELIVERY_EXHAUSTED`.
+
+## ADR-016: Customer Seat Hold with Two Timers
+
+**Decision:** "Continue" after seat selection creates the order and holds the seats before the customer
+enters payment details. The hold has two server-owned deadlines, both decided by the Inventory database
+clock:
+
+- **T1 — 10 minutes**, from the hold. The customer's time to pay, shown as a countdown. Never renewed.
+- **T2 — 10 minutes**, from the payment submission. Inventory restarts the hold once, in the same
+  locked transaction that checks T1 is still running, so the pipeline has the same ten minutes it has
+  today. Never renewed either, and independent of what was left of T1.
+
+Decided by the team on 2026-10-17. It is the reduced form of the proposal in issue #72: **no 3-D
+Secure**. Payment stays the Stripe token the browser already produces, authorized server-side with no
+further customer action, so Payments, its provider integration and the configuration repository do not
+change. The cost is that EuroTransit still has no Strong Customer Authentication, which #72 would have
+added and which the Definition of Done does not ask for.
+
+**Why.** Until now nothing held a seat until "Pay": the seat map is advisory, so two customers could
+fill in card details for the same seat and one of them only learned at the end that it was taken. The
+hold now starts at the moment the customer commits to a seat, and the customer sees how long it lasts.
+
+### How it fits the existing pipeline
+
+- **Same durable trigger (ADR-011).** `POST /api/orders` without a payment token stores the order with
+  `payment_deferred = true` and writes `order-placed` as before. The consumer takes the hold under
+  `inv-{orderId}` and, instead of authorizing, parks the order in the new non-terminal state
+  `HELD_AWAITING_PAYMENT`. A redelivery in that state does nothing: no Kafka event can start a payment.
+- **Payment is a second, explicit command.** `POST /api/orders/{orderId}/payment` carries the token. In
+  one Orders transaction it moves `HELD_AWAITING_PAYMENT -> PAYMENT_PENDING` with a compare-and-set
+  that also requires T1 not to have passed by the Orders database clock, stores the token, and writes a
+  new `order-placed` outbox row. That row is the recovery trigger: a crash after the commit resumes from
+  `PAYMENT_PENDING` without the browser. Reusing the `order-placed` type rather than a new one keeps the
+  Debezium routing and the Kafka topics in the configuration repository unchanged.
+- **T2 before money.** From `PAYMENT_PENDING`, before calling Payments, Orders asks Inventory to open the
+  payment window (`PUT /api/inventory/reservations/{reservationId}/payment-window`). Inventory locks the
+  reservation row: a `HELD` reservation still inside T1 gets `expires_at = CURRENT_TIMESTAMP + T2` once;
+  a replay returns the same deadline; a reservation past its deadline is expired and refused. Orders
+  stores the new deadline in `reservation_expires_at` and marks the window opened in the same statement,
+  and only then authorizes. A definitive refusal fails the order before any money moves. Inventory is
+  the final authority on T1 (invariant 4); the Orders check at payment submission is only a
+  conservative early refusal.
+- **Confirmation is unchanged (ADR-013).** After authorization the order confirms against the T2
+  deadline exactly as it confirms against the single deadline today.
+- **T1 expiry is an Orders job.** A scheduled job on the Orders database clock moves
+  `HELD_AWAITING_PAYMENT` orders past T1 to `CANCELLED` with a compare-and-set and releases the hold. The
+  job, a customer cancellation and a payment submission all start from the same predecessor, so exactly
+  one wins. The Inventory expiration sweep remains the safety net for the seat itself.
+- **One hold per customer during T1.** A partial unique index on `orders(user_id)` over the deferred
+  orders in `ACCEPTED`, `RESERVING` and `HELD_AWAITING_PAYMENT` refuses a second hold with
+  `409 ACTIVE_HOLD_EXISTS`. It is enforced by the database, so two concurrent requests cannot both pass.
+  After payment the customer may start another booking.
+- **Back or change seat** is `POST /api/orders/{orderId}/cancel`, now accepted in
+  `HELD_AWAITING_PAYMENT` too, followed by a new order. A seat change never mutates an existing
+  reservation.
+- **The direct flow stays.** A `POST /api/orders` that carries the token runs straight through, as it
+  always has. The k6 load test, the canary analysis jobs and the local load script use it; the frontend
+  moves to the new flow.
+
+### Consequences
+
+- The checkout latency SLO can no longer start at `POST /api/orders`: that would count up to ten
+  minutes of the customer reading the page. It starts at the accepted payment submission
+  (`payment_submitted_at`, equal to the creation time for a direct-flow order), and the non-terminal age
+  gauges use the same start.
+- The runbook deadline for redriving a `PAYMENT_PENDING` order is T2 once the window opened, and still
+  T1 if it never did. Because it lives in the same `reservation_expires_at` column, the redrive and
+  abandonment checks need no change.
+- Deployment needs no feature flag. Until the frontend sends a checkout without a token, no order enters
+  `HELD_AWAITING_PAYMENT` and Orders never calls the new Inventory command, so the backend ships first
+  and no older pod meets the new state during a canary. The order is therefore load-bearing: Inventory
+  and Orders both fully rolled out before the frontend, and no other client may omit the token before
+  then. An older Orders pod cannot read the new state, and would authorize a second `order-placed`
+  without opening the payment window; an older Inventory answers the window command with a code-less
+  `404`, which Orders treats as unknown and retries to the dead-letter topic.
+
+The protocol, invariants and recovery table are in
+[reservation-confirmation.md](reservation-confirmation.md); the endpoints in
+[api-design.md](api-design.md).
+
+### Alternatives Considered
+
+- **The full #72 proposal.** Provider-driven 3-D Secure needs webhooks, a provider payment identity in
+  Payments, three further Orders states, a durable release protocol and a new ingress route with its own
+  secret. Parked for its size; nothing in the reduced form prevents adding it later.
+- **A new `payment-submitted` event.** Cleaner name, but every outbox type is its own Kafka topic, so it
+  would need a new `KafkaTopic` in the configuration repository. The pipeline dispatches on the durable
+  state, so a second `order-placed` already means "resume this order".
+- **Taking the hold synchronously inside `POST /api/orders`.** It would save the client a short poll, but
+  it would add a second, non-durable path to the same hold and still need the consumer as the recovery
+  path. The client polls `GET /api/orders/{orderId}`, which it already does after payment.
+- **A feature flag.** Not needed, because the request shape selects the flow per order and the rollout
+  order above keeps the new state away from older pods.
+- **Removing the direct flow.** One flow instead of two, but the load test and canary jobs would have to
+  be rewritten in the configuration repository, and a broken canary blocks every Orders release.
+- **Renewing T1 on activity.** Rejected: a hold that renews on polling or page activity lets one
+  customer keep a seat indefinitely.

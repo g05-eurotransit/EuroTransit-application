@@ -10,6 +10,12 @@ Keycloak is automatically started when you run `docker-compose up` and is availa
 
 The `eurotransit` realm is automatically imported on startup.
 
+The `eurotransit-frontend` client explicitly maps `preferred_username` and
+`email` into its ID token and UserInfo response, matching the Kubernetes realm
+in `../../../EuroTransit-configuration/platform/keycloak/eurotransit-realm.yaml`.
+The frontend requests `openid` and uses these claims for the signed-in name and
+avatar. A new login is required to receive changed ID token claims.
+
 ## Available Test Users
 
 | Username | Password | Role | Purpose |

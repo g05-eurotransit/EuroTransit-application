@@ -1,12 +1,20 @@
 package it.polito.cpo.service
 
+import io.micrometer.observation.ObservationRegistry
 import it.polito.cpo.client.AuthorizationOutcome
+import it.polito.cpo.client.CatalogClient
 import it.polito.cpo.client.ConfirmReservationOutcome
 import it.polito.cpo.client.HoldOutcome
 import it.polito.cpo.client.InventoryClient
 import it.polito.cpo.client.InventoryRefusalCode
+import it.polito.cpo.client.OfferOutcome
+import it.polito.cpo.client.RouteOutcome
 import it.polito.cpo.client.PaymentClient
+import it.polito.cpo.client.PaymentWindowOutcome
+import it.polito.cpo.client.RefundReservationOutcome
+import it.polito.cpo.client.ResolvedOffer
 import it.polito.cpo.client.ReversalOutcome
+import it.polito.cpo.contracts.catalog.RefundPolicy
 import it.polito.cpo.contracts.payments.PaymentRequest
 import it.polito.cpo.contracts.inventory.ReservationRequest
 import it.polito.cpo.controller.dtos.CheckoutRequest
@@ -21,12 +29,14 @@ import it.polito.cpo.repository.IdempotentRequestRepository
 import it.polito.cpo.repository.OrderRepository
 import it.polito.cpo.repository.OutboxEventRepository
 import it.polito.cpo.repository.ReconciliationRecordRepository
+import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import it.polito.cpo.observability.ApiException
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.mockito.Mockito.mock
+import org.springframework.dao.DuplicateKeyException
 import org.springframework.http.HttpStatus
 import org.springframework.transaction.ReactiveTransaction
 import org.springframework.transaction.ReactiveTransactionManager
@@ -36,14 +46,20 @@ import reactor.core.publisher.Mono
 import tools.jackson.databind.ObjectMapper
 import tools.jackson.databind.json.JsonMapper
 import tools.jackson.module.kotlin.kotlinModule
+import java.io.IOException
 import java.math.BigDecimal
+import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.LocalTime
+import java.time.OffsetDateTime
+import java.time.ZoneId
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeoutException
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -61,6 +77,26 @@ import kotlin.test.assertTrue
  * tests prove control flow, not rollback. Rollback is covered in `CheckoutPipelineIntegrationTest`.
  */
 class CheckoutOrchestratorTest {
+
+    /** A stable future date: the checkout guard rejects anything in the past. */
+    private val TRAVEL_DATE: LocalDate = LocalDate.now().plusDays(7)
+
+    private companion object {
+        /**
+         * Priced to match the 100.00 every request in this file asks for, so the offer is only
+         * "wrong" in the tests that deliberately make it so.
+         */
+        val OFFER = ResolvedOffer(
+            offerId = "of-001",
+            routeId = "R1",
+            price = BigDecimal("100.00"),
+            currency = "EUR",
+            refundPolicy = RefundPolicy(refundable = true, cutoffMinutesBeforeDeparture = 60),
+            termsVersion = 3,
+            departureTime = LocalTime.of(7, 0),
+            departureZone = ZoneId.of("Europe/Rome"),
+        )
+    }
 
     private val mapper: ObjectMapper = JsonMapper.builder().addModule(kotlinModule()).build()
 
@@ -103,7 +139,17 @@ class CheckoutOrchestratorTest {
 
         override suspend fun getOrderById(id: UUID): Order? = ordersById[id]
 
+        /** Simulates the blocking hold ending between the failed insert and the read that explains it. */
+        var duplicateWithNoActiveHold = false
+
         override suspend fun saveOrder(order: Order): Order {
+            if (duplicateWithNoActiveHold && order.paymentDeferred) {
+                throw DuplicateKeyException("uk_orders_one_active_hold_per_user")
+            }
+            // V19's partial unique index: one waiting customer-hold order per customer.
+            if (order.paymentDeferred && activeHoldOf(order.userId) != null) {
+                throw DuplicateKeyException("uk_orders_one_active_hold_per_user")
+            }
             savedOrderStatuses.add(order.status)
             ordersById[order.getId()] = order
             return order
@@ -134,7 +180,15 @@ class CheckoutOrchestratorTest {
         override suspend fun markReserving(id: UUID): Long =
             cas(id, setOf(OrderStatus.ACCEPTED, OrderStatus.RESERVING), OrderStatus.RESERVING)
 
-        override suspend fun markPaymentPending(id: UUID, reservationId: String): Long {
+        /** What the pipeline stored alongside the reservation id, so a test can assert the pair. */
+        @Volatile
+        var storedExpiresAt: OffsetDateTime? = null
+
+        override suspend fun markPaymentPending(
+            id: UUID,
+            reservationId: String,
+            reservationExpiresAt: OffsetDateTime,
+        ): Long {
             val o = ordersById[id] ?: return 0
             // The self-transition is pinned to the same reservation id, exactly as the SQL is.
             val accepted = o.status == OrderStatus.RESERVING ||
@@ -142,6 +196,8 @@ class CheckoutOrchestratorTest {
             if (!accepted) return 0
             o.status = OrderStatus.PAYMENT_PENDING
             o.reservationId = reservationId
+            o.reservationExpiresAt = reservationExpiresAt
+            storedExpiresAt = reservationExpiresAt
             savedOrderStatuses.add(OrderStatus.PAYMENT_PENDING)
             return 1
         }
@@ -166,14 +222,93 @@ class CheckoutOrchestratorTest {
             return cas(id, setOf(OrderStatus.CONFIRMING_INVENTORY), OrderStatus.CONFIRMED, clearToken = true)
         }
 
-        override suspend fun markFailedUnpaid(id: UUID): Long =
-            cas(id, setOf(OrderStatus.RESERVING, OrderStatus.PAYMENT_PENDING), OrderStatus.FAILED, clearToken = true)
+        /** The public code the terminal commit stored, so a test can assert what a customer would see. */
+        @Volatile
+        var storedFailureCode: CustomerFailureCode? = null
 
-        override suspend fun markFailedAfterReversal(id: UUID): Long =
+        override suspend fun markFailedUnpaid(id: UUID, failureCode: CustomerFailureCode): Long =
+            cas(id, setOf(OrderStatus.RESERVING, OrderStatus.PAYMENT_PENDING), OrderStatus.FAILED, clearToken = true)
+                .also { if (it > 0) storedFailureCode = failureCode }
+
+        override suspend fun markFailedAfterReversal(id: UUID, failureCode: CustomerFailureCode): Long =
             cas(id, setOf(OrderStatus.COMPENSATING), OrderStatus.FAILED, clearToken = true)
+                .also { if (it > 0) storedFailureCode = failureCode }
 
         override suspend fun cancelIfUnpaid(id: UUID): Long =
-            cas(id, setOf(OrderStatus.ACCEPTED, OrderStatus.RESERVING), OrderStatus.CANCELLED, clearToken = true)
+            cas(
+                id,
+                setOf(OrderStatus.ACCEPTED, OrderStatus.RESERVING, OrderStatus.HELD_AWAITING_PAYMENT),
+                OrderStatus.CANCELLED,
+                clearToken = true,
+            )
+
+        // --- customer-hold flow (ADR-016), mirroring the V19 predicates ---------------------------
+
+        /** Stands in for the database clock in the T1 predicates. */
+        @Volatile
+        var dbNow: OffsetDateTime = OffsetDateTime.now()
+
+        private val waiting = setOf(OrderStatus.ACCEPTED, OrderStatus.RESERVING, OrderStatus.HELD_AWAITING_PAYMENT)
+
+        private fun activeHoldOf(userId: String): Order? =
+            ordersById.values.firstOrNull { it.userId == userId && it.paymentDeferred && it.status in waiting }
+
+        override suspend fun findActiveHold(userId: String): Order? = activeHoldOf(userId)
+
+        override suspend fun markHeldAwaitingPayment(
+            id: UUID,
+            reservationId: String,
+            reservationExpiresAt: OffsetDateTime,
+        ): Long {
+            val o = ordersById[id] ?: return 0
+            val accepted = o.paymentDeferred && (o.status == OrderStatus.RESERVING ||
+                (o.status == OrderStatus.HELD_AWAITING_PAYMENT && o.reservationId == reservationId))
+            if (!accepted) return 0
+            o.status = OrderStatus.HELD_AWAITING_PAYMENT
+            o.reservationId = reservationId
+            o.reservationExpiresAt = reservationExpiresAt
+            savedOrderStatuses.add(OrderStatus.HELD_AWAITING_PAYMENT)
+            return 1
+        }
+
+        override suspend fun submitPayment(id: UUID, paymentMethodToken: String): Long {
+            val o = ordersById[id] ?: return 0
+            val deadline = o.reservationExpiresAt ?: return 0
+            if (!o.paymentDeferred || o.status != OrderStatus.HELD_AWAITING_PAYMENT || !deadline.isAfter(dbNow)) return 0
+            o.status = OrderStatus.PAYMENT_PENDING
+            o.paymentMethodToken = paymentMethodToken
+            o.paymentSubmittedAt = dbNow
+            savedOrderStatuses.add(OrderStatus.PAYMENT_PENDING)
+            return 1
+        }
+
+        override suspend fun markPaymentWindowOpened(
+            id: UUID,
+            reservationId: String,
+            reservationExpiresAt: OffsetDateTime,
+        ): Long {
+            val o = ordersById[id] ?: return 0
+            if (!o.paymentDeferred || o.status != OrderStatus.PAYMENT_PENDING || o.reservationId != reservationId) return 0
+            o.reservationExpiresAt = reservationExpiresAt
+            o.paymentWindowOpened = true
+            storedExpiresAt = reservationExpiresAt
+            return 1
+        }
+
+        override suspend fun cancelExpiredHold(id: UUID): Long {
+            val o = ordersById[id] ?: return 0
+            val deadline = o.reservationExpiresAt ?: return 0
+            if (o.status != OrderStatus.HELD_AWAITING_PAYMENT || deadline.isAfter(dbNow)) return 0
+            return cas(id, setOf(OrderStatus.HELD_AWAITING_PAYMENT), OrderStatus.CANCELLED, clearToken = true)
+        }
+
+        /** Candidates as the job reads them; [staleCandidates] simulates a read taken before a payment. */
+        var staleCandidates: List<Order>? = null
+
+        override suspend fun findExpiredHolds(limit: Int): List<Order> = staleCandidates
+            ?: ordersById.values.filter {
+                it.status == OrderStatus.HELD_AWAITING_PAYMENT && it.reservationExpiresAt?.isAfter(dbNow) == false
+            }.take(limit)
     }
 
     private class FakeReconciliationService : ReconciliationService(
@@ -231,14 +366,19 @@ class CheckoutOrchestratorTest {
     }
 
     private class StubInventoryClient(
-        private val hold: () -> HoldOutcome = { HoldOutcome.Held("res-1", LocalDateTime.now().plusMinutes(10)) },
+        private val hold: () -> HoldOutcome = { HoldOutcome.Held("res-1", OffsetDateTime.now().plusMinutes(10)) },
         private val confirm: () -> ConfirmReservationOutcome = { ConfirmReservationOutcome.Confirmed("res-1") },
         /** Runs inside reserveSeats, i.e. exactly at the hold suspension point. */
         private val duringReserve: (suspend () -> Unit)? = null,
+        private val paymentWindow: () -> PaymentWindowOutcome = {
+            PaymentWindowOutcome.Opened("res-1", OffsetDateTime.now().plusMinutes(10))
+        },
     ) : InventoryClient {
+        val paymentWindowCalls = CopyOnWriteArrayList<String>()
         val releasedReservationIds = CopyOnWriteArrayList<String>()
         val releaseKeys = CopyOnWriteArrayList<String>()
         val reserveCalls = CopyOnWriteArrayList<UUID>()
+        val reservedTravelDates = CopyOnWriteArrayList<LocalDate>()
         val confirmCalls = CopyOnWriteArrayList<String>()
 
         override suspend fun reserveSeats(
@@ -247,6 +387,7 @@ class CheckoutOrchestratorTest {
             userId: String,
         ): HoldOutcome {
             reserveCalls.add(request.orderId)
+            reservedTravelDates.add(request.travelDate)
             duringReserve?.invoke()
             return hold()
         }
@@ -256,17 +397,27 @@ class CheckoutOrchestratorTest {
             return confirm()
         }
 
+        override suspend fun startPaymentWindow(reservationId: String, orderId: UUID): PaymentWindowOutcome {
+            paymentWindowCalls.add(reservationId)
+            return paymentWindow()
+        }
+
         override suspend fun releaseSeats(reservationId: String, idempotencyKey: String) {
             releasedReservationIds.add(reservationId)
             releaseKeys.add(idempotencyKey)
         }
+
+        override suspend fun refundReservation(reservationId: String, orderId: UUID): RefundReservationOutcome =
+            RefundReservationOutcome.Refunded(reservationId)
     }
 
     private class StubPaymentClient(
         private val authorize: () -> AuthorizationOutcome = { AuthorizationOutcome.Authorized("test-auth-id") },
-        private val reversal: () -> ReversalOutcome = { ReversalOutcome.Reversed },
+        private val reversal: () -> ReversalOutcome = { ReversalOutcome.Reversed(providerReference = "test-refund-ref") },
     ) : PaymentClient {
         val authorizeCalls = CopyOnWriteArrayList<UUID>()
+        /** The full requests, so what is actually charged — amount and currency — can be asserted. */
+        val authorizeRequests = CopyOnWriteArrayList<PaymentRequest>()
         val refundedOrderIds = CopyOnWriteArrayList<UUID>()
         val refundKeys = CopyOnWriteArrayList<String>()
 
@@ -276,6 +427,7 @@ class CheckoutOrchestratorTest {
             correlationId: String,
         ): AuthorizationOutcome {
             authorizeCalls.add(request.orderId)
+            authorizeRequests.add(request)
             return authorize()
         }
 
@@ -286,6 +438,28 @@ class CheckoutOrchestratorTest {
         }
     }
 
+    /**
+     * Catalog stand-in. Answers with [OFFER] unless told otherwise; [failWith] makes the lookup throw,
+     * which is how "Catalog is unreachable" is expressed — the client throws unknown outcomes rather
+     * than returning them, so the checkout can only fail closed.
+     */
+    private class StubCatalogClient(
+        var outcome: OfferOutcome = OfferOutcome.Found(OFFER),
+        var failWith: Throwable? = null,
+    ) : CatalogClient {
+        val lookedUp = CopyOnWriteArrayList<String>()
+
+        override suspend fun getOffer(offerId: String): OfferOutcome {
+            lookedUp.add(offerId)
+            failWith?.let { throw it }
+            return outcome
+        }
+
+        // The orchestrator never calls this -- only the seat-map façade does. Answering NotFound
+        // rather than throwing keeps that true without making the stub assert it.
+        override suspend fun getRoute(routeId: String): RouteOutcome = RouteOutcome.NotFound
+    }
+
     // --- harness ----------------------------------------------------------------------------------
 
     private fun orchestratorFor(
@@ -293,15 +467,20 @@ class CheckoutOrchestratorTest {
         inventory: StubInventoryClient = StubInventoryClient(),
         payment: StubPaymentClient = StubPaymentClient(),
         reconciliation: FakeReconciliationService = FakeReconciliationService(),
+        catalog: StubCatalogClient = StubCatalogClient(),
+        meterRegistry: MeterRegistry = SimpleMeterRegistry(),
     ) = CheckoutOrchestrator(
         orderService = service,
         inventoryClient = inventory,
         paymentClient = payment,
+        catalogClient = catalog,
         outboxEventRepository = mock(OutboxEventRepository::class.java),
         reconciliationService = reconciliation,
         objectMapper = mapper,
-        meterRegistry = SimpleMeterRegistry(),
+        meterRegistry = meterRegistry,
         txOperator = inlineTx,
+        // NOOP: no tracing in these tests, so rows carry no traceparent (OrderOutboxTest covers it).
+        orderOutbox = OrderOutbox(mapper, ObservationRegistry.NOOP),
     )
 
     private fun order(
@@ -310,18 +489,29 @@ class CheckoutOrchestratorTest {
         token: String? = "test-token",
         reservationId: String? = null,
         compensationReason: String? = null,
+        travelDate: LocalDate = TRAVEL_DATE,
+        currency: String = "EUR",
+        paymentDeferred: Boolean = false,
+        reservationExpiresAt: OffsetDateTime? = null,
+        paymentWindowOpened: Boolean = false,
+        userId: String = "user-1",
     ) = Order(
         id = id,
-        userId = "user-1",
+        userId = userId,
         status = status,
         routeId = "R1",
         seats = "1A,1B",
+        travelDate = travelDate,
         totalAmount = BigDecimal("100.00"),
+        currency = currency,
         createdAt = LocalDateTime.now(),
         paymentMethodToken = token,
         recipientEmail = "alice@example.com",
         reservationId = reservationId,
         compensationReason = compensationReason,
+        paymentDeferred = paymentDeferred,
+        reservationExpiresAt = reservationExpiresAt,
+        paymentWindowOpened = paymentWindowOpened,
     ).apply { setAsNew(false) }
 
     private fun event(orderId: UUID) =
@@ -337,7 +527,7 @@ class CheckoutOrchestratorTest {
         val service = FakeOrderService()
 
         val response = orchestratorFor(service).checkout(
-            request = CheckoutRequest(routeId = "R1", seats = listOf("1A", "1B"), totalAmount = BigDecimal("100.00"), paymentMethodToken = "test-token"),
+            request = CheckoutRequest(routeId = "R1", seats = listOf("1A", "1B"), travelDate = TRAVEL_DATE, totalAmount = BigDecimal("200.00"), paymentMethodToken = "test-token", offerId = "of-001"),
             idempotencyKey = "key-123",
             userId = "user-1",
             recipientEmail = "alice@example.com"
@@ -356,7 +546,7 @@ class CheckoutOrchestratorTest {
         service.seeded = IdempotentRequest("key-abc", mapper.writeValueAsString(storedResponse), LocalDateTime.now())
 
         val response = orchestratorFor(service).checkout(
-            request = CheckoutRequest(routeId = "R1", seats = listOf("2A"), totalAmount = BigDecimal("50.00"), paymentMethodToken = "test-token"),
+            request = CheckoutRequest(routeId = "R1", seats = listOf("2A"), travelDate = TRAVEL_DATE, totalAmount = BigDecimal("100.00"), paymentMethodToken = "test-token", offerId = "of-001"),
             idempotencyKey = "key-abc",
             userId = "user-1",
             recipientEmail = "alice@example.com"
@@ -377,7 +567,7 @@ class CheckoutOrchestratorTest {
 
         val ex = assertThrows<ApiException> {
             orchestratorFor(service).checkout(
-                request = CheckoutRequest(routeId = "R9", seats = listOf("9Z"), totalAmount = BigDecimal("999.00"), paymentMethodToken = "other-token"),
+                request = CheckoutRequest(routeId = "R1", seats = listOf("9Z"), travelDate = TRAVEL_DATE, totalAmount = BigDecimal("100.00"), paymentMethodToken = "other-token", offerId = "of-001"),
                 idempotencyKey = "key-x",
                 userId = "user-1",
                 recipientEmail = "alice@example.com"
@@ -387,6 +577,464 @@ class CheckoutOrchestratorTest {
         assertEquals(HttpStatus.CONFLICT, ex.status)
         assertEquals("IDEMPOTENCY_CONFLICT", ex.code)
         assertTrue(service.savedOrderStatuses.isEmpty())
+    }
+
+    // --- travel date (issue #64) ------------------------------------------------------------------
+
+    @Test
+    fun `the travel date reaches the Inventory hold`() = runTest {
+        val service = FakeOrderService()
+        val inventory = StubInventoryClient()
+        val orderId = UUID.randomUUID()
+        val date = LocalDate.now().plusDays(21)
+        service.ordersById[orderId] = order(orderId, travelDate = date)
+
+        orchestratorFor(service, inventory).processOrderPlaced(event(orderId))
+
+        // Without this, Inventory keys the hold by (route, seat) alone and the seat is sold forever.
+        assertEquals(listOf(date), inventory.reservedTravelDates.toList())
+    }
+
+    @Test
+    fun `a checkout for a past travel date is rejected before anything is persisted`() = runTest {
+        val service = FakeOrderService()
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service).checkout(
+                request = CheckoutRequest(
+                    routeId = "R1",
+                    seats = listOf("1A"),
+                    travelDate = LocalDate.now().minusDays(1),
+                    totalAmount = BigDecimal("100.00"),
+                    paymentMethodToken = "test-token",
+                    offerId = "of-001",
+                ),
+                idempotencyKey = "key-past",
+                userId = "user-1",
+                recipientEmail = "alice@example.com",
+            )
+        }
+
+        assertEquals(HttpStatus.BAD_REQUEST, ex.status)
+        assertEquals("TRAVEL_DATE_IN_THE_PAST", ex.code)
+        // Rejected before any write: no order, and no idempotency record to poison the key.
+        assertTrue(service.savedOrderStatuses.isEmpty())
+        assertTrue(service.idempotencyStore.isEmpty())
+    }
+
+    @Test
+    fun `today is an acceptable travel date`() = runTest {
+        val service = FakeOrderService()
+
+        val response = orchestratorFor(service).checkout(
+            request = CheckoutRequest(
+                routeId = "R1",
+                seats = listOf("1A"),
+                travelDate = LocalDate.now(),
+                totalAmount = BigDecimal("100.00"),
+                paymentMethodToken = "test-token",
+                offerId = "of-001",
+            ),
+            idempotencyKey = "key-today",
+            userId = "user-1",
+            recipientEmail = "alice@example.com",
+        )
+
+        // The guard rejects the past, not the present: a same-day departure is a real purchase.
+        assertEquals(OrderStatus.ACCEPTED, response.status)
+    }
+
+    @Test
+    fun `the same idempotency key with a different travel date is a conflict`() = runTest {
+        val service = FakeOrderService()
+        val orchestrator = orchestratorFor(service)
+        fun requestFor(date: LocalDate) = CheckoutRequest(
+            routeId = "R1",
+            seats = listOf("1A"),
+            travelDate = date,
+            totalAmount = BigDecimal("100.00"),
+            paymentMethodToken = "test-token",
+            offerId = "of-001",
+        )
+
+        orchestrator.checkout(requestFor(TRAVEL_DATE), "key-dates", "user-1", "alice@example.com")
+
+        // The travel date is part of what was ordered, so it has to be part of the fingerprint. If it
+        // were not, this would replay the first order and the caller would believe it had booked the
+        // second date.
+        val ex = assertThrows<ApiException> {
+            orchestrator.checkout(requestFor(TRAVEL_DATE.plusDays(1)), "key-dates", "user-1", "alice@example.com")
+        }
+        assertEquals("IDEMPOTENCY_CONFLICT", ex.code)
+    }
+
+    // --- the offer (ADR-015) ----------------------------------------------------------------------
+
+    @Test
+    fun `a checkout carrying an offerId persists it on the order`() = runTest {
+        val service = FakeOrderService()
+
+        orchestratorFor(service).checkout(
+            request = CheckoutRequest(
+                routeId = "R1",
+                seats = listOf("1A"),
+                travelDate = TRAVEL_DATE,
+                totalAmount = BigDecimal("100.00"),
+                paymentMethodToken = "test-token",
+                offerId = "of-001",
+            ),
+            idempotencyKey = "key-offer",
+            userId = "user-1",
+            recipientEmail = "alice@example.com",
+        )
+
+        // The refund needs to know which offer was sold. Since #93 this id is also resolved against
+        // Catalog, which is what the price, currency and refund-terms cases below cover.
+        assertEquals("of-001", service.ordersById.values.single().offerId)
+    }
+
+    @Test
+    fun `a checkout with no seats is refused before anything is resolved`() = runTest {
+        // This guard only became load-bearing when the expected total turned into `price x seats`:
+        // an empty list makes that total zero, so a request carrying 0 would satisfy the very check
+        // that exists to stop a client naming its own price.
+        val service = FakeOrderService()
+        val catalog = StubCatalogClient()
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service, catalog = catalog).checkout(
+                offerRequest(seats = emptyList(), totalAmount = BigDecimal.ZERO),
+                "key-no-seats",
+                "user-1",
+                "alice@example.com",
+            )
+        }
+
+        assertEquals("SEATS_REQUIRED", ex.code)
+        assertEquals(HttpStatus.BAD_REQUEST, ex.status)
+        // Refused before resolution: Catalog is never asked about a request that cannot be an order.
+        assertTrue(catalog.lookedUp.isEmpty())
+        assertTrue(service.ordersById.isEmpty())
+    }
+
+    @Test
+    fun `the same idempotency key with a different offerId is a conflict`() = runTest {
+        val service = FakeOrderService()
+        val orchestrator = orchestratorFor(service)
+        fun requestFor(offerId: String) = CheckoutRequest(
+            routeId = "R1",
+            seats = listOf("1A"),
+            travelDate = TRAVEL_DATE,
+            totalAmount = BigDecimal("100.00"),
+            paymentMethodToken = "test-token",
+            offerId = offerId,
+        )
+
+        orchestrator.checkout(requestFor("of-001"), "key-offers", "user-1", "alice@example.com")
+
+        // The offer is part of what was ordered — it decides the refund terms — so it belongs in the
+        // fingerprint like the travel date.
+        val ex = assertThrows<ApiException> {
+            orchestrator.checkout(requestFor("of-002"), "key-offers", "user-1", "alice@example.com")
+        }
+        assertEquals("IDEMPOTENCY_CONFLICT", ex.code)
+    }
+
+    @Test
+    fun `a retry of the same payload replays instead of creating a second order`() = runTest {
+        val service = FakeOrderService()
+        val orchestrator = orchestratorFor(service)
+        val request = offerRequest()
+        val firstOrderId = orchestrator.checkout(request, "key-retry", "user-1", "alice@example.com").orderId
+
+        val replay = orchestrator.checkout(request, "key-retry", "user-1", "alice@example.com")
+
+        // The offer segment of the canonical string is unconditional now that the field is required,
+        // so every fingerprint has fixed arity. That removed the collision the conditional form
+        // carried — a token of `tok|of-001` with no offer hashed identically to the token `tok` with
+        // offer `of-001` — and it could only be done in the same change as the required field.
+        assertEquals(firstOrderId, replay.orderId)
+        assertEquals(1, service.savedOrderStatuses.size)
+    }
+
+    // --- offer resolution and the price of the sale (#93) -----------------------------------------
+
+    /**
+     * One seat at [OFFER]'s price by default. [seats] is a parameter and not a constant because the
+     * defect this section exists for was invisible at a quantity of one: every case here used a
+     * single seat, where the unit price and the line total are the same number.
+     */
+    private fun offerRequest(
+        routeId: String = "R1",
+        totalAmount: BigDecimal = BigDecimal("100.00"),
+        offerId: String = "of-001",
+        seats: List<String> = listOf("1A"),
+    ) = CheckoutRequest(
+        routeId = routeId,
+        seats = seats,
+        travelDate = TRAVEL_DATE,
+        totalAmount = totalAmount,
+        paymentMethodToken = "test-token",
+        offerId = offerId,
+    )
+
+    @Test
+    fun `an amount that disagrees with the offer is rejected before anything is persisted`() = runTest {
+        // Issue #93: `totalAmount` used to arrive from the browser and be validated against nothing,
+        // so a checkout submitted with 0.01 was authorized for one cent and confirmed as a sale.
+        val service = FakeOrderService()
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service).checkout(
+                offerRequest(totalAmount = BigDecimal("0.01")),
+                "key-cheap",
+                "user-1",
+                "alice@example.com",
+            )
+        }
+
+        assertEquals("OFFER_PRICE_MISMATCH", ex.code)
+        assertEquals(HttpStatus.BAD_REQUEST, ex.status)
+        // Rejected, never silently corrected to the real price: charging an amount other than the
+        // one the customer was shown is its own bug. And nothing was written.
+        assertTrue(service.ordersById.isEmpty())
+        assertTrue(service.idempotencyStore.isEmpty())
+    }
+
+    @Test
+    fun `the price that is persisted is the resolved one, not the one the client sent`() = runTest {
+        val service = FakeOrderService()
+
+        // Equal in value, different in scale. compareTo accepts it — rejecting a correct amount over
+        // a trailing zero would be a bug — and what lands on the order is still Catalog's number.
+        orchestratorFor(service).checkout(
+            offerRequest(totalAmount = BigDecimal("100.0")),
+            "key-scale",
+            "user-1",
+            "alice@example.com",
+        )
+
+        val stored = service.ordersById.values.single().totalAmount
+        assertEquals(0, BigDecimal("100.00").compareTo(stored))
+        assertEquals("100.00", stored.toPlainString(), "the request's number was persisted, not Catalog's")
+    }
+
+    @Test
+    fun `an offer Catalog does not know is a 400, not a silent acceptance`() = runTest {
+        val service = FakeOrderService()
+        val catalog = StubCatalogClient(outcome = OfferOutcome.NotFound)
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service, catalog = catalog).checkout(
+                offerRequest(), "key-unknown-offer", "user-1", "alice@example.com",
+            )
+        }
+
+        assertEquals("OFFER_NOT_FOUND", ex.code)
+        assertTrue(service.ordersById.isEmpty())
+    }
+
+    @Test
+    fun `an offer sold on a different route is rejected`() = runTest {
+        // Reachable from a client that keeps the chosen offer across a route change. Left unchecked,
+        // the seats would be held on one route and the refund terms taken from another route's offer.
+        val service = FakeOrderService()
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service).checkout(
+                offerRequest(routeId = "R2"), "key-wrong-route", "user-1", "alice@example.com",
+            )
+        }
+
+        assertEquals("OFFER_ROUTE_MISMATCH", ex.code)
+        assertTrue(service.ordersById.isEmpty())
+    }
+
+    @Test
+    fun `an unreachable Catalog fails the checkout closed rather than trusting the amount`() = runTest {
+        // The deliberate availability trade: while Catalog is down, checkouts carrying an offer are
+        // refused. The alternative — accepting the client's amount when the check cannot be made —
+        // reopens #93 at exactly the moment nobody is watching.
+        val service = FakeOrderService()
+        val catalog = StubCatalogClient(failWith = TimeoutException("catalog is down"))
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service, catalog = catalog).checkout(
+                offerRequest(), "key-catalog-down", "user-1", "alice@example.com",
+            )
+        }
+
+        // 503 and not 400: the customer's request is fine, so the answer is "ask again", not
+        // "you are wrong". Nothing was persisted, so the retry is a clean first attempt.
+        assertEquals("OFFER_UNRESOLVABLE", ex.code)
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, ex.status)
+        assertTrue(service.ordersById.isEmpty())
+    }
+
+    @Test
+    fun `a malformed currency refuses the checkout instead of poisoning the pipeline`() = runTest {
+        // Payments validates the currency against ISO 4217 and answers 400, and only DECLINED is a
+        // definitive outcome on the Orders side — so an unusable currency would not fail the order,
+        // it would leave it in PAYMENT_PENDING holding a seat while the delivery retried to the
+        // dead-letter topic. Catching it here turns catalogue data into one rejected checkout.
+        val service = FakeOrderService()
+        val catalog = StubCatalogClient(outcome = OfferOutcome.Found(OFFER.copy(currency = "eur")))
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service, catalog = catalog).checkout(
+                offerRequest(), "key-bad-currency", "user-1", "alice@example.com",
+            )
+        }
+
+        assertEquals("OFFER_UNRESOLVABLE", ex.code)
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, ex.status)
+        assertTrue(service.ordersById.isEmpty())
+    }
+
+    @Test
+    fun `an offer priced at zero never reaches Payments`() = runTest {
+        // Payments rejects a non-positive amount the same way, with the same consequence. A free
+        // promotional offer is the plausible way this arrives, and refusing it loudly is the right
+        // answer until someone decides what buying one should mean.
+        val service = FakeOrderService()
+        val catalog = StubCatalogClient(outcome = OfferOutcome.Found(OFFER.copy(price = BigDecimal.ZERO)))
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service, catalog = catalog).checkout(
+                offerRequest(totalAmount = BigDecimal.ZERO), "key-zero-price", "user-1", "alice@example.com",
+            )
+        }
+
+        assertEquals("OFFER_UNRESOLVABLE", ex.code)
+        assertTrue(service.ordersById.isEmpty())
+    }
+
+    @Test
+    fun `an unusable offer is not reported as a price mismatch`() = runTest {
+        // The ordering of the two checks, which is the whole reason the guard sits where it does.
+        // Comparing a garbage price against the request would answer OFFER_PRICE_MISMATCH — a 400
+        // blaming the customer for a catalogue that is broken.
+        val service = FakeOrderService()
+        val catalog = StubCatalogClient(
+            outcome = OfferOutcome.Found(OFFER.copy(price = BigDecimal("-5.00"), currency = "CH")),
+        )
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service, catalog = catalog).checkout(
+                offerRequest(totalAmount = BigDecimal("100.00")), "key-garbage", "user-1", "alice@example.com",
+            )
+        }
+
+        assertEquals("OFFER_UNRESOLVABLE", ex.code)
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, ex.status)
+    }
+
+    @Test
+    fun `the currency comes from the offer rather than from a literal`() = runTest {
+        // Latent today — every seeded offer is EUR — and not latent for long: two seeded routes are
+        // cross-border, and the first CHF offer would have been authorized as the same number of
+        // euros, because the amount and its unit came from two different places.
+        val service = FakeOrderService()
+        val catalog = StubCatalogClient(outcome = OfferOutcome.Found(OFFER.copy(currency = "CHF")))
+
+        orchestratorFor(service, catalog = catalog).checkout(
+            offerRequest(), "key-chf", "user-1", "alice@example.com",
+        )
+
+        assertEquals("CHF", service.ordersById.values.single().currency)
+    }
+
+    @Test
+    fun `the refund terms and the departure instant are frozen onto the order`() = runTest {
+        val service = FakeOrderService()
+
+        orchestratorFor(service).checkout(offerRequest(), "key-terms", "user-1", "alice@example.com")
+
+        val order = service.ordersById.values.single()
+        // The rule itself, not only the version: Catalog resolves offers from a flat list of current
+        // ones and keeps no history, so a version marker alone would point at terms that may since
+        // have been edited (ADR-015, corrected).
+        assertEquals(true, order.refundable)
+        assertEquals(60, order.refundCutoffMinutesBeforeDeparture)
+        assertEquals(3, order.offerTermsVersion)
+        // And the cutoff has a moment to count back from. A date plus a zone-less local time is not
+        // one; this is composed once here so the refund path does no zone arithmetic at all.
+        assertEquals(
+            TRAVEL_DATE.atTime(LocalTime.of(7, 0)).atZone(ZoneId.of("Europe/Rome")).toInstant(),
+            order.departureAt?.toInstant(),
+        )
+    }
+
+    @Test
+    fun `a multi-seat checkout is priced at the offer's price times the seats`() = runTest {
+        // The case step 3 could not see. Every offer-resolution test used one seat, where the unit
+        // price and the line total are the same number, so comparing the wrong one passed.
+        val service = FakeOrderService()
+
+        orchestratorFor(service).checkout(
+            offerRequest(seats = listOf("1A", "1B"), totalAmount = BigDecimal("200.00")),
+            "key-two-seats",
+            "user-1",
+            "alice@example.com",
+        )
+
+        // And what is persisted — and therefore authorized — is the resolved line total.
+        assertEquals(0, BigDecimal("200.00").compareTo(service.ordersById.values.single().totalAmount))
+    }
+
+    @Test
+    fun `two seats priced as one are refused`() = runTest {
+        // The shape the broken comparison used to accept in reverse: the client sending the unit
+        // price for several seats would have been charged for one.
+        val service = FakeOrderService()
+
+        val ex = assertThrows<ApiException> {
+            orchestratorFor(service).checkout(
+                offerRequest(seats = listOf("1A", "1B", "1C"), totalAmount = BigDecimal("100.00")),
+                "key-underpriced-seats",
+                "user-1",
+                "alice@example.com",
+            )
+        }
+
+        assertEquals("OFFER_PRICE_MISMATCH", ex.code)
+        // The message and details must quote the expected *total*, not the per-seat price: a
+        // customer buying three seats told "the price is 100.00" cannot act on that.
+        assertEquals(BigDecimal("300.00"), ex.details?.get("expectedTotal"))
+        assertTrue(service.ordersById.isEmpty())
+    }
+
+    @Test
+    fun `a replay returns the stored result without resolving the offer again`() = runTest {
+        val service = FakeOrderService()
+        val catalog = StubCatalogClient()
+        val orchestrator = orchestratorFor(service, catalog = catalog)
+        val first = orchestrator.checkout(offerRequest(), "key-replay", "user-1", "alice@example.com")
+
+        // Resolution sits after the idempotency check on purpose: re-resolving would make an already
+        // accepted order unreplayable the moment Catalog went down or its price changed.
+        catalog.failWith = TimeoutException("catalog went down after the order was accepted")
+        val replay = orchestrator.checkout(offerRequest(), "key-replay", "user-1", "alice@example.com")
+
+        assertEquals(first.orderId, replay.orderId)
+        assertEquals(1, catalog.lookedUp.size)
+    }
+
+    @Test
+    fun `the authorization charges the amount and currency stored on the order`() = runTest {
+        // The actual fix for #93 as Payments sees it. Read off the row rather than re-resolved: the
+        // pipeline is asynchronous and may resume much later, so a catalogue edit — or Catalog being
+        // down — must not change what an accepted order authorizes.
+        val service = FakeOrderService()
+        val payment = StubPaymentClient()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = order(orderId, currency = "CHF")
+
+        orchestratorFor(service, payment = payment).processOrderPlaced(event(orderId))
+
+        val authorized = payment.authorizeRequests.single()
+        assertEquals(BigDecimal("100.00"), authorized.amount)
+        assertEquals("CHF", authorized.currency)
     }
 
     // --- happy path and phase order ---------------------------------------------------------------
@@ -561,6 +1209,98 @@ class CheckoutOrchestratorTest {
         assertEquals(listOf("res-1"), inventory.releasedReservationIds.toList())
         // Losing a race against the deadline is ordinary, not an invariant breach.
         assertTrue(reconciliation.kindsOpened().isEmpty())
+    }
+
+    @Test
+    fun `every checkout-outcome series exists at zero before the first checkout`() {
+        // The canary gates take increase() of these by pod; a series born at 1 hides the first event.
+        val registry = SimpleMeterRegistry()
+        orchestratorFor(FakeOrderService(), meterRegistry = registry)
+
+        listOf("confirmed", "failed").forEach {
+            assertEquals(0.0, registry.find("orders.checkout.completed").tag("result", it).counter()?.count(), it)
+        }
+        FailureClassifier.CHECKOUT_FAILURE_REASONS.forEach {
+            assertEquals(0.0, registry.find("orders.checkout.failed").tag("reason", it).counter()?.count(), it)
+        }
+    }
+
+    /** Runs one failing checkout and returns the failed-series count before and after, and the reason's count. */
+    private suspend fun failedSeriesAround(
+        reason: String,
+        inventory: StubInventoryClient = StubInventoryClient(),
+        payment: StubPaymentClient = StubPaymentClient(),
+        seed: (UUID) -> Order = { order(it) },
+    ): Triple<Int, Int, Double?> {
+        val registry = SimpleMeterRegistry()
+        val service = FakeOrderService()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = seed(orderId)
+        val orchestrator = orchestratorFor(service, inventory, payment, meterRegistry = registry)
+        val before = registry.find("orders.checkout.failed").counters().size
+
+        orchestrator.processOrderPlaced(event(orderId))
+
+        assertEquals(OrderStatus.FAILED, service.ordersById[orderId]!!.status)
+        val after = registry.find("orders.checkout.failed").counters().size
+        return Triple(before, after, registry.find("orders.checkout.failed").tag("reason", reason).counter()?.count())
+    }
+
+    @Test
+    fun `a refused hold counts into its pre-registered reason series`() = runTest {
+        val (before, after, count) = failedSeriesAround(
+            "seats_unavailable",
+            inventory = StubInventoryClient(
+                hold = { HoldOutcome.Rejected(InventoryRefusalCode.SEATS_UNAVAILABLE, "sold out") },
+            ),
+        )
+        assertEquals(before, after)
+        assertEquals(1.0, count)
+    }
+
+    @Test
+    fun `a payment decline counts into its pre-registered reason series`() = runTest {
+        val (before, after, count) = failedSeriesAround(
+            FailureClassifier.PAYMENT_DECLINED,
+            payment = StubPaymentClient(authorize = { AuthorizationOutcome.Declined("CARD_DECLINED") }),
+        )
+        assertEquals(before, after)
+        assertEquals(1.0, count)
+    }
+
+    @Test
+    fun `a stored compensation reason that is no longer a code is counted as unknown, not a new series`() = runTest {
+        // A COMPENSATING row written under a code that has since been renamed.
+        val (before, after, count) = failedSeriesAround(FailureClassifier.UNKNOWN) {
+            order(
+                it,
+                status = OrderStatus.COMPENSATING,
+                reservationId = "res-1",
+                compensationReason = "SOME_RETIRED_CODE",
+            )
+        }
+        assertEquals(before, after)
+        assertEquals(1.0, count)
+    }
+
+    @Test
+    fun `a compensated failure counts into its pre-registered reason series, not a new one`() = runTest {
+        // Proves the name compensation produces (compensationReason.lowercase()) is the one registered.
+        val registry = SimpleMeterRegistry()
+        val service = FakeOrderService()
+        val inventory = StubInventoryClient(confirm = refused(InventoryRefusalCode.RESERVATION_EXPIRED))
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = order(orderId)
+        val orchestrator = orchestratorFor(service, inventory, meterRegistry = registry)
+        val seriesBefore = registry.find("orders.checkout.failed").counters().size
+
+        orchestrator.processOrderPlaced(event(orderId))
+
+        assertEquals(OrderStatus.FAILED, service.ordersById[orderId]!!.status)
+        val expired = registry.find("orders.checkout.failed").tag("reason", "reservation_expired").counter()
+        assertEquals(1.0, expired?.count())
+        assertEquals(seriesBefore, registry.find("orders.checkout.failed").counters().size)
+        assertEquals(1.0, registry.find("orders.checkout.completed").tag("result", "failed").counter()?.count())
     }
 
     @Test
@@ -753,7 +1493,7 @@ class CheckoutOrchestratorTest {
         val orderId = UUID.randomUUID()
         service.ordersById[orderId] = order(orderId, status = OrderStatus.RESERVING, reservationId = "res-held")
 
-        val cancelled = orchestratorFor(service, inventory).cancel(orderId)
+        val cancelled = orchestratorFor(service, inventory).cancel(orderId, "user-1")
 
         assertEquals(OrderStatus.CANCELLED, cancelled.status)
         assertEquals(listOf("res-held"), inventory.releasedReservationIds.toList())
@@ -767,7 +1507,7 @@ class CheckoutOrchestratorTest {
         val orderId = UUID.randomUUID()
         service.ordersById[orderId] = order(orderId, status = OrderStatus.PAYMENT_PENDING, reservationId = "res-held")
 
-        val ex = assertThrows<ApiException> { orchestratorFor(service, inventory).cancel(orderId) }
+        val ex = assertThrows<ApiException> { orchestratorFor(service, inventory).cancel(orderId, "user-1") }
 
         assertEquals(HttpStatus.CONFLICT, ex.status)
         assertEquals("ORDER_NOT_CANCELLABLE", ex.code)
@@ -782,7 +1522,7 @@ class CheckoutOrchestratorTest {
         val orderId = UUID.randomUUID()
         service.ordersById[orderId] = order(orderId, status = OrderStatus.CONFIRMED)
 
-        val ex = assertThrows<ApiException> { orchestratorFor(service).cancel(orderId) }
+        val ex = assertThrows<ApiException> { orchestratorFor(service).cancel(orderId, "user-1") }
 
         assertEquals(HttpStatus.CONFLICT, ex.status)
         assertEquals("ORDER_NOT_CANCELLABLE", ex.code)
@@ -796,7 +1536,7 @@ class CheckoutOrchestratorTest {
         val orderId = UUID.randomUUID()
         service.ordersById[orderId] = order(orderId)
 
-        val cancelled = orchestratorFor(service, inventory).cancel(orderId)
+        val cancelled = orchestratorFor(service, inventory).cancel(orderId, "user-1")
 
         assertEquals(OrderStatus.CANCELLED, cancelled.status)
         assertFalse(inventory.releasedReservationIds.any())
@@ -816,5 +1556,555 @@ class CheckoutOrchestratorTest {
 
         assertEquals(listOf("refund-$orderId"), payment.refundKeys.toList())
         assertEquals(listOf("rel-$orderId"), inventory.releaseKeys.toList())
+    }
+
+    // --- money-path audit (DoD §5.9) --------------------------------------------------------------
+
+    private fun auditedCheckout(paymentMethodToken: String = "tok-secret-4242") = CheckoutRequest(
+        routeId = "R1", seats = listOf("1A", "1B"), travelDate = TRAVEL_DATE, totalAmount = BigDecimal("200.00"),
+        paymentMethodToken = paymentMethodToken, offerId = "of-001",
+    )
+
+    @Test
+    fun `an accepted checkout is audited with its principal and order, and never with the token or the email`() = runTest {
+        AuditLogCapture().use { audit ->
+            val response = orchestratorFor(FakeOrderService()).checkout(
+                auditedCheckout(), "key-audit", "user-1", "alice@example.com",
+            )
+
+            val line = audit.lines.single()
+            assertEquals("checkout", line.action)
+            assertEquals("accepted", line.outcome)
+            assertEquals("user-1", line.fields["principalId"])
+            assertEquals(response.orderId.toString(), line.fields["orderId"])
+            assertTrue(line.correlationId != null, "the correlation id is on the line")
+            val everything = line.fields.values.joinToString() + line.message
+            assertFalse("tok-secret-4242" in everything)
+            assertFalse("alice@example.com" in everything)
+        }
+    }
+
+    @Test
+    fun `a replayed checkout is audited as replayed, with the stored order`() = runTest {
+        val service = FakeOrderService()
+        val storedOrderId = UUID.randomUUID()
+        service.seeded = IdempotentRequest(
+            "key-replay", mapper.writeValueAsString(CheckoutResponse(storedOrderId, OrderStatus.ACCEPTED)),
+            LocalDateTime.now(),
+        )
+
+        AuditLogCapture().use { audit ->
+            orchestratorFor(service).checkout(auditedCheckout(), "key-replay", "user-1", null)
+
+            val line = audit.lines.single()
+            assertEquals("replayed", line.outcome)
+            assertEquals(storedOrderId.toString(), line.fields["orderId"])
+        }
+    }
+
+    @Test
+    fun `a refused checkout is audited with its code and no order`() = runTest {
+        AuditLogCapture().use { audit ->
+            assertThrows<ApiException> {
+                orchestratorFor(FakeOrderService()).checkout(
+                    auditedCheckout().copy(travelDate = LocalDate.now().minusDays(1)), "key-past-audit", "user-1", null,
+                )
+            }
+
+            val line = audit.lines.single()
+            assertEquals("checkout", line.action)
+            assertEquals("rejected", line.outcome)
+            assertEquals("TRAVEL_DATE_IN_THE_PAST", line.fields["reason"])
+            assertEquals("user-1", line.fields["principalId"])
+            assertNull(line.fields["orderId"])
+        }
+    }
+
+    @Test
+    fun `a confirmed checkout is audited by the pipeline under the owner and the event's correlation id`() = runTest {
+        val service = FakeOrderService()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = order(orderId)
+
+        AuditLogCapture().use { audit ->
+            orchestratorFor(service).processOrderPlaced(event(orderId))
+
+            val line = audit.forOrder(orderId).single()
+            assertEquals("checkout.pipeline", line.action)
+            assertEquals("confirmed", line.outcome)
+            assertEquals("user-1", line.fields["principalId"])
+            assertEquals("corr-1", line.correlationId)
+        }
+    }
+
+    @Test
+    fun `a failed checkout is audited by the pipeline with its failure label`() = runTest {
+        val service = FakeOrderService()
+        val payment = StubPaymentClient(authorize = { AuthorizationOutcome.Declined("CARD_DECLINED") })
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = order(orderId)
+
+        AuditLogCapture().use { audit ->
+            orchestratorFor(service, StubInventoryClient(), payment).processOrderPlaced(event(orderId))
+
+            val line = audit.forOrder(orderId).single()
+            assertEquals("failed", line.outcome)
+            assertEquals(FailureClassifier.PAYMENT_DECLINED, line.fields["reason"])
+        }
+    }
+
+    @Test
+    fun `a compensated checkout is audited once, as failed`() = runTest {
+        val service = FakeOrderService()
+        val inventory = StubInventoryClient(confirm = refused(InventoryRefusalCode.RESERVATION_EXPIRED))
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = order(orderId)
+
+        AuditLogCapture().use { audit ->
+            orchestratorFor(service, inventory).processOrderPlaced(event(orderId))
+
+            val line = audit.forOrder(orderId).single()
+            assertEquals("failed", line.outcome)
+            assertEquals("reservation_expired", line.fields["reason"])
+        }
+    }
+
+    @Test
+    fun `a cancellation by staff is audited under the staff member, naming the owner`() = runTest {
+        val service = FakeOrderService()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = order(orderId)
+
+        AuditLogCapture().use { audit ->
+            orchestratorFor(service).cancel(orderId, "staff-7")
+
+            val line = audit.lines.single()
+            assertEquals("cancel", line.action)
+            assertEquals("cancelled", line.outcome)
+            assertEquals("staff-7", line.fields["principalId"])
+            assertEquals("user-1", line.fields["ownerId"])
+        }
+    }
+
+    @Test
+    fun `a refused cancellation is audited with its code`() = runTest {
+        val service = FakeOrderService()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = order(orderId, status = OrderStatus.CONFIRMED)
+
+        AuditLogCapture().use { audit ->
+            assertThrows<ApiException> { orchestratorFor(service).cancel(orderId, "user-1") }
+
+            val line = audit.lines.single()
+            assertEquals("rejected", line.outcome)
+            assertEquals("ORDER_NOT_CANCELLABLE", line.fields["reason"])
+            assertFalse("ownerId" in line.fields)
+        }
+    }
+
+    // --- customer-hold flow (ADR-016) -------------------------------------------------------------
+
+    private fun deferredRequest(seats: List<String> = listOf("1A")) = CheckoutRequest(
+        routeId = "R1",
+        seats = seats,
+        travelDate = TRAVEL_DATE,
+        totalAmount = BigDecimal("100.00").multiply(BigDecimal(seats.size)),
+        paymentMethodToken = null,
+        offerId = "of-001",
+    )
+
+    private fun heldOrder(
+        id: UUID,
+        deadline: OffsetDateTime = OffsetDateTime.now().plusMinutes(5),
+        userId: String = "user-1",
+    ) = order(
+        id,
+        status = OrderStatus.HELD_AWAITING_PAYMENT,
+        token = null,
+        reservationId = "res-1",
+        paymentDeferred = true,
+        reservationExpiresAt = deadline,
+        userId = userId,
+    )
+
+    @Test
+    fun `a checkout without a token is a customer-hold order with no token stored`() = runTest {
+        val service = FakeOrderService()
+
+        val response = orchestratorFor(service).checkout(deferredRequest(), "key-hold", "user-1", "alice@example.com")
+
+        val stored = service.ordersById[response.orderId]!!
+        assertTrue(stored.paymentDeferred)
+        assertNull(stored.paymentMethodToken)
+        assertEquals(OrderStatus.ACCEPTED, stored.status)
+    }
+
+    @Test
+    fun `the same key with and without a token is a conflict, not a replay of the other flow`() = runTest {
+        val service = FakeOrderService()
+        val orchestrator = orchestratorFor(service)
+        orchestrator.checkout(deferredRequest(), "key-flow", "user-1", null)
+
+        val ex = assertThrows<ApiException> {
+            orchestrator.checkout(deferredRequest().copy(paymentMethodToken = "tok_visa"), "key-flow", "user-1", null)
+        }
+        assertEquals("IDEMPOTENCY_CONFLICT", ex.code)
+    }
+
+    @Test
+    fun `a second customer hold for the same customer is refused with the waiting order`() = runTest {
+        val service = FakeOrderService()
+        val orchestrator = orchestratorFor(service)
+        val first = orchestrator.checkout(deferredRequest(), "key-1", "user-1", null)
+
+        val ex = assertThrows<ApiException> { orchestrator.checkout(deferredRequest(listOf("2A")), "key-2", "user-1", null) }
+
+        assertEquals(HttpStatus.CONFLICT, ex.status)
+        assertEquals("ACTIVE_HOLD_EXISTS", ex.code)
+        assertEquals(first.orderId, ex.details?.get("orderId"))
+        // A direct-flow checkout is not affected by the waiting hold.
+        orchestrator.checkout(deferredRequest(listOf("3A")).copy(paymentMethodToken = "tok_visa"), "key-3", "user-1", null)
+    }
+
+    @Test
+    fun `a hold that ended between the insert and the read is a retryable conflict, not a 500`() = runTest {
+        val service = FakeOrderService().apply { duplicateWithNoActiveHold = true }
+
+        val ex = assertThrows<ApiException> { orchestratorFor(service).checkout(deferredRequest(), "key-race", "user-1", null) }
+
+        assertEquals(HttpStatus.CONFLICT, ex.status)
+        assertEquals("ACTIVE_HOLD_EXISTS", ex.code)
+        assertNull(ex.details?.get("orderId"))
+    }
+
+    @Test
+    fun `a payment after the expiry job cancelled the order is still HOLD_EXPIRED`() = runTest {
+        val service = FakeOrderService()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = heldOrder(orderId, deadline = service.dbNow.minusSeconds(20))
+            .apply { status = OrderStatus.CANCELLED }
+
+        val ex = assertThrows<ApiException> { orchestratorFor(service).submitPayment(orderId, "tok_visa", "k", "user-1") }
+
+        assertEquals("HOLD_EXPIRED", ex.code)
+    }
+
+    @Test
+    fun `the pipeline holds the seats and parks a customer-hold order without paying`() = runTest {
+        val service = FakeOrderService()
+        val inventory = StubInventoryClient()
+        val payment = StubPaymentClient()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = order(orderId, token = null, paymentDeferred = true)
+
+        orchestratorFor(service, inventory, payment).processOrderPlaced(event(orderId))
+
+        val stored = service.ordersById[orderId]!!
+        assertEquals(OrderStatus.HELD_AWAITING_PAYMENT, stored.status)
+        assertEquals("res-1", stored.reservationId)
+        assertNotNull(stored.reservationExpiresAt)
+        assertTrue(payment.authorizeCalls.isEmpty())
+        assertTrue(inventory.paymentWindowCalls.isEmpty())
+    }
+
+    @Test
+    fun `a redelivery to a parked order makes no remote call at all`() = runTest {
+        val service = FakeOrderService()
+        val inventory = StubInventoryClient()
+        val payment = StubPaymentClient()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = heldOrder(orderId)
+
+        orchestratorFor(service, inventory, payment).processOrderPlaced(event(orderId))
+
+        assertEquals(OrderStatus.HELD_AWAITING_PAYMENT, service.ordersById[orderId]!!.status)
+        assertTrue(inventory.reserveCalls.isEmpty())
+        assertTrue(inventory.paymentWindowCalls.isEmpty())
+        assertTrue(payment.authorizeCalls.isEmpty())
+    }
+
+    @Test
+    fun `a cancellation that wins while a customer hold is in flight releases it`() = runTest {
+        val service = FakeOrderService()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = order(orderId, token = null, paymentDeferred = true)
+        val inventory = StubInventoryClient(duringReserve = { service.cancelIfUnpaid(orderId) })
+
+        orchestratorFor(service, inventory).processOrderPlaced(event(orderId))
+
+        assertEquals(OrderStatus.CANCELLED, service.ordersById[orderId]!!.status)
+        assertEquals(listOf("res-1"), inventory.releasedReservationIds.toList())
+    }
+
+    @Test
+    fun `paying a held order commits PAYMENT_PENDING and the pipeline opens T2 before authorizing`() = runTest {
+        val service = FakeOrderService()
+        val t2 = OffsetDateTime.now().plusMinutes(10)
+        val inventory = StubInventoryClient(paymentWindow = { PaymentWindowOutcome.Opened("res-1", t2) })
+        val payment = StubPaymentClient()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = heldOrder(orderId)
+        val orchestrator = orchestratorFor(service, inventory, payment)
+
+        val response = orchestrator.submitPayment(orderId, "tok_visa", "pay-key-1", "user-1")
+        assertEquals(OrderStatus.PAYMENT_PENDING, response.status)
+        val stored = service.ordersById[orderId]!!
+        assertEquals("tok_visa", stored.paymentMethodToken)
+        assertNotNull(stored.paymentSubmittedAt)
+        assertTrue(service.idempotencyStore.containsKey("pay-key-1"))
+
+        orchestrator.processOrderPlaced(event(orderId))
+
+        assertEquals(listOf("res-1"), inventory.paymentWindowCalls.toList())
+        assertEquals(listOf(orderId), payment.authorizeCalls.toList())
+        assertEquals(t2, service.storedExpiresAt)
+        assertEquals(OrderStatus.CONFIRMED, service.ordersById[orderId]!!.status)
+    }
+
+    @Test
+    fun `a retried payment replays, a reused key with another token conflicts`() = runTest {
+        val service = FakeOrderService()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = heldOrder(orderId)
+        val orchestrator = orchestratorFor(service)
+
+        orchestrator.submitPayment(orderId, "tok_visa", "pay-key", "user-1")
+        val replay = orchestrator.submitPayment(orderId, "tok_visa", "pay-key", "user-1")
+        assertEquals(OrderStatus.PAYMENT_PENDING, replay.status)
+
+        val conflict = assertThrows<ApiException> { orchestrator.submitPayment(orderId, "tok_other", "pay-key", "user-1") }
+        assertEquals("IDEMPOTENCY_CONFLICT", conflict.code)
+        assertEquals("tok_visa", service.ordersById[orderId]!!.paymentMethodToken)
+    }
+
+    @Test
+    fun `a second payment under another key is refused and the first token stands`() = runTest {
+        val service = FakeOrderService()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = heldOrder(orderId)
+        val orchestrator = orchestratorFor(service)
+        orchestrator.submitPayment(orderId, "tok_visa", "pay-key-a", "user-1")
+
+        val ex = assertThrows<ApiException> { orchestrator.submitPayment(orderId, "tok_other", "pay-key-b", "user-1") }
+
+        assertEquals("PAYMENT_ALREADY_STARTED", ex.code)
+        assertEquals("tok_visa", service.ordersById[orderId]!!.paymentMethodToken)
+    }
+
+    @Test
+    fun `a payment after T1 is refused with HOLD_EXPIRED and changes nothing`() = runTest {
+        val service = FakeOrderService()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = heldOrder(orderId, deadline = service.dbNow.minusSeconds(1))
+
+        val ex = assertThrows<ApiException> { orchestratorFor(service).submitPayment(orderId, "tok_visa", "k", "user-1") }
+
+        assertEquals("HOLD_EXPIRED", ex.code)
+        assertEquals(OrderStatus.HELD_AWAITING_PAYMENT, service.ordersById[orderId]!!.status)
+        assertNull(service.ordersById[orderId]!!.paymentMethodToken)
+        assertFalse(service.idempotencyStore.containsKey("k"))
+    }
+
+    @Test
+    fun `a payment for a direct-flow or cancelled order is ORDER_NOT_PAYABLE`() = runTest {
+        val service = FakeOrderService()
+        val direct = UUID.randomUUID()
+        service.ordersById[direct] = order(direct, status = OrderStatus.PAYMENT_PENDING)
+        val cancelled = UUID.randomUUID()
+        service.ordersById[cancelled] = heldOrder(cancelled).apply { status = OrderStatus.CANCELLED }
+        val orchestrator = orchestratorFor(service)
+
+        assertEquals("ORDER_NOT_PAYABLE", assertThrows<ApiException> { orchestrator.submitPayment(direct, "t", "k1", "user-1") }.code)
+        assertEquals("ORDER_NOT_PAYABLE", assertThrows<ApiException> { orchestrator.submitPayment(cancelled, "t", "k2", "user-1") }.code)
+    }
+
+    private fun paidOrder(id: UUID, windowOpened: Boolean = false) = heldOrder(id).apply {
+        status = OrderStatus.PAYMENT_PENDING
+        paymentMethodToken = "tok_visa"
+        paymentSubmittedAt = OffsetDateTime.now()
+        paymentWindowOpened = windowOpened
+    }
+
+    @Test
+    fun `a refused payment window fails the order before Payments and releases nothing`() = runTest {
+        listOf(InventoryRefusalCode.RESERVATION_EXPIRED, InventoryRefusalCode.RESERVATION_CANCELLED).forEach { code ->
+            val service = FakeOrderService()
+            val inventory = StubInventoryClient(paymentWindow = { PaymentWindowOutcome.Refused(code, "late") })
+            val payment = StubPaymentClient()
+            val reconciliation = FakeReconciliationService()
+            val orderId = UUID.randomUUID()
+            service.ordersById[orderId] = paidOrder(orderId)
+
+            orchestratorFor(service, inventory, payment, reconciliation).processOrderPlaced(event(orderId))
+
+            assertEquals(OrderStatus.FAILED, service.ordersById[orderId]!!.status, code.name)
+            assertEquals(CustomerFailureCode.CHECKOUT_FAILED, service.storedFailureCode)
+            assertTrue(payment.authorizeCalls.isEmpty(), "Payments must never be called after a refused window")
+            assertTrue(inventory.releasedReservationIds.isEmpty())
+            assertTrue(reconciliation.kindsOpened().isEmpty(), "an expiry is an ordinary race, not an incident")
+        }
+    }
+
+    @Test
+    fun `a payment window refused for another order opens an incident and fails without release`() = runTest {
+        val service = FakeOrderService()
+        val inventory = StubInventoryClient(paymentWindow = {
+            PaymentWindowOutcome.Refused(InventoryRefusalCode.RESERVATION_ORDER_CONFLICT, "not yours")
+        })
+        val payment = StubPaymentClient()
+        val reconciliation = FakeReconciliationService()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = paidOrder(orderId)
+
+        orchestratorFor(service, inventory, payment, reconciliation).processOrderPlaced(event(orderId))
+
+        assertEquals(OrderStatus.FAILED, service.ordersById[orderId]!!.status)
+        assertEquals(listOf(ReconciliationKind.INVARIANT_VIOLATION), reconciliation.kindsOpened())
+        assertTrue(payment.authorizeCalls.isEmpty())
+        assertTrue(inventory.releasedReservationIds.isEmpty(), "the hold belongs to another order")
+    }
+
+    @Test
+    fun `an unknown payment window keeps PAYMENT_PENDING and never reaches Payments`() = runTest {
+        val service = FakeOrderService()
+        val inventory = StubInventoryClient(paymentWindow = { throw IOException("connection reset") })
+        val payment = StubPaymentClient()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = paidOrder(orderId)
+
+        assertThrows<IOException> { orchestratorFor(service, inventory, payment).processOrderPlaced(event(orderId)) }
+
+        val stored = service.ordersById[orderId]!!
+        assertEquals(OrderStatus.PAYMENT_PENDING, stored.status)
+        assertFalse(stored.paymentWindowOpened)
+        assertTrue(payment.authorizeCalls.isEmpty())
+    }
+
+    @Test
+    fun `once the window is recorded, a redelivery authorizes and never asks for the window again`() = runTest {
+        // The case the marker exists for: the first delivery opened the window and lost the
+        // authorization's answer. Asking again after T2 could read "expired" and fail a paid order.
+        val service = FakeOrderService()
+        val inventory = StubInventoryClient(paymentWindow = {
+            PaymentWindowOutcome.Refused(InventoryRefusalCode.RESERVATION_EXPIRED, "would be wrong to ask")
+        })
+        val payment = StubPaymentClient()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = paidOrder(orderId, windowOpened = true)
+
+        orchestratorFor(service, inventory, payment).processOrderPlaced(event(orderId))
+
+        assertTrue(inventory.paymentWindowCalls.isEmpty())
+        assertEquals(listOf(orderId), payment.authorizeCalls.toList())
+        assertEquals(OrderStatus.CONFIRMED, service.ordersById[orderId]!!.status)
+    }
+
+    @Test
+    fun `an opened window whose authorization is unknown is recorded before the failure`() = runTest {
+        val service = FakeOrderService()
+        val inventory = StubInventoryClient()
+        val payment = StubPaymentClient(authorize = { throw IOException("Payments timed out") })
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = paidOrder(orderId)
+
+        assertThrows<IOException> { orchestratorFor(service, inventory, payment).processOrderPlaced(event(orderId)) }
+
+        val stored = service.ordersById[orderId]!!
+        assertEquals(OrderStatus.PAYMENT_PENDING, stored.status)
+        assertTrue(stored.paymentWindowOpened, "the marker must be durable before Payments is called")
+    }
+
+    @Test
+    fun `the direct flow never asks for a payment window`() = runTest {
+        val service = FakeOrderService()
+        val inventory = StubInventoryClient()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = order(orderId)
+
+        orchestratorFor(service, inventory).processOrderPlaced(event(orderId))
+
+        assertEquals(OrderStatus.CONFIRMED, service.ordersById[orderId]!!.status)
+        assertTrue(inventory.paymentWindowCalls.isEmpty())
+    }
+
+    @Test
+    fun `the expiry job cancels held orders past T1, releases them, and leaves running ones alone`() = runTest {
+        val service = FakeOrderService()
+        val inventory = StubInventoryClient()
+        val reconciliation = FakeReconciliationService()
+        val overdue = UUID.randomUUID()
+        val running = UUID.randomUUID()
+        service.ordersById[overdue] = heldOrder(overdue, deadline = service.dbNow.minusSeconds(5), userId = "u-overdue")
+        service.ordersById[running] = heldOrder(running, deadline = service.dbNow.plusMinutes(5), userId = "u-running")
+
+        val closed = orchestratorFor(service, inventory, reconciliation = reconciliation).expireHolds()
+
+        assertEquals(1, closed)
+        assertEquals(OrderStatus.CANCELLED, service.ordersById[overdue]!!.status)
+        assertEquals(OrderStatus.HELD_AWAITING_PAYMENT, service.ordersById[running]!!.status)
+        assertEquals(listOf("res-1"), inventory.releasedReservationIds.toList())
+        assertEquals(listOf("rel-$overdue"), inventory.releaseKeys.toList())
+        assertEquals(null, service.storedFailureCode, "no failure code: the customer simply did not pay")
+    }
+
+    @Test
+    fun `the expiry job leaves an order whose payment committed after it read the candidates`() = runTest {
+        val service = FakeOrderService()
+        val inventory = StubInventoryClient()
+        val orderId = UUID.randomUUID()
+        val stale = heldOrder(orderId, deadline = service.dbNow.minusSeconds(1))
+        service.staleCandidates = listOf(stale)
+        // The payment won the row in between: the job's compare-and-set must find nothing to do.
+        service.ordersById[orderId] = paidOrder(orderId)
+
+        val closed = orchestratorFor(service, inventory).expireHolds()
+
+        assertEquals(0, closed)
+        assertEquals(OrderStatus.PAYMENT_PENDING, service.ordersById[orderId]!!.status)
+        assertTrue(inventory.releasedReservationIds.isEmpty())
+    }
+
+    @Test
+    fun `a failed release does not stop the expiry job, the Inventory sweep is the fallback`() = runTest {
+        val service = FakeOrderService()
+        val failing = object : InventoryClient by StubInventoryClient() {
+            override suspend fun releaseSeats(reservationId: String, idempotencyKey: String) {
+                throw IOException("Inventory down")
+            }
+        }
+        val a = UUID.randomUUID()
+        val b = UUID.randomUUID()
+        service.ordersById[a] = heldOrder(a, deadline = service.dbNow.minusSeconds(5), userId = "u-a")
+        service.ordersById[b] = heldOrder(b, deadline = service.dbNow.minusSeconds(5), userId = "u-b")
+
+        val orchestrator = CheckoutOrchestrator(
+            orderService = service,
+            inventoryClient = failing,
+            paymentClient = StubPaymentClient(),
+            catalogClient = StubCatalogClient(),
+            outboxEventRepository = mock(OutboxEventRepository::class.java),
+            reconciliationService = FakeReconciliationService(),
+            objectMapper = mapper,
+            meterRegistry = SimpleMeterRegistry(),
+            txOperator = inlineTx,
+            orderOutbox = OrderOutbox(mapper, ObservationRegistry.NOOP),
+        )
+
+        assertEquals(2, orchestrator.expireHolds())
+        assertEquals(OrderStatus.CANCELLED, service.ordersById[a]!!.status)
+        assertEquals(OrderStatus.CANCELLED, service.ordersById[b]!!.status)
+    }
+
+    @Test
+    fun `a customer can cancel a held order to go back or change seat`() = runTest {
+        val service = FakeOrderService()
+        val inventory = StubInventoryClient()
+        val orderId = UUID.randomUUID()
+        service.ordersById[orderId] = heldOrder(orderId)
+
+        orchestratorFor(service, inventory).cancel(orderId, "user-1")
+
+        assertEquals(OrderStatus.CANCELLED, service.ordersById[orderId]!!.status)
+        assertEquals(listOf("res-1"), inventory.releasedReservationIds.toList())
     }
 }

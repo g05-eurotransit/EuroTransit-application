@@ -81,6 +81,59 @@ class ReconciliationService(
     }
 
     /**
+     * Records that a post-sale refund's seat return definitively failed after its payment reversal
+     * had already succeeded (ADR-015). Self-transacting, like [recordPaymentReversalFailure]: it is
+     * not paired with a state change, since the order is left exactly where it is, in REFUNDING.
+     */
+    suspend fun recordSeatReturnFailure(
+        orderId: UUID,
+        orderState: String,
+        correlationId: String,
+        failureClass: String,
+        detail: String?,
+    ): ReconciliationRecord {
+        val record = txOperator.executeAndAwait {
+            upsert(
+                orderId = orderId,
+                kind = ReconciliationKind.SEAT_RETURN_FAILURE,
+                orderState = orderState,
+                correlationId = correlationId,
+                failureClass = failureClass,
+                detail = detail,
+            )
+        }!!
+        countRequired(record)
+        return record
+    }
+
+    /**
+     * Records that an abandoned checkout's payment outcome could not be settled from Payments (#140).
+     * Self-transacting, like [recordPaymentReversalFailure]: the order stays in COMPENSATING.
+     */
+    suspend fun recordPaymentOutcomeUnknown(
+        orderId: UUID,
+        correlationId: String,
+        failureClass: String,
+        detail: String?,
+    ): ReconciliationRecord {
+        val record = txOperator.executeAndAwait {
+            upsert(
+                orderId = orderId,
+                kind = ReconciliationKind.PAYMENT_OUTCOME_UNKNOWN,
+                orderState = "COMPENSATING",
+                correlationId = correlationId,
+                failureClass = failureClass,
+                detail = detail,
+            )
+        }!!
+        countRequired(record)
+        return record
+    }
+
+    /** Whether an operator has settled the order's unknown payment outcome with provider evidence. */
+    suspend fun isPaymentOutcomeSettled(orderId: UUID): Boolean = records.isPaymentOutcomeSettled(orderId)
+
+    /**
      * Records that automatic redelivery gave up on an event. Self-transacting, and it deliberately
      * leaves the durable checkout phase untouched: the phase is what tells a later redrive where to
      * resume from, so an incident report must not disturb it.
@@ -153,7 +206,7 @@ class ReconciliationService(
         orderId = orderId,
         kind = kind.name,
         orderState = orderState,
-        correlationId = correlationId,
+        correlationId = fitCorrelationId(correlationId),
         failureClass = failureClass,
         failureDetail = detail?.take(MAX_DETAIL),
     )
@@ -163,3 +216,15 @@ class ReconciliationService(
         const val MAX_DETAIL = 1024
     }
 }
+
+/**
+ * The correlation id as `reconciliation_records.correlation_id` (`VARCHAR(255)`) can hold it.
+ *
+ * The id comes from the caller's `X-Correlation-Id`, which the shared web filter accepts at any length.
+ * An oversized one used to fail the incident write; since the dead-letter consumer retries without
+ * limit, that would now stall it forever on a value no retry can fix. Truncated, the record is written
+ * and the id still matches the start of the one in the logs.
+ */
+internal fun fitCorrelationId(correlationId: String): String = correlationId.take(MAX_CORRELATION_ID)
+
+private const val MAX_CORRELATION_ID = 255

@@ -24,6 +24,14 @@ class SecurityConfig {
                 // widen beyond the cancel action itself. Ownership is enforced in the controller.
                 it.pathMatchers(HttpMethod.POST, "/api/orders/*/cancel")
                     .hasAnyAuthority(EuroTransitAuthorities.CUSTOMER, EuroTransitAuthorities.OPERATIONS)
+                // The customer-hold payment (ADR-016). Customers only: staff never pay on a customer's
+                // behalf, so unlike cancel there is no operations widening. Ownership in the controller.
+                it.pathMatchers(HttpMethod.POST, "/api/orders/*/payment").hasAuthority(EuroTransitAuthorities.CUSTOMER)
+                // Same ownership rule as cancel: owner or operations. Declared before the reconciliation
+                // rules only for readability — the single-segment wildcard cannot collide with the
+                // two-segment `/reconciliation/**` paths below.
+                it.pathMatchers(HttpMethod.POST, "/api/orders/*/refund")
+                    .hasAnyAuthority(EuroTransitAuthorities.CUSTOMER, EuroTransitAuthorities.OPERATIONS)
                 // Internal operator API. hasAuthority(OPERATIONS) and not hasAnyAuthority(..., SERVICE):
                 // a service credential drives automated internal calls and must never be able to
                 // redrive or close a customer's checkout incident. Declared before the GET rule since
@@ -31,6 +39,16 @@ class SecurityConfig {
                 it.pathMatchers(HttpMethod.POST, "/api/orders/*/reconciliation/redrive")
                     .hasAuthority(EuroTransitAuthorities.OPERATIONS)
                 it.pathMatchers(HttpMethod.POST, "/api/orders/*/reconciliation/*/resolve")
+                    .hasAuthority(EuroTransitAuthorities.OPERATIONS)
+                it.pathMatchers(HttpMethod.POST, "/api/orders/*/reconciliation/abandon")
+                    .hasAuthority(EuroTransitAuthorities.OPERATIONS)
+                it.pathMatchers(HttpMethod.POST, "/api/orders/*/reconciliation/*/settle")
+                    .hasAuthority(EuroTransitAuthorities.OPERATIONS)
+                // The operator list of open incidents. Ahead of the order-read rule, which would
+                // otherwise let any customer read every customer's stuck orders. The double wildcard
+                // also matches the bare path, and keeps a trailing-slash variant on this rule should
+                // trailing-slash matching ever be turned on.
+                it.pathMatchers(HttpMethod.GET, "/api/orders/reconciliation/**")
                     .hasAuthority(EuroTransitAuthorities.OPERATIONS)
                 it.pathMatchers(HttpMethod.GET, "/api/orders/**")
                     .hasAnyAuthority(EuroTransitAuthorities.CUSTOMER, EuroTransitAuthorities.OPERATIONS)

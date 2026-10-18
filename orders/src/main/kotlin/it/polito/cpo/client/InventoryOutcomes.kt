@@ -1,6 +1,6 @@
 package it.polito.cpo.client
 
-import java.time.LocalDateTime
+import java.time.OffsetDateTime
 
 /**
  * The complete set of Inventory business refusals Orders is contractually prepared to act on, as
@@ -28,6 +28,14 @@ enum class InventoryRefusalCode {
 
     /** Hold endpoint only: the key was reused with a different payload. */
     IDEMPOTENCY_CONFLICT,
+
+    /**
+     * Refund endpoint only: the reservation exists but is not CONFIRMED (and not already REFUNDED,
+     * which is not a refusal at all — see [RefundReservationOutcome.Refunded]). Reachable only if
+     * Orders and Inventory disagree about whether the sale ever completed, since Orders only ever
+     * calls the refund endpoint for an order it has itself moved out of CONFIRMED.
+     */
+    RESERVATION_NOT_CONFIRMED,
     ;
 
     /**
@@ -83,14 +91,58 @@ sealed interface ConfirmReservationOutcome {
     data class Refused(val code: InventoryRefusalCode, val detail: String?) : ConfirmReservationOutcome
 }
 
+/**
+ * Result of the Inventory payment-window command (ADR-016): the one-time T2 restart of a
+ * customer-hold reservation's deadline, asked for before Payments is called.
+ *
+ * Only definitive answers are variants. `RESERVATION_NOT_HELD` (a sold reservation behind an unpaid
+ * order) is deliberately not one: it is outside [InventoryRefusalCode], so the client rethrows it as
+ * an unknown outcome and the order stays PAYMENT_PENDING for an operator rather than failing as if no
+ * money could have moved.
+ */
+sealed interface PaymentWindowOutcome {
+
+    /** The window is open — now, or by an earlier call this replays — and runs until [expiresAt]. */
+    data class Opened(val reservationId: String, val expiresAt: OffsetDateTime) : PaymentWindowOutcome
+
+    /** A definitive refusal. Payments has not been called for this order, so it fails unpaid. */
+    data class Refused(val code: InventoryRefusalCode, val detail: String?) : PaymentWindowOutcome
+}
+
 /** Result of the Inventory hold command. */
 sealed interface HoldOutcome {
 
-    data class Held(val reservationId: String, val expiresAt: LocalDateTime) : HoldOutcome
+    data class Held(val reservationId: String, val expiresAt: OffsetDateTime) : HoldOutcome
 
     /**
      * A definitive refusal before any payment exists, so the order fails with no compensation due
      * (doc:297).
      */
     data class Rejected(val code: InventoryRefusalCode, val detail: String?) : HoldOutcome
+}
+
+/**
+ * Result of the Inventory post-sale refund command (ADR-014's `CONFIRMED -> REFUNDED` reservation
+ * transition, called from `RefundOrchestrator` after the payment reversal has succeeded).
+ *
+ * As with [ConfirmReservationOutcome], an unknown outcome has no variant here and can only be thrown,
+ * so it propagates to the refund consumer, the offset is not committed, and it cannot be
+ * pattern-matched into "the seat return failed" (invariant 8's shape, applied to the refund).
+ */
+sealed interface RefundReservationOutcome {
+
+    /**
+     * Inventory has committed the reservation as REFUNDED. Returned both for the first successful
+     * call and for a replay of an already-REFUNDED reservation — this endpoint is idempotent by
+     * state and takes no `Idempotency-Key`, unlike reserve and release.
+     */
+    data class Refunded(val reservationId: String) : RefundReservationOutcome
+
+    /**
+     * A definitive refusal. By the time this is called the payment has already been reversed
+     * (ADR-015's money-first ordering), so the customer already has their money: this leads to a
+     * [it.polito.cpo.model.ReconciliationKind.SEAT_RETURN_FAILURE] record and the order stays
+     * REFUNDING, never a terminal failure.
+     */
+    data class Refused(val code: InventoryRefusalCode, val detail: String?) : RefundReservationOutcome
 }

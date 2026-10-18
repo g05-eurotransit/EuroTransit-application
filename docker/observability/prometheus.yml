@@ -2,26 +2,27 @@ global:
   scrape_interval: 5s
 
 scrape_configs:
+  # Each service is listed twice, because both local workflows are supported and exactly one of
+  # the two answers at a time:
+  #   - compose runs the services on the internal network at :8080 and publishes no host ports;
+  #   - the bare-metal IDE workflow documented in docs/design/observability-conventions.md runs
+  #     them on host ports 8081-8085, reached from this container via host.docker.internal.
+  # Whichever is not running shows as DOWN on the Targets page. That is expected here, not a fault.
+  #
+  # Labels namespace/app mirror the cluster ServiceMonitor scheme so the shared Grafana dashboards
+  # (RED / checkout SLO / infra) work locally unchanged. Both targets of a service carry the same
+  # labels, so running the compose stack and an IDE copy of the *same* service at once would count
+  # it twice — use one workflow or the other, which is what the two exist for.
   - job_name: eurotransit-services
     metrics_path: /actuator/prometheus
     static_configs:
-      - targets:
-          - host.docker.internal:8081
-        labels:
-          service: catalog
-      - targets:
-          - host.docker.internal:8082
-        labels:
-          service: inventory
-      - targets:
-          - host.docker.internal:8083
-        labels:
-          service: notifications
-      - targets:
-          - host.docker.internal:8084
-        labels:
-          service: orders
-      - targets:
-          - host.docker.internal:8085
-        labels:
-          service: payments
+      - targets: ["catalog:8080", "host.docker.internal:8081"]
+        labels: { namespace: eurotransit, app: catalog, service: catalog }
+      - targets: ["inventory:8080", "host.docker.internal:8082"]
+        labels: { namespace: eurotransit, app: inventory, service: inventory }
+      - targets: ["notifications:8080", "host.docker.internal:8083"]
+        labels: { namespace: eurotransit, app: notifications, service: notifications }
+      - targets: ["orders:8080", "host.docker.internal:8084"]
+        labels: { namespace: eurotransit, app: orders, service: orders }
+      - targets: ["payments:8080", "host.docker.internal:8085"]
+        labels: { namespace: eurotransit, app: payments, service: payments }

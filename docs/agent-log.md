@@ -128,3 +128,33 @@ This log is intentionally required by the assignment. It records concrete cases 
 - **Why it was wrong:** Both tests run in a `@SpringBootTest` context shared with siblings that create their own rows, so the absolute count depends on execution order. The gauge queries are intentionally global because they feed an "any open incident" alert, so they cannot be scoped away. The failure mode is the problem: the test passes or fails depending on which tests ran before it, which reads as flakiness and erodes trust in the whole suite rather than pointing at the mistake.
 - **How the team caught it:** Both failed on the first full-suite run after passing in isolation — the signature of order dependence rather than of a logic fault.
 - **Correction:** Two different fixes for two different situations. For the gauge test, a `@BeforeEach` truncation, because the query under test is legitimately global and the test needs a known starting point. For the dead-letter test, an assertion on the *delta* rather than the absolute value, because truncating there would have destroyed state the surrounding checkout scenarios depend on. Recorded because the instinct to reach for the same fix twice was itself the trap.
+
+## Case 15: Agent Declared a Shared Build Broken on the Strength of Its Own Stale Environment
+
+- **Date:** 2026-09-10
+- **Owner:** Person 5 (Customer Experience + Observability)
+- **Prompt/task:** Verify that the frontend still typechecks and builds before opening the notifications PR.
+- **Agent output:** `tsc -b` produced 67 `TS2786` errors on react-bootstrap components, including in `BackButton.tsx`, a file the change never touched. The agent reported that `npm run build` was broken on `dev`, and therefore that the frontend image could not be built at all, since `frontend/Dockerfile` runs `npm run build`.
+- **Why it was wrong:** The local `node_modules` predated the Bootstrap refactor (#74) and did not contain `react-bootstrap`, so TypeScript was resolving nothing. `npm ci` followed by `npm run build` exits 0 on the same commit. The claim was about the shared branch and the conclusion — "the frontend image cannot be built" — would have sent someone looking for a CI fault that did not exist.
+- **How the team caught it:** The error set included a file outside the change, which is the signature of an environment fault rather than a code fault. Stashing the change and rerunning showed 67 errors on clean `dev` too, which pointed at the toolchain rather than at the branch.
+- **Correction:** Reinstalled with `npm ci` and retracted the claim explicitly in the same session. Rule taken from it: a failure that reproduces on untouched files is an environment hypothesis until an install from the lockfile says otherwise, and no statement about a shared branch gets made from an environment that has not been reconciled with it.
+
+## Case 16: Agent Brought the Stack Up Bypassing the Project's Own Entry Point
+
+- **Date:** 2026-09-18
+- **Owner:** Person 5 (Customer Experience + Observability)
+- **Prompt/task:** Start the local stack and trace one checkout end to end.
+- **Agent output:** `docker compose up -d`, then a checkout that returned `202 ACCEPTED` and never progressed. The agent began diagnosing the pipeline as if the application were at fault.
+- **Why it was wrong:** The project's entry point is `just compose-up`, which runs `docker compose up -d` **and** `./scripts/init-local-debezium.sh`. Without the connectors the outbox row is written and never relayed, so the order stops in `ACCEPTED` — a symptom the Justfile and the script both document in comments, having been written after someone else lost time to it. On a later run the same shortcut produced a second instance of the same mistake: `up` reused four-day-old images, so `payments` ran a build without `V3__create_outbox.sql` and its outbox table did not exist. Flyway said "Successfully validated 2 migrations" while the repository had three.
+- **How the team caught it:** The connector list at `localhost:8083/connectors` was `[]`, and the second time Flyway's own log line reported a migration count lower than the files on disk.
+- **Correction:** Used the documented recipe, and rebuilt before testing against a branch that had moved. Rule taken from it: when a repository ships a task runner, that is the interface — reconstructing its steps by hand discards exactly the knowledge it was written to carry, and the failure it prevents does not announce itself as a setup problem.
+
+## Case 17: Agent Misdescribed the Blast Radius of an Action While Asking Permission for It
+
+- **Date:** 2026-09-18
+- **Owner:** Person 5 (Customer Experience + Observability)
+- **Prompt/task:** Under a standing instruction to confirm before any write, propose the steps needed to trace a checkout.
+- **Agent output:** A three-step plan whose third step — placing a real checkout — was labelled "read-only".
+- **Why it was wrong:** A checkout writes an order row in Orders, holds a seat in Inventory, and makes Payments call the Stripe API. None of that is read-only. The error is not the action, which was reasonable and was approved once described properly; it is that the description a human was asked to approve understated what the action did. A permission gate is only as good as the summary presented at it, and an agent is the sole source of that summary.
+- **How the team caught it:** The user approved steps 1 and 2 and not 3, which forced the agent to re-read its own plan before proceeding.
+- **Correction:** Re-described the step with its actual effects — rows written in two databases, an outbound call to a third-party API — and waited for a separate approval. Rule taken from it, now in `governance/agent-governance.md`: a request for approval must enumerate what is written and what leaves the machine, and "read-only" is a claim about a command, never about a business operation.

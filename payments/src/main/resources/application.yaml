@@ -4,10 +4,6 @@ spring:
     context-propagation: auto
   application:
     name: payments
-  kafka:
-    # Default matches the EXTERNAL listener docker-compose exposes to the host (9094).
-    # Inside the compose network, SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:9092 overrides this.
-    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9094}
   security:
     oauth2:
       resourceserver:

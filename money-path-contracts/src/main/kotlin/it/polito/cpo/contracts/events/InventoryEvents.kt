@@ -1,6 +1,8 @@
 package it.polito.cpo.contracts.events
 
+import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.OffsetDateTime
 import java.util.UUID
 
 data class InventoryReservedEvent(
@@ -17,7 +19,9 @@ data class InventoryReservedEvent(
 data class InventoryReservedPayload(
     val reservationId: String,
     val routeId: String,
-    val expiresAt: LocalDateTime
+    val travelDate: LocalDate,
+    /** An instant, for the same reason as `ReservationResponse.expiresAt`. */
+    val expiresAt: OffsetDateTime
 )
 
 data class InventoryFailedEvent(
@@ -32,5 +36,6 @@ data class InventoryFailedEvent(
 )
 
 data class InventoryFailedPayload(
-    val reason: String
+    val reason: String,
+    val travelDate: LocalDate? = null
 )

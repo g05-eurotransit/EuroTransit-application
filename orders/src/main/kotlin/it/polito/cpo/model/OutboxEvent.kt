@@ -19,7 +19,10 @@ data class OutboxEvent(
     val aggregateId: String,
     val type: String,
     val payload: Json,
-    val createdAt: OffsetDateTime = OffsetDateTime.now()
+    val createdAt: OffsetDateTime = OffsetDateTime.now(),
+    // W3C trace context of the span that wrote the row; Debezium relays it as the `traceparent`
+    // record header so the consumer joins the writer's trace. Null when tracing is off.
+    val traceparent: String? = null,
 ) : Persistable<UUID> {
     override fun getId(): UUID = id
 

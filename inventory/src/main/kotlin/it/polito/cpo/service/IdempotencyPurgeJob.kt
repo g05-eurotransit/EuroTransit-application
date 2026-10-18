@@ -22,7 +22,7 @@ import org.springframework.stereotype.Component
     matchIfMissing = true,
 )
 class IdempotencyPurgeJob(
-    private val reservationService: ReservationService,
+    private val inventoryMaintenanceService: InventoryMaintenanceService,
 ) {
     private val log = LoggerFactory.getLogger(IdempotencyPurgeJob::class.java)
 
@@ -34,7 +34,7 @@ class IdempotencyPurgeJob(
         fixedDelayString = "\${inventory.idempotency.cleanup-interval-ms:600000}",
     )
     fun purgeExpiredIdempotency() = runBlocking {
-        val deleted = reservationService.purgeExpiredIdempotency()
+        val deleted = inventoryMaintenanceService.purgeExpiredIdempotency()
         if (deleted > 0) {
             log.info("Purged {} stale idempotency records", deleted)
         }
