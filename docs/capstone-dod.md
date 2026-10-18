@@ -225,7 +225,14 @@ This DoD is the operational release gate for EuroTransit Marketplace. Each item 
       kill mid-hold, node/AZ disruption, Kafka disruption, CloudNativePG failover — each with steady state,
       hypothesis, injection and observations, plus a sixth (seat return refused during a refund). The
       executed reports are in configuration #55 and #60.
-- [ ] Latency injection into Payments proves the Orders circuit breaker opens and Catalog remains healthy.
+- [x] Latency injection into Payments proves the Orders circuit breaker opens and Catalog remains healthy.
+      *Checked by the Orders owner, 2026-10-18 (AKS run of 2026-10-16, configuration #60,
+      `docs/reliability/payments-latency-2026-10-16.md`):* the Orders Payments breaker opened at 15:52:32,
+      alternated `OPEN`/`HALF_OPEN` and closed at 15:54:17; Catalog answered 26/26 probes during the fault
+      (p95 183.5 ms). 5 of 6 affected orders confirmed without an operator, about 72 s after the fault
+      ended; the sixth was abandoned through the runbook and its charge refunded. The Stripe audit found no
+      unmatched charge. *Limit:* the load client's own verdict failed on its deadline (three orders not yet
+      terminal), which the report keeps as recorded.
 - [ ] Inventory pod kill mid-hold proves idempotency and no oversell/double-charge.
 - [ ] Node or AZ-style disruption proves PDBs/topology spread protect the critical path.
 - [ ] Kafka disruption proves the async pipeline recovers without lost or duplicated business effects.
