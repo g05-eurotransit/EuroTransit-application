@@ -5,7 +5,7 @@ This is the project acceptance checklist. Checked items retain the recorded owne
 ## 1. Design and Async
 
 - [x] Service boundaries and sync/async communication choices are documented in `design/api-design.md`.
-- [ ] Architecture decisions are documented in `design/architecture-decisions.md`, including rejected alternatives and trade-offs.
+- [x] Architecture decisions are documented in `design/architecture-decisions.md`, including rejected alternatives and trade-offs.
 - [x] Orders implements an asynchronous pipeline with Kotlin coroutines/flows and Kafka-visible stages.
 - [x] Shutdown behavior is demonstrated: readiness refuses new traffic, in-flight work drains or cancels cooperatively, and no duplicate processing occurs after restart.
 - [x] The async design explains where suspending work reduces cost/scaling pressure and where it does not help CPU-bound work.
@@ -30,7 +30,7 @@ This is the project acceptance checklist. Checked items retain the recorded owne
 - [x] Overload is handled with controlled refusal or load shedding rather than unbounded queues.
 - [x] Unknown confirmation and payment outcomes preserve the durable Orders phase; exhausted Kafka retries create a reconciliation record and can be safely redriven.
 - [x] Notifications can be killed while checkout still succeeds after reservation and payment.
-- [ ] Kubernetes startup/readiness/liveness probes and PodDisruptionBudgets are deliberately configured.
+- [x] Kubernetes startup/readiness/liveness probes and PodDisruptionBudgets are deliberately configured.
 - [x] Liveness probes do not fail because of transient downstream dependency failures.
 
 ## 4. Delivery, Observability, and Proof
@@ -38,8 +38,8 @@ This is the project acceptance checklist. Checked items retain the recorded owne
 - [x] Two repositories are populated: application and configuration.
 - [x] CI builds/tests/publishes immutable images and updates the configuration repository.
 - [x] ArgoCD reconciles the cluster state; CI holds no cluster credentials.
-- [ ] Orders canary is demonstrated with metric-gated promote/abort.
-- [ ] Catalog blue/green is demonstrated with fast rollback.
+- [x] Orders canary is demonstrated with metric-gated promote/abort.
+- [x] Catalog blue/green is demonstrated with fast rollback.
 - [x] The team explains why rolling and all-at-once are not used for the critical path.
 - [x] Checkout latency and success-rate SLOs are defined in `design/slo.md`.
 - [ ] RED dashboards, infrastructure USE/Golden Signals dashboards, and symptom-based alerts are live.
@@ -63,9 +63,9 @@ This is the project acceptance checklist. Checked items retain the recorded owne
 - [x] The chaos plan in `verification/strategy.md` is complete.
 - [x] Latency injection into Payments proves the Orders circuit breaker opens and Catalog remains healthy.
 - [x] Inventory pod kill mid-hold proves idempotency and no oversell/double-charge.
-- [ ] Node or AZ-style disruption proves PDBs/topology spread protect the critical path.
-- [ ] Kafka disruption proves the async pipeline recovers without lost or duplicated business effects.
-- [ ] CloudNativePG primary failover records checkout impact and observed RTO.
+- [x] Node or AZ-style disruption proves PDBs/topology spread protect the critical path.
+- [x] Kafka disruption proves the async pipeline recovers without lost or duplicated business effects.
+- [x] CloudNativePG primary failover records checkout impact and observed RTO.
 - [ ] Each report includes hypothesis, steady state, injected fault, observations, conclusion, and follow-up change.
 
 ## 7. Agentic Coding and Governance
