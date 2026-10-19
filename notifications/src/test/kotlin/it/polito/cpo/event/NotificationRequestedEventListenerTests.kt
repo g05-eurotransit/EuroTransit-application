@@ -3,12 +3,15 @@ package it.polito.cpo.event
 import it.polito.cpo.contracts.events.NotificationType
 import it.polito.cpo.notification.NotificationStore
 import org.apache.kafka.clients.producer.ProducerConfig
+import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.serialization.StringSerializer
 import org.junit.jupiter.api.Test
+import org.mockito.Mockito
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.kafka.core.DefaultKafkaProducerFactory
 import org.springframework.kafka.core.KafkaTemplate
+import org.springframework.kafka.listener.ConsumerSeekAware
 import org.springframework.kafka.test.EmbeddedKafkaBroker
 import org.springframework.kafka.test.context.EmbeddedKafka
 import org.springframework.kafka.test.utils.KafkaTestUtils
@@ -28,6 +31,9 @@ class NotificationRequestedEventListenerTests {
 
     @Autowired
     private lateinit var embeddedKafka: EmbeddedKafkaBroker
+
+    @Autowired
+    private lateinit var listener: NotificationRequestedEventListener
 
     private fun template(): KafkaTemplate<String, String> {
         val props = KafkaTestUtils.producerProps(embeddedKafka)
@@ -155,5 +161,18 @@ class NotificationRequestedEventListenerTests {
         // The good message after the poison one must still be processed → consumer is alive.
         awaitHistory("dave", 1)
         assertTrue(store.historyFor("dave").isNotEmpty())
+    }
+
+    @Test
+    fun `every partition assignment replays the topic from the beginning`() {
+        val callback = Mockito.mock(ConsumerSeekAware.ConsumerSeekCallback::class.java)
+        val partitions = mapOf(
+            TopicPartition("notification-requested", 0) to 42L,
+            TopicPartition("notification-requested", 1) to 7L,
+        )
+
+        listener.onPartitionsAssigned(partitions, callback)
+
+        Mockito.verify(callback).seekToBeginning(partitions.keys)
     }
 }

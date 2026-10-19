@@ -8,10 +8,11 @@ import java.util.UUID
  * Bounded, dependency-free idempotency guard keyed by event id.
  *
  * Kafka may redeliver; per the resilience model, side effects must be idempotent /
- * deduplicated. Notifications owns no database (best-effort, killable by design), so an
- * in-memory bounded LRU set is the proportionate choice: on restart the guard is empty
- * and a duplicate may slip through once, which is acceptable for a non-money-path,
- * best-effort consumer. This trade-off is documented, not silent.
+ * deduplicated. Notifications owns no database (killable by design), so an in-memory
+ * bounded LRU set is the proportionate choice. On restart the guard starts empty and is
+ * refilled by the history replay (#131). Past its capacity, the store's own idempotency by
+ * id still keeps a redelivered notification out of the history and the live stream, as long
+ * as that notification is within the customer's retained entries.
  */
 @Component
 class DuplicateEventGuard(private val capacity: Int = 10_000) {
