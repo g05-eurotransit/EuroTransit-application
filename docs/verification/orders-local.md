@@ -12,6 +12,15 @@ Compose drills verified accepted-work preservation across shutdown and dependenc
 - **Tooling:** `scripts/local-checkout-load.sh` (load), `scripts/local-readiness-probe.sh` (readiness
   from inside the network), `scripts/local-consistency-check.sh SINCE` (cross-database verdict)
 
+| Report element | Summary |
+| --- | --- |
+| Hypothesis (accepted by the team) | Stopping Orders during HTTP traffic, a Kafka backlog or a dependency outage loses no accepted order and processes none twice. |
+| Steady state | Compose stack healthy; Orders rebuilt from `dev` at `1ab5035` plus the branch; a 35 s stop budget matching the Kubernetes grace. |
+| Injected fault | SIGTERM through `docker compose stop -t 35 orders` in three drills: 5 checkouts/s through the gateway, 40 `order-placed` released at once, and four checkouts waiting on a paused Payments. |
+| Observations | Every stop ended on SIGTERM (exit 143) in 3.3 to 7.9 s; every accepted order `CONFIRMED` after restart, one authorization each, no incident. |
+| Conclusion | Held. One defect: a stop processed the whole polled batch before exiting. |
+| Follow-up change | `immediate-stop` ends a listener after the record in progress (#132), proven by repeating the drill. |
+
 ### Result
 
 | Drill | Work in flight at SIGTERM | Stop took | After restart | Consistency check |
@@ -116,6 +125,15 @@ reconciliation record.
 - **Tooling:** `scripts/local-checkout-load.sh` (one checkout a second through the gateway),
   `scripts/local-consistency-check.sh SINCE` (cross-database verdict), the redrive through the
   gateway with the local operations user.
+
+| Report element | Summary |
+| --- | --- |
+| Hypothesis (accepted by the team) | With the new retry budget, a Payments outage of about 45 s converges without an operator; a longer one reaches the operator as an incident that the redrive finishes, with no duplicate authorization. |
+| Steady state | Compose stack healthy; Orders rebuilt from `dev` at `153eac5` plus the change under test; one checkout a second through the gateway. |
+| Injected fault | `docker pause eurotransit-payments` for 45 s (R1) and for 240 s (R2). |
+| Observations | R1: 10/10 `CONFIRMED` with no incident, all within 16 s of Payments returning. R2: 5/5 `CONFIRMED` after two incidents were redriven. Consistency checks OK. |
+| Conclusion | Held. |
+| Follow-up change | The budget shipped in #139. The expired-payment gap the run exposed is answered by abandonment and settlement (#141). |
 
 ### Result
 
