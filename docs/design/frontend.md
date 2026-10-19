@@ -51,7 +51,7 @@ The checkout is two calls, minutes apart, and the seats are held between them.
 
 ## Notifications
 
-Authenticated fetch-based SSE carries the token in an Authorization header. On disconnect, the UI retains fetched messages and can poll the notification API. Its [process-local history limitation](api-design.md#notifications) applies after restart; displaying the list does not establish durable history. Checkout and order progress remain usable while Notifications is unavailable.
+Authenticated fetch-based SSE carries the token in an Authorization header. On disconnect, the UI retains fetched messages and can poll the notification API. Its [history limits](api-design.md#notifications) apply: the list is rebuilt from the topic after a restart, bounded by retention and the 50-entry cap, so displaying it does not establish durable history. Checkout and order progress remain usable while Notifications is unavailable.
 
 ## Operations and refunds
 

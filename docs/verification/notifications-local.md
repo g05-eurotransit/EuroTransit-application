@@ -14,7 +14,7 @@
 | Injected fault | `docker compose stop notifications` for 48 s while 20 checkouts ran. |
 | Observations | 20/20 `CONFIRMED`, none failed because of Notifications; lag 20, back to 0 about 4 s after the restart; the 20 notifications delivered; the 50 from before the outage gone. |
 | Conclusion | Held for checkout and catch-up. The history did not survive the restart. |
-| Follow-up change | None for checkout. The history stays best effort by decision (ADR-004); durable history is possible later work (#131). |
+| Follow-up change | None for checkout. For the history, #131: Notifications replays the topic on start, verified [below](#follow-up-history-replay-131). |
 
 ## Result
 
@@ -59,3 +59,18 @@ Notifications owner as #131.
 - Its read model starts empty at each restart : a contract question for Notifications, #131.
 
 The current [API contract](../design/api-design.md#notifications) keeps the history best effort by decision; durable history is possible later work, tracked in #131.
+
+## Follow-up: history replay (#131)
+
+- **Environment:** docker compose (`kafka`, `keycloak`, `traefik`, `notifications`), `main` at `f327844` plus the #131 branch
+- **Change:** every partition assignment seeks `notification-requested` to the beginning; the store is idempotent by event id and ordered by `occurredAt`; replayed records older than five minutes go to history only.
+
+| Check | Expected | Observed |
+| --- | --- | --- |
+| History before restart | 5 published for `alice` | `GET /api/notifications`: 5, newest first |
+| History after `docker compose restart notifications` | same 5 | 5, same order, served 5 s after the restart; log `Replaying notification-requested from the beginning` |
+| Live stream after restart, history under five minutes old | replayed records pushed (grace window) plus the new one | 5 replayed + 1 new |
+| Live stream after restart, history over five minutes old | only the new record | only the new record; history 7 |
+| Group `notifications` lag during a replay of 507 records | no sustained lag (`KafkaPipelineStalled` needs > 100 for 15 min) | committed 507 / end 507, lag 0 at every sample from 0 to 35 s; 507 records re-recorded in under 2 s |
+
+Events were published directly to the topic with `kafka-console-producer.sh` in the `notification-requested` envelope, not produced by checkouts: the drill tests the read model, not the money path. The history is bounded by the topic retention (7 days on the cluster) and the 50-entry cap; it is a projection, not a durable store.

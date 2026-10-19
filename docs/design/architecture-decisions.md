@@ -30,7 +30,7 @@ Alternative considered: Inventory canary increases state-sensitive mixed-version
 
 Treat notification failure as graceful degradation.
 
-Notification delivery happens after a business outcome. Checkout must not wait for the customer-message consumer. Notifications may be delayed and its current read model is best effort.
+Notification delivery happens after a business outcome. Checkout must not wait for the customer-message consumer. Notifications may be delayed and its current read model is best effort: an in-memory projection rebuilt from the retained `notification-requested` topic on each start (#131), not a durable store.
 
 Alternative considered: Synchronous notification in checkout would turn a messaging outage into a purchase failure.
 

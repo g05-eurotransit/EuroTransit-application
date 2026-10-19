@@ -148,7 +148,7 @@ The adapter calls the Stripe sandbox charge/refund API. It never stores raw card
 
 ## Notifications
 
-`GET /api/notifications` returns the authenticated customer's process-local notification history. `GET /api/notifications/stream` provides authenticated SSE; bearer tokens travel in headers, never query strings. The current store and duplicate guard are in memory, so history does not survive restart and is not shared across replicas. The history is best effort by decision ([ADR-004](architecture-decisions.md#adr-004-notification-failure-mode)); durable history is possible later work, tracked in [#131](https://github.com/g05-eurotransit/EuroTransit-application/issues/131).
+`GET /api/notifications` returns the authenticated customer's notification history, newest first by `occurredAt`, up to 50 entries. `GET /api/notifications/stream` provides authenticated SSE; bearer tokens travel in headers, never query strings. The store and duplicate guard are in memory, and each process rebuilds them on start by replaying `notification-requested` from the beginning of the topic ([#131](https://github.com/g05-eurotransit/EuroTransit-application/issues/131)). History therefore survives a restart, deploy or reschedule, but only as far back as the topic retains (7 days on the cluster); it is a projection of the topic, not a durable store. While the replay runs, a request can see a partial history (507 records replayed in under two seconds on compose). Replayed notifications older than five minutes go to history only, never to the stream. With more than one replica, each replica holds only its assigned partitions; production runs one. The history stays best effort ([ADR-004](architecture-decisions.md#adr-004-notification-failure-mode)).
 
 ## Kafka events
 
