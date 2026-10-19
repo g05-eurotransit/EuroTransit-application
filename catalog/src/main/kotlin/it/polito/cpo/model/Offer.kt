@@ -14,10 +14,8 @@ data class Offer(
     // editing an offer later cannot retroactively rewrite what a past customer accepted. Bump it on
     // any change to refundPolicy.
     val termsVersion: Int,
-    // Display-only text for anything the refund policy does not express, appended to the rendered
-    // refund sentence. `of-003` is exchangeable for a fee, which says nothing about refunds and is
-    // out of scope as a rule — but dropping it would silently remove information the customer sees
-    // today, so it is carried here rather than encoded.
+    // Optional customer-facing information appended to the rendered refund sentence.
+    // Only describe capabilities the system supports.
     val displayNote: String? = null,
 ) {
     /**

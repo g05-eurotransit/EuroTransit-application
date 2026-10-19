@@ -112,12 +112,12 @@ class CatalogApiTests(@Autowired private val client: WebTestClient) {
             .expectBody()
             .jsonPath("$.conditions").isEqualTo("Refundable until 24 hours before departure.")
 
-        // Exchange is not a refund and is not encoded as one, but it stays visible to the customer.
+        // The Standard fare must not promise an unsupported ticket exchange.
         client.get().uri("/api/catalog/offers/of-003")
             .exchange()
             .expectStatus().isOk
             .expectBody()
-            .jsonPath("$.conditions").isEqualTo("Non-refundable. Exchangeable with a fee.")
+            .jsonPath("$.conditions").isEqualTo("Non-refundable.")
     }
 
     @Test
