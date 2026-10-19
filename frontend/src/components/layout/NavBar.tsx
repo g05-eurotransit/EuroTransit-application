@@ -161,7 +161,15 @@ export function NavBar() {
             {/* Hold off on any signed-out UI (e.g. a "Sign in" button that would immediately
                 flip to "Sign out") until the silent SSO-cookie check has had a chance to run —
                 see SilentSignIn.tsx. */}
-            {!silentChecked ? null : auth.isAuthenticated ? (
+            {!silentChecked ? (
+              // Holds the Sign in button's box while the silent check runs, so the bar does not
+              // jump when the answer arrives.
+              <span className="invisible" aria-hidden="true">
+                <Button variant="primary" className="fw-semibold" tabIndex={-1}>
+                  Sign in
+                </Button>
+              </span>
+            ) : auth.isAuthenticated ? (
               <>
                 <span
                   className="d-inline-flex align-items-center justify-content-center rounded-circle bg-secondary-subtle text-primary fw-bold"
