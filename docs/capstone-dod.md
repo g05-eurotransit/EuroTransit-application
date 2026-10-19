@@ -65,7 +65,7 @@ This is the project acceptance checklist. Checked items retain the recorded owne
 - [x] Inventory pod kill mid-hold proves idempotency and no oversell/double-charge.
 - [x] Node or AZ-style disruption proves PDBs/topology spread protect the critical path.
 - [ ] Kafka disruption proves the async pipeline recovers without lost or duplicated business effects.
-- [ ] CloudNativePG primary failover records checkout impact and observed RTO.
+- [x] CloudNativePG primary failover records checkout impact and observed RTO.
 - [ ] Each report includes hypothesis, steady state, injected fault, observations, conclusion, and follow-up change.
 
 ## 7. Agentic Coding and Governance
