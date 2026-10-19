@@ -7,6 +7,15 @@
   remains successful"*; SLI "Notification degradation" (`slo-observability.md`): checkout failures
   attributed to Notifications / checkout attempts, target 99.9% unaffected.
 
+| Report element | Summary |
+| --- | --- |
+| Hypothesis (accepted by the team) | If Notifications is down, Kafka retains the event and checkout remains successful (ADR-004), and Notifications catches up after its restart. |
+| Steady state | Compose stack healthy; `dev` at `1ab5035` plus the branch; the test customer at its 50-notification history cap. |
+| Injected fault | `docker compose stop notifications` for 48 s while 20 checkouts ran. |
+| Observations | 20/20 `CONFIRMED`, none failed because of Notifications; lag 20, back to 0 about 4 s after the restart; the 20 notifications delivered; the 50 from before the outage gone. |
+| Conclusion | Held for checkout and catch-up. The history did not survive the restart. |
+| Follow-up change | None for checkout. The history stays best effort by decision (ADR-004); durable history is possible later work (#131). |
+
 ## Result
 
 | Check | Expected | Observed |
@@ -49,4 +58,4 @@ Notifications owner as #131.
 - Kafka retains the events and Notifications catches up from its committed offset on restart.
 - Its read model starts empty at each restart : a contract question for Notifications, #131.
 
-The current [API contract](../design/api-design.md#notifications) explicitly documents the process-local implementation and leaves durable history tracked in #131. This report does not establish that issue as resolved.
+The current [API contract](../design/api-design.md#notifications) keeps the history best effort by decision; durable history is possible later work, tracked in #131.
