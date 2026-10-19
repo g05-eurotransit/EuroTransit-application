@@ -36,9 +36,7 @@ class InMemoryCatalogRepository : RouteRepository {
         // The agreed rule for BUSINESS. "Refundable until departure" cannot literally mean at
         // departure, and those five minutes belong in the data rather than in Orders' code.
         Offer("of-002", "rt-to-mi-001", "BUSINESS", BigDecimal("49.90"), "EUR", RefundPolicy(refundable = true, cutoffMinutesBeforeDeparture = 5), termsVersion = 1),
-        // Exchange is not a refund and stays out of scope as a rule, so the policy is simply
-        // non-refundable; the exchange stays as display text.
-        Offer("of-003", "rt-mi-pa-002", "STANDARD", BigDecimal("89.00"), "EUR", NON_REFUNDABLE, termsVersion = 1, displayNote = "Exchangeable with a fee."),
+        Offer("of-003", "rt-mi-pa-002", "STANDARD", BigDecimal("89.00"), "EUR", NON_REFUNDABLE, termsVersion = 1),
         Offer("of-004", "rt-mi-zu-003", "STANDARD", BigDecimal("64.00"), "EUR", NON_REFUNDABLE, termsVersion = 1),
         Offer("of-005", "rt-ro-vi-004", "SLEEPER", BigDecimal("129.00"), "EUR", RefundPolicy(refundable = true, cutoffMinutesBeforeDeparture = 1440), termsVersion = 1),
         Offer("of-006", "rt-to-ly-005", "STANDARD", BigDecimal("45.00"), "EUR", NON_REFUNDABLE, termsVersion = 1),
