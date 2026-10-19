@@ -76,8 +76,8 @@ This is the project acceptance checklist. Checked items retain the recorded owne
 
 ## 8. Final Deliverables
 
-- [ ] `docs/` contains design/consistency justification, SLO definitions, chaos reports, postmortem, agent threat model, and agent log.
-- [ ] A blameless postmortem is completed using `templates/postmortem-template.md`.
+- [x] `docs/` contains design/consistency justification, SLO definitions, chaos reports, postmortem, agent threat model, and agent log.
+- [x] A blameless postmortem is completed using `templates/postmortem-template.md`.
 - [ ] A 5-minute recorded demo link is committed.
 - [ ] The demo shows the running system, dashboards, canary, blue/green, one injected failure, and one alert firing.
 
