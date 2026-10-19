@@ -30,7 +30,7 @@ This is the project acceptance checklist. Checked items retain the recorded owne
 - [x] Overload is handled with controlled refusal or load shedding rather than unbounded queues.
 - [x] Unknown confirmation and payment outcomes preserve the durable Orders phase; exhausted Kafka retries create a reconciliation record and can be safely redriven.
 - [x] Notifications can be killed while checkout still succeeds after reservation and payment.
-- [ ] Kubernetes startup/readiness/liveness probes and PodDisruptionBudgets are deliberately configured.
+- [x] Kubernetes startup/readiness/liveness probes and PodDisruptionBudgets are deliberately configured.
 - [x] Liveness probes do not fail because of transient downstream dependency failures.
 
 ## 4. Delivery, Observability, and Proof
