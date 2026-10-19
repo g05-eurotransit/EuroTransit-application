@@ -10,7 +10,7 @@
   "time": { "from": "now-1h", "to": "now" },
   "panels": [
     {
-      "title": "Hold Operations (Success vs Failed vs Expired)",
+      "title": "Hold Operations (Success vs Rejected vs Expired)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "targets": [
@@ -19,8 +19,8 @@
           "legendFormat": "Successful Holds/s"
         },
         {
-          "expr": "sum(rate(inventory_holds_failed_total[5m]))",
-          "legendFormat": "Failed Holds/s"
+          "expr": "sum(rate(inventory_holds_rejected_total[5m]))",
+          "legendFormat": "Rejected Holds/s"
         },
         {
           "expr": "sum(rate(inventory_holds_expired_total[5m]))",
@@ -80,6 +80,62 @@
           },
           {
             "matcher": { "id": "byName", "options": "Seat Conflicts" },
+            "properties": [ { "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } } ]
+          }
+        ]
+      }
+    },
+    {
+      "title": "Payment Window Transitions (T2 Timer)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(inventory_holds_payment_window_total[5m]))",
+          "legendFormat": "Inventory Window: {{result}}"
+        },
+        {
+          "expr": "sum by (result) (rate(orders_inventory_payment_window_total[5m]))",
+          "legendFormat": "Orders -> Window: {{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 15, "lineWidth": 2 }
+        }
+      }
+    },
+    {
+      "title": "Background Maintenance & Cleanup",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum(increase(inventory_holds_sweep_errors_total[5m]))",
+          "legendFormat": "Hold Sweep Errors"
+        },
+        {
+          "expr": "sum(increase(inventory_idempotency_purge_errors_total[5m]))",
+          "legendFormat": "Idempotency Purge Errors"
+        },
+        {
+          "expr": "sum(rate(inventory_idempotency_purged_total[5m]))",
+          "legendFormat": "Purged Idempotency Records/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 15, "lineWidth": 2 }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Hold Sweep Errors" },
+            "properties": [ { "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } } ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Idempotency Purge Errors" },
             "properties": [ { "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } } ]
           }
         ]
