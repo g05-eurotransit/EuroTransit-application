@@ -15,7 +15,7 @@ import kotlin.test.assertTrue
 @AutoConfigureWebTestClient
 @AutoConfigureMetrics
 @ActiveProfiles("test")
-class CatalogApiTests(@Autowired private val client: WebTestClient) {
+open class CatalogApiTests(@Autowired private val client: WebTestClient) {
 
     @Test
     fun `lists seeded routes`() {

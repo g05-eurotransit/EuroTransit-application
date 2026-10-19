@@ -5,9 +5,8 @@ import it.polito.cpo.model.Route
 import kotlinx.coroutines.flow.Flow
 
 /**
- * Read-side catalog store. Catalog owns no database in the data-ownership contract;
- * the current implementation is an in-memory seeded store, replaceable without
- * touching the API layer.
+ * Read-side catalog store. PostgreSQL and the compatibility in-memory implementation
+ * expose the same public contract. Orders owns snapshots of the terms accepted at checkout.
  */
 interface RouteRepository {
     fun findAllRoutes(): Flow<Route>

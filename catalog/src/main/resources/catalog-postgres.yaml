@@ -1,0 +1,26 @@
+spring:
+  r2dbc:
+    url: r2dbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:catalog_db}
+    username: ${DB_USER:catalog}
+    password: ${DB_PASSWORD}
+    pool:
+      initial-size: 0
+      max-size: 5
+      max-acquire-time: 3s
+      max-create-connection-time: 3s
+      max-validation-time: 1s
+      max-idle-time: 10s
+      validation-query: SELECT 1
+  flyway:
+    enabled: true
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:catalog_db}?connectTimeout=5
+    user: ${DB_USER:catalog}
+    password: ${DB_PASSWORD}
+management:
+  endpoint:
+    health:
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState,r2dbc

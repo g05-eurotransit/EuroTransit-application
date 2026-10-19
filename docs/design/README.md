@@ -3,6 +3,7 @@
 Start with [architecture](architecture.md) for service responsibilities and interactions.
 
 - [API and event contracts](api-design.md)
+- [Catalog storage](catalog-storage.md)
 - [Checkout lifecycle and recovery](reservation-confirmation.md)
 - [Architecture decisions](architecture-decisions.md)
 - [Frontend](frontend.md)
