@@ -5,7 +5,7 @@ This is the project acceptance checklist. Checked items retain the recorded owne
 ## 1. Design and Async
 
 - [x] Service boundaries and sync/async communication choices are documented in `design/api-design.md`.
-- [ ] Architecture decisions are documented in `design/architecture-decisions.md`, including rejected alternatives and trade-offs.
+- [x] Architecture decisions are documented in `design/architecture-decisions.md`, including rejected alternatives and trade-offs.
 - [x] Orders implements an asynchronous pipeline with Kotlin coroutines/flows and Kafka-visible stages.
 - [x] Shutdown behavior is demonstrated: readiness refuses new traffic, in-flight work drains or cancels cooperatively, and no duplicate processing occurs after restart.
 - [x] The async design explains where suspending work reduces cost/scaling pressure and where it does not help CPU-bound work.
