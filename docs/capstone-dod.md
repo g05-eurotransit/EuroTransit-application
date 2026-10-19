@@ -42,7 +42,7 @@ This is the project acceptance checklist. Checked items retain the recorded owne
 - [x] Catalog blue/green is demonstrated with fast rollback.
 - [x] The team explains why rolling and all-at-once are not used for the critical path.
 - [x] Checkout latency and success-rate SLOs are defined in `design/slo.md`.
-- [ ] RED dashboards, infrastructure USE/Golden Signals dashboards, and symptom-based alerts are live.
+- [x] RED dashboards, infrastructure USE/Golden Signals dashboards, and symptom-based alerts are live.
 - [x] A single order can be traced through gateway, Orders, Inventory, Payments, and Kafka stages.
 
 ## 5. Security and Configuration
