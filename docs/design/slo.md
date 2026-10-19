@@ -26,22 +26,22 @@ per-delivery timer `orders_checkout_duration_seconds` gains the value `held_awai
 
 ## Recovery Objectives
 
-These recovery objectives are proposed and await team confirmation. They are not an adopted failover RTO. The policy and the operator steps are in
+The team has adopted these recovery objectives. They are not a failover RTO. The policy and the operator steps are in
 [orders-recovery-runbook.md](../operations/orders-recovery-runbook.md).
 
 | Objective | Target | Measured by |
 | --- | --- | --- |
 | Automatic convergence | An accepted order caught by a dependency outage of up to about a minute reaches a terminal state without an operator, within about a minute of the dependency returning. | `orders_pipeline_oldest_age_seconds`; no `orders_events_exhausted_total{failure_class="dependency_error"}` increase. |
-| Checkout recovery SLO (proposed `CheckoutStuckNonTerminal` mapping) | 3 minutes: the retry budget (1.5 to about 2.3 minutes in real time) plus the pipeline itself, with margin. | `max(orders_pipeline_oldest_age_seconds) > 180` |
-| Incident response SLO (proposed `ReconciliationAgeHigh` mapping) | An open incident is redriven or resolved within 5 minutes, and a `PAYMENT_PENDING` one always before its order's `reservationExpiresAt`; past it, that redrive is refused. That deadline is ten minutes from the hold in the direct flow, and in the customer-hold flow ten minutes from the payment (T2) once the payment window opened, or still T1 if it never did. | `max(orders_reconciliation_oldest_age_seconds) > 300` |
+| Checkout recovery SLO (`CheckoutStuckNonTerminal` mapping) | 3 minutes: the retry budget (1.5 to about 2.3 minutes in real time) plus the pipeline itself, with margin. | `max(orders_pipeline_oldest_age_seconds) > 180` |
+| Incident response SLO (`ReconciliationAgeHigh` mapping) | An open incident is redriven or resolved within 5 minutes, and a `PAYMENT_PENDING` one always before its order's `reservationExpiresAt`; past it, that redrive is refused. That deadline is ten minutes from the hold in the direct flow, and in the customer-hold flow ten minutes from the payment (T2) once the payment window opened, or still T1 if it never did. | `max(orders_reconciliation_oldest_age_seconds) > 300` |
 | Hold expiry (ADR-016) | A customer-hold order nobody paid for is cancelled within about 15 seconds of its T1 deadline, by the Orders job; Inventory's own sweep frees the seat at the same deadline regardless. | `orders_holds_overdue`, `orders_holds_overdue_oldest_seconds` |
 
 An outage longer than the budget opens its incident 1.5 to about 2.3 minutes after the payment
 started : the hold in the direct flow, the payment submission in the customer-hold flow, since T2
 restarts there : so the operator has about 7.5 to 8.5 minutes, of which `ReconciliationRecordOpen`'s
-`for: 5m` currently spends five. The one exception is a customer-hold order whose payment window never
+`for` spends five today and one with configuration #57. The one exception is a customer-hold order whose payment window never
 opened because Inventory was down at the payment: its deadline is still T1, which can be close.
-A shorter `for` is proposed to the configuration repository.
+Configuration #57 also sets the two alerts in the table to these thresholds. The hold-expiry objective is measured but has no alert rule.
 
 ## Measurement and tracing
 

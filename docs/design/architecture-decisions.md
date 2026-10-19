@@ -132,4 +132,4 @@ Alternative considered: Starting payment immediately does not support the held-s
 
 ## Operational consequences
 
-[Runtime conventions](../development/contributing.md), [instrumentation](../development/instrumentation.md), [shutdown](runtime-lifecycle.md) and [recovery](../operations/orders-recovery-runbook.md) apply these decisions. [SLO definitions](slo.md) retain the adopted targets and distinguish proposed recovery objectives. No environmental test result changes these decisions implicitly.
+[Runtime conventions](../development/contributing.md), [instrumentation](../development/instrumentation.md), [shutdown](runtime-lifecycle.md) and [recovery](../operations/orders-recovery-runbook.md) apply these decisions. [SLO definitions](slo.md) retain the adopted targets, including the recovery objectives. No environmental test result changes these decisions implicitly.

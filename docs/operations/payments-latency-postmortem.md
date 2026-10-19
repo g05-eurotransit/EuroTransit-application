@@ -59,7 +59,7 @@ Two recovery-run orders confirmed in 1.1 to 1.8 s. Independent Stripe audits mat
 
 The replay was a mitigation, not a fix.
 
-**What the rerun still showed.** The redrive came 13 s after the hold expired. On AKS no client allows a password grant, so the operations token had to be copied from the browser, and it expires after about five minutes. The operations console now covers listing, redrive and abandonment in the browser; it has not yet been used on the cluster.
+**What the rerun still showed.** The redrive came 13 s after the hold expired, missing the [incident response objective](../design/slo.md#recovery-objectives). On AKS no client allows a password grant, so the operations token had to be copied from the browser, and it expires after about five minutes. The operations console now covers listing, redrive and abandonment in the browser; it has not yet been used on the cluster.
 
 ## Follow-up actions
 

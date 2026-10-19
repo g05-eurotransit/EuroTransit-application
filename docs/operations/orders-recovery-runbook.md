@@ -1,6 +1,6 @@
 # Orders recovery
 
-Recover unresolved orders through the operations API after the dependency has healed. Preserve unknown payment outcomes until retry or provider evidence establishes what happened. Use [checkout lifecycle](../design/reservation-confirmation.md#retry-and-reconciliation) for the retry policy and [SLO definitions](../design/slo.md#recovery-objectives) for proposed recovery objectives.
+Recover unresolved orders through the operations API after the dependency has healed. Preserve unknown payment outcomes until retry or provider evidence establishes what happened. Use [checkout lifecycle](../design/reservation-confirmation.md#retry-and-reconciliation) for the retry policy and [SLO definitions](../design/slo.md#recovery-objectives) for the recovery objectives.
 
 ## Prerequisites
 
