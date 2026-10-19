@@ -1,10 +1,21 @@
-import { defineConfig } from "vite";
+// From vitest/config, not vite: it is the same function plus the `test` block below.
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 // Same-origin dev proxy: the SPA calls /api/* which Vite forwards to Traefik (port 80),
 // mirroring the production same-origin setup (no CORS wildcard needed — 07b slide 12).
 export default defineConfig({
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      // Two entry points: the application, and the tiny page the silent sign-in iframe loads.
+      // Relative to this folder, which is where the build runs from (see frontend/Dockerfile).
+      input: {
+        main: "index.html",
+        "silent-renew": "silent-renew.html",
+      },
+    },
+  },
   css: {
     preprocessorOptions: {
       scss: {

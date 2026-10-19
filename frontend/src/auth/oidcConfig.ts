@@ -20,7 +20,8 @@ export function createOidcConfig(config: RuntimeConfig): AuthProviderProps {
     authority: config.keycloakIssuer,
     client_id: config.keycloakClientId,
     redirect_uri: `${window.location.origin}/callback`,
-    silent_redirect_uri: `${window.location.origin}/callback`,
+    // A static page that only forwards the response: the iframe must not boot the whole SPA.
+    silent_redirect_uri: `${window.location.origin}/silent-renew.html`,
     silentRequestTimeoutInSeconds: 5,
     post_logout_redirect_uri: window.location.origin,
     response_type: "code",
