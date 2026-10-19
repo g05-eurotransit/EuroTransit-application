@@ -39,7 +39,7 @@ This is the project acceptance checklist. Checked items retain the recorded owne
 - [x] CI builds/tests/publishes immutable images and updates the configuration repository.
 - [x] ArgoCD reconciles the cluster state; CI holds no cluster credentials.
 - [x] Orders canary is demonstrated with metric-gated promote/abort.
-- [ ] Catalog blue/green is demonstrated with fast rollback.
+- [x] Catalog blue/green is demonstrated with fast rollback.
 - [x] The team explains why rolling and all-at-once are not used for the critical path.
 - [x] Checkout latency and success-rate SLOs are defined in `design/slo.md`.
 - [ ] RED dashboards, infrastructure USE/Golden Signals dashboards, and symptom-based alerts are live.
