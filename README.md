@@ -22,6 +22,7 @@ Open `http://localhost`. See [development](docs/development/README.md) for setup
 - [Design](docs/design/README.md): service contracts, checkout behavior and decisions.
 - [Development](docs/development/README.md): local setup, conventions and instrumentation.
 - [Orders recovery](docs/operations/orders-recovery-runbook.md): inspect incidents and recover unresolved work.
+- [Payments latency postmortem](docs/operations/payments-latency-postmortem.md): why accepted checkouts waited on an operator, and the corrections.
 - [Verification](docs/verification/README.md): local test results and fault strategy.
 - [Acceptance](docs/capstone-dod.md): project criteria and remaining work.
 
