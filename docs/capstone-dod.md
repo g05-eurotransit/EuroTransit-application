@@ -96,6 +96,7 @@ Use linked issues for current ownership and status. This table adds no acceptanc
 | --- | --- | --- |
 | Payments | Persist an attempt before the provider call and make unknown results discoverable by order | [#142](https://github.com/g05-eurotransit/EuroTransit-application/issues/142) |
 | Notifications | Decide durable customer history versus explicitly best-effort API/product expectations | [#131](https://github.com/g05-eurotransit/EuroTransit-application/issues/131) |
+| Gateway authentication | Accepted gap for delivery: Traefik forward-auth stays disabled, since it needs another authentication proxy on an AKS cluster already at its memory limit. Every service validates the JWT and enforces ownership itself; Inventory and Payments have no public route | [Deployment](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/platform/deployment.md) |
 | Overload | Retain the verified ingress refusal/recovery scope; do not infer a global backlog capacity guarantee | [Cluster evidence](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/verification/README.md) |
 | Delivery and observability | Reconcile actual dashboard/alert signals, tracing deployment and a GitOps release of a new application version | [Configuration readiness](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/readiness.md) |
 | Final delivery | Team review of decisions, hypotheses, acceptance, postmortem, permissions and recorded demonstration | [DoD](capstone-dod.md) |
