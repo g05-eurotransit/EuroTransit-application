@@ -91,8 +91,9 @@ database's clock: redrive instead), `409 ORDER_NOT_ABANDONABLE` (not `PAYMENT_PE
 Before settling, a redrive re-asks Payments: if Payments has recorded the authorization meanwhile, the
 compensation reverses it and the incident closes by itself, with no settlement needed.
 
-**5c. Settle an unknown payment outcome** (operations role). Look the order up at the provider (on the
-Stripe sandbox, by the time window and amount; the configuration's
+**5c. Settle an unknown payment outcome** (operations role). Look the order up at the provider. On the
+Stripe sandbox, a charge made since Payments sends the order id (#151) is found by
+`metadata['order_id']`; an older one only by time window and amount (the configuration's
 `scripts/reliability/provider-audit.py` enumerates a window). Then:
 
 - **No charge, or a charge already refunded**: settle with the provider reference as evidence.
@@ -129,7 +130,9 @@ is authorized and then reversed.
 - **Payments does not record an authorization until the provider has answered.** A charge whose
   answer was lost leaves no row, which is why an abandoned order with no authorization needs the
   provider check of step 5c instead of failing by itself. A Payments that recorded the attempt first
-  would make "no authorization" trustworthy (#142).
+  would make "no authorization" trustworthy (#142). Accepted for delivery: the incident
+  (`PAYMENT_OUTCOME_UNKNOWN`), its alert (`ReconciliationRecordOpen`) and the search by order id
+  keep such a charge visible to an operator.
 - **An authorization Payments records after the order has failed is not noticed.** If a provider call
   still in flight at Payments completes after the settlement's reversal found nothing, Payments writes
   an `AUTHORIZED` row for an order that is already `FAILED`, and nothing in Orders reads it. The window
