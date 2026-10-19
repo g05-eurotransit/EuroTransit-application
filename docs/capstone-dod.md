@@ -66,7 +66,7 @@ This is the project acceptance checklist. Checked items retain the recorded owne
 - [x] Node or AZ-style disruption proves PDBs/topology spread protect the critical path.
 - [x] Kafka disruption proves the async pipeline recovers without lost or duplicated business effects.
 - [x] CloudNativePG primary failover records checkout impact and observed RTO.
-- [ ] Each report includes hypothesis, steady state, injected fault, observations, conclusion, and follow-up change.
+- [x] Each report includes hypothesis, steady state, injected fault, observations, conclusion, and follow-up change.
 
 ## 7. Agentic Coding and Governance
 
