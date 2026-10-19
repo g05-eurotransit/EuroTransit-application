@@ -38,7 +38,7 @@ This is the project acceptance checklist. Checked items retain the recorded owne
 - [x] Two repositories are populated: application and configuration.
 - [x] CI builds/tests/publishes immutable images and updates the configuration repository.
 - [x] ArgoCD reconciles the cluster state; CI holds no cluster credentials.
-- [ ] Orders canary is demonstrated with metric-gated promote/abort.
+- [x] Orders canary is demonstrated with metric-gated promote/abort.
 - [ ] Catalog blue/green is demonstrated with fast rollback.
 - [x] The team explains why rolling and all-at-once are not used for the critical path.
 - [x] Checkout latency and success-rate SLOs are defined in `design/slo.md`.
