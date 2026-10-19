@@ -148,7 +148,7 @@ The adapter calls the Stripe sandbox charge/refund API. It never stores raw card
 
 ## Notifications
 
-`GET /api/notifications` returns the authenticated customer's process-local notification history. `GET /api/notifications/stream` provides authenticated SSE; bearer tokens travel in headers, never query strings. The current store and duplicate guard are in memory, so history does not survive restart and is not shared across replicas. Durable history remains an open product/API issue ([#131](https://github.com/g05-eurotransit/EuroTransit-application/issues/131)); this documents the implementation limitation rather than declaring that requirement resolved.
+`GET /api/notifications` returns the authenticated customer's process-local notification history. `GET /api/notifications/stream` provides authenticated SSE; bearer tokens travel in headers, never query strings. The current store and duplicate guard are in memory, so history does not survive restart and is not shared across replicas. The history is best effort by decision ([ADR-004](architecture-decisions.md#adr-004-notification-failure-mode)); durable history is possible later work, tracked in [#131](https://github.com/g05-eurotransit/EuroTransit-application/issues/131).
 
 ## Kafka events
 
