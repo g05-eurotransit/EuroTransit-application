@@ -63,7 +63,7 @@ This is the project acceptance checklist. Checked items retain the recorded owne
 - [x] The chaos plan in `verification/strategy.md` is complete.
 - [x] Latency injection into Payments proves the Orders circuit breaker opens and Catalog remains healthy.
 - [x] Inventory pod kill mid-hold proves idempotency and no oversell/double-charge.
-- [ ] Node or AZ-style disruption proves PDBs/topology spread protect the critical path.
+- [x] Node or AZ-style disruption proves PDBs/topology spread protect the critical path.
 - [ ] Kafka disruption proves the async pipeline recovers without lost or duplicated business effects.
 - [ ] CloudNativePG primary failover records checkout impact and observed RTO.
 - [ ] Each report includes hypothesis, steady state, injected fault, observations, conclusion, and follow-up change.
