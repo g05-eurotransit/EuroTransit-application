@@ -60,4 +60,54 @@ class NotificationStoreTests {
             .thenCancel()
             .verify()
     }
+
+    @Test
+    fun `recording the same notification twice keeps one entry`() {
+        val store = NotificationStore()
+        val event = view("alice")
+        store.record(event)
+        store.record(event)
+        assertEquals(1, store.historyFor("alice").size)
+    }
+
+    @Test
+    fun `history is ordered by occurrence, not by arrival`() {
+        val store = NotificationStore()
+        val older = view("alice").copy(occurredAt = LocalDateTime.of(2026, 10, 1, 9, 0))
+        val newer = view("alice").copy(occurredAt = LocalDateTime.of(2026, 10, 2, 9, 0))
+        store.record(newer)
+        store.record(older)
+        assertEquals(listOf(newer.id, older.id), store.historyFor("alice").map { it.id })
+    }
+
+    @Test
+    fun `a replayed notification goes to history but not to the live stream`() {
+        val store = NotificationStore()
+        val replayed = view("alice")
+        val fresh = view("alice")
+
+        StepVerifier.create(store.streamFor("alice"))
+            .then {
+                store.record(replayed, live = false)
+                store.record(fresh)
+            }
+            .expectNextMatches { it.id == fresh.id }
+            .thenCancel()
+            .verify()
+
+        assertEquals(setOf(replayed.id, fresh.id), store.historyFor("alice").map { it.id }.toSet())
+    }
+
+    @Test
+    fun `a redelivered notification is not pushed live again`() {
+        val store = NotificationStore()
+        val event = view("alice")
+        store.record(event)
+
+        StepVerifier.create(store.streamFor("alice"))
+            .then { store.record(event) }
+            .expectNoEvent(java.time.Duration.ofMillis(200))
+            .thenCancel()
+            .verify()
+    }
 }

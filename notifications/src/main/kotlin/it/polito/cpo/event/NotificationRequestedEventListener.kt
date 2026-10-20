@@ -8,11 +8,17 @@ import it.polito.cpo.notification.NotificationView
 import it.polito.cpo.notification.NotificationStore
 import it.polito.cpo.notification.RouteView
 import it.polito.cpo.observability.CorrelationId
+import org.apache.kafka.common.TopicPartition
 import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import org.springframework.kafka.annotation.KafkaListener
+import org.springframework.kafka.listener.ConsumerSeekAware
+import org.springframework.kafka.support.KafkaHeaders
+import org.springframework.messaging.handler.annotation.Header
 import org.springframework.stereotype.Component
 import tools.jackson.databind.ObjectMapper
+import java.time.Duration
+import java.time.Instant
 import java.time.LocalDateTime
 import java.util.UUID
 
@@ -30,6 +36,10 @@ import java.util.UUID
  *   (never labelled by principal/order/event id — that would explode metric cardinality).
  * - Never throws out of the listener for a bad payload: a poison message is logged and
  *   counted, not allowed to stall the partition (no DLQ in this slice — documented follow-up).
+ * - Rebuilds the history on start (#131): every partition assignment seeks to the beginning,
+ *   so the in-memory read model is replayed from what the topic still retains. The consumer
+ *   group stays `notifications`: its committed offsets no longer decide where reading starts,
+ *   but the lag alert and the Kafka Pipeline dashboard both select on that group name.
  */
 @Component
 class NotificationRequestedEventListener(
@@ -38,12 +48,25 @@ class NotificationRequestedEventListener(
     private val duplicateGuard: DuplicateEventGuard,
     private val meterRegistry: MeterRegistry,
     private val catalogRouteResolver: CatalogRouteResolver,
-) {
+) : ConsumerSeekAware {
     private val log = LoggerFactory.getLogger(NotificationRequestedEventListener::class.java)
     private val topic = "notification-requested"
 
+    // Records older than this were written before the process could have pushed them, so they are
+    // replayed into history only. The grace keeps live delivery for what arrived while the pod was
+    // down: a customer waiting on a confirmation during a restart still gets it pushed.
+    private val liveSince: Instant = Instant.now().minus(LIVE_GRACE)
+
+    override fun onPartitionsAssigned(
+        assignments: Map<TopicPartition, Long>,
+        callback: ConsumerSeekAware.ConsumerSeekCallback,
+    ) {
+        log.info("Replaying {} from the beginning to rebuild notification history: {}", topic, assignments.keys)
+        callback.seekToBeginning(assignments.keys)
+    }
+
     @KafkaListener(topics = ["notification-requested"], groupId = "\${spring.kafka.consumer.group-id}")
-    fun onMessage(payload: String) {
+    fun onMessage(payload: String, @Header(KafkaHeaders.RECEIVED_TIMESTAMP) recordTimestamp: Long) {
         val event = try {
             objectMapper.readValue(payload, NotificationRequestedEvent::class.java)
         } catch (ex: Exception) {
@@ -72,6 +95,7 @@ class NotificationRequestedEventListener(
                     failureCode = event.payload.failureCode,
                     route = resolveRoute(event.payload),
                 ),
+                live = !Instant.ofEpochMilli(recordTimestamp).isBefore(liveSince),
             )
             log.info("Recorded notification for order {}", event.orderId)
             count("processed")
@@ -102,5 +126,9 @@ class NotificationRequestedEventListener(
 
     private fun count(result: String) {
         meterRegistry.counter("notifications.events.consumed", "topic", topic, "result", result).increment()
+    }
+
+    private companion object {
+        val LIVE_GRACE: Duration = Duration.ofMinutes(5)
     }
 }
