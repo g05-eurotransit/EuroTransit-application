@@ -14,14 +14,30 @@ These targets define the customer money path. A successful HTTP acceptance is no
 **Why the latency SLI starts at the payment (ADR-016).** In the customer-hold flow the order is
 created when the customer presses Continue, and the seats are then held for up to ten minutes (T1)
 while the customer fills in the card. Measuring from `POST /api/orders` would count that reading time
-as checkout latency and break the 2-second target on every order. The metric name is unchanged; dashboard and alert queries still need to select the actual end-to-end histogram. The
+as checkout latency and break the 2-second target on every order. The metric name is unchanged; the checkout dashboard and `CheckoutLatencyHigh` select it. The
 per-delivery timer `orders_checkout_duration_seconds` gains the value `held_awaiting_payment` on its
 `outcome` tag for the delivery that takes a hold and parks.
+
+## Valid checkout attempts
+
+The success-rate SLI counts terminal checkouts, as Orders reports them:
+
+| Outcome | SLI treatment |
+| --- | --- |
+| `orders_checkout_completed_total{result="confirmed"}` | Good |
+| `orders_checkout_failed_total` with any other `reason`, such as `unknown`, `payment_token_missing`, `reservation_expired` or `checkout_abandoned` | Bad: consumes the error budget |
+| `reason="payment_declined"` or `reason="seats_unavailable"` | Excluded: the card was declined or the seats were sold, and the service behaved correctly |
+| Accepted order not yet terminal | Not counted; one that stays non-terminal is `CheckoutStuckNonTerminal` (recovery objectives below) |
+| Request refused before acceptance (4xx, including 429 load shedding) | Not in this SLI: no order exists; the gateway and Orders RED dashboards show it |
+
+The latency SLI uses confirmed checkouts only. `orders_checkout_e2e_duration_seconds` declares 2 s as a service-level objective, so its `le="2.0"` bucket is exact and the SLI is the share of confirmed checkouts at or below it.
 
 ## Error Budget
 
 - Checkout success-rate error budget: 1.0% failed valid checkout attempts per 30 days.
 - Burn-rate alerts must page on user-visible symptoms, not CPU usage alone.
+- `CheckoutFastBurn` pages at 14.4 times the budget rate over both 1 hour and 5 minutes (2% of the 30-day budget in an hour). `CheckoutSlowBurn` opens a ticket at 6 times over both 6 hours and 30 minutes (5% in six hours). Both need at least ten terminal checkouts in the long window.
+- `CheckoutLatencyHigh` opens a ticket when more than 5% of the confirmed checkouts of the last 30 minutes took over 2 s, with at least ten of them.
 - A release is paused or rolled back if the Orders canary consumes more than 10% of the daily error budget during the canary window.
 
 ## Recovery Objectives
@@ -45,8 +61,8 @@ Configuration #57 also sets the two alerts in the table to these thresholds. The
 
 ## Measurement and tracing
 
-Use terminal outcome counters and the end-to-end histogram for completed checkout signals; report acceptance duration separately. Define the valid-attempt population before claiming success-rate compliance, including treatment of expected business refusals, pending work and ingress rejection. No short baseline or fault experiment establishes a rolling 30-day SLO.
+Use terminal outcome counters and the end-to-end histogram for completed checkout signals; report acceptance duration separately. [Valid checkout attempts](#valid-checkout-attempts) define the treatment of business refusals, pending work and ingress rejection. No short baseline or fault experiment establishes a rolling 30-day SLO.
 
 A checkout trace should connect public ingress, Orders acceptance, Inventory hold/payment window/confirmation, payment provider work and Kafka publication/consumption. [Instrumentation conventions](../development/instrumentation.md) own metric names, correlation and trace propagation. Trace IDs in logs do not establish that a queryable trace backend exists.
 
-The [cluster evidence index](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/verification/README.md) records measured recovery, while [readiness](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/readiness.md) records outstanding SLI mapping and tracing gaps. Recovery observations remain useful when no prior numeric RTO was adopted; do not infer compliance or invent a retrospective target.
+The [cluster evidence index](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/verification/README.md) records measured recovery, while [readiness](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/readiness.md) records the remaining environment and tracing gaps. Recovery observations remain useful when no prior numeric RTO was adopted; do not infer compliance or invent a retrospective target.
