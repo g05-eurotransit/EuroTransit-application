@@ -53,7 +53,7 @@ Cancellation and naturally idempotent Inventory confirmation/payment-window/seat
 | `GET /api/catalog/offers` | List offers |
 | `GET /api/catalog/offers/{offerId}` | Offer with per-seat price, currency, machine-readable `refundPolicy`, `termsVersion`, departure time and zone |
 
-`conditions` is display text generated from the refund policy; callers must not parse it. Orders freezes the resolved commercial terms and departure instant at checkout. Catalog currently uses a seeded in-memory repository.
+`conditions` is display text generated from the refund policy; callers must not parse it. Orders freezes the resolved commercial terms and departure instant at checkout. [Catalog storage](catalog-storage.md) supports an explicitly selected PostgreSQL repository and retains the in-memory compatibility default.
 
 ## Orders
 

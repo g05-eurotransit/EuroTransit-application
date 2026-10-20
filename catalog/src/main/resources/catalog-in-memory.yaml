@@ -1,0 +1,6 @@
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.r2dbc.autoconfigure.R2dbcAutoConfiguration
+  flyway:
+    enabled: false

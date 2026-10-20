@@ -32,6 +32,12 @@ services:
     image: eurotransit/catalog:local
     container_name: eurotransit-catalog
     environment:
+      CATALOG_STORAGE: ${CATALOG_STORAGE:-in-memory}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: catalog_db
+      DB_USER: catalog
+      DB_PASSWORD: password
       SERVER_PORT: 8080
       MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: "true"
       MANAGEMENT_OTLP_METRICS_EXPORT_ENABLED: "false"
@@ -42,6 +48,9 @@ services:
       # itself: the spans are produced and dropped, with no error to notice. Catalog was absent
       # from every trace, and the offer lookup Orders makes during checkout ended in nothing.
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
+    depends_on:
+      postgres-init:
+        condition: service_completed_successfully
     expose:
       - "8080"
     labels:
@@ -223,6 +232,14 @@ services:
 
         SELECT 'CREATE USER payments WITH PASSWORD ''password'''
         WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'payments')\gexec
+
+        SELECT 'CREATE USER catalog WITH PASSWORD ''password'''
+        WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'catalog')\gexec
+
+        SELECT 'CREATE DATABASE catalog_db OWNER catalog'
+        WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'catalog_db')\gexec
+
+        REVOKE CONNECT ON DATABASE catalog_db FROM PUBLIC;
 
         SELECT 'CREATE DATABASE orders_db OWNER orders'
         WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'orders_db')\gexec

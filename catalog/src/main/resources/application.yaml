@@ -1,4 +1,6 @@
 spring:
+  config:
+    import: classpath:catalog-${catalog.storage:in-memory}.yaml
   application:
     name: catalog
   reactor:

@@ -6,6 +6,7 @@ import it.polito.cpo.model.Route
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.asFlow
 import org.springframework.stereotype.Repository
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import java.math.BigDecimal
 import java.time.LocalTime
 import java.time.ZoneId
@@ -21,6 +22,7 @@ private val ROME = ZoneId.of("Europe/Rome")
 private val NON_REFUNDABLE = RefundPolicy(refundable = false, cutoffMinutesBeforeDeparture = null)
 
 @Repository
+@ConditionalOnProperty(name = ["catalog.storage"], havingValue = "in-memory", matchIfMissing = true)
 class InMemoryCatalogRepository : RouteRepository {
 
     private val routes = listOf(
