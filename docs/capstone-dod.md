@@ -97,8 +97,9 @@ Use linked issues for current ownership and status. This table adds no acceptanc
 | Payments | Accepted limit for delivery: an attempt is recorded only after the provider answers. Charges carry the order id (#151); a lost answer surfaces as `PAYMENT_OUTCOME_UNKNOWN` for an operator | [#142](https://github.com/g05-eurotransit/EuroTransit-application/issues/142) |
 | Notifications | Decided: customer notification history is best effort (ADR-004). It is rebuilt from the topic on each start, so it survives restarts within the topic's retention; a durable store is possible later work | [#131](https://github.com/g05-eurotransit/EuroTransit-application/issues/131) |
 | Gateway authentication | Accepted gap for delivery: Traefik forward-auth stays disabled. A dedicated authentication proxy does not fit an AKS cluster already at its memory limit, and delegating every request to Keycloak instead would tie the availability and load of every protected API to Keycloak. Every service validates the JWT and enforces ownership itself; Inventory and Payments have no public route | [Deployment](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/platform/deployment.md) |
+| Distributed tracing | Accepted gap for delivery: no trace backend on AKS. Tempo would be a new pod of about 170-300Mi on a cluster already at its memory limit, where one Orders rollout plus the temporary jobs exceeds the request headroom and the student subscription caps the region at six vCPUs. On compose the same instrumentation renders one checkout as a single 36-span trace from Traefik through Orders, Catalog, Inventory, Payments, Notifications and the Kafka stages ([#117](https://github.com/g05-eurotransit/EuroTransit-application/issues/117)); the demo shows that trace as local evidence | [Configuration #38](https://github.com/g05-eurotransit/EuroTransit-configuration/issues/38) |
 | Overload | Retain the verified ingress refusal/recovery scope; do not infer a global backlog capacity guarantee | [Cluster evidence](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/verification/README.md) |
-| Delivery and observability | Reconcile actual dashboard/alert signals, tracing deployment and a GitOps release of a new application version | [Configuration readiness](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/readiness.md) |
+| Delivery and observability | Observe the checkout SLO dashboard and alerts on the selected environment, and demonstrate a GitOps release of a new application version | [Configuration readiness](https://github.com/g05-eurotransit/EuroTransit-configuration/blob/main/docs/readiness.md) |
 | Final delivery | Team review of decisions, hypotheses, acceptance, postmortem, permissions and recorded demonstration | [DoD](capstone-dod.md) |
 
 ## Recorded demonstration
@@ -109,7 +110,7 @@ Record after the [configuration readiness gates](https://github.com/g05-eurotran
 | Time | Show | Required evidence |
 | --- | --- | --- |
 | 0:00 to 0:40 | Running system, five services, single ingress, GitOps revision and immutable images | Actual cluster and Argo state; explain any temporary controller pause |
-| 0:40 to 1:20 | Checkout RED/end-to-end view and one trace | Real confirmed order, terminal SLI, gateway/service/Kafka spans |
+| 0:40 to 1:20 | Checkout RED/end-to-end view and one trace | Real confirmed order, terminal SLI; gateway/service/Kafka spans from the compose trace, labelled as local |
 | 1:20 to 2:20 | Orders canary exposure, gate decision, promote and abort recovery | Candidate hash, Traefik weight, AnalysisRun samples and stable route |
 | 2:20 to 3:10 | Catalog blue/green preview, switch and rollback | Distinct revisions, preview check, active route and retained old revision |
 | 3:10 to 4:20 | One bounded fault, symptom alert and recovery | Actual fault interval, firing alert, user-visible impact and cleanup |
