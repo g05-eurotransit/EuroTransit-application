@@ -5,7 +5,7 @@
   "tags": ["eurotransit", "slo", "checkout"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "30s",
   "time": { "from": "now-6h", "to": "now" },
   "templating": {
@@ -24,8 +24,9 @@
     {
       "type": "stat",
       "title": "Checkout success rate (30m) — SLO 99%",
+      "description": "Confirmed / (confirmed + failed) terminal checkouts. payment_declined and seats_unavailable are business refusals and are excluded (application slo.md).",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
@@ -40,7 +41,52 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "1 - (sum(rate(http_server_requests_seconds_count{namespace=\"eurotransit\", app=\"orders\", uri=~\"/api/orders.*\", status=~\"5..\"}[30m])) / clamp_min(sum(rate(http_server_requests_seconds_count{namespace=\"eurotransit\", app=\"orders\", uri=~\"/api/orders.*\"}[30m])), 0.0001))"
+          "expr": "sum(max by (instance) (rate(orders_checkout_completed_total{namespace=\"eurotransit\", app=\"orders\", result=\"confirmed\"}[30m]))) / (sum(max by (instance) (rate(orders_checkout_completed_total{namespace=\"eurotransit\", app=\"orders\", result=\"confirmed\"}[30m]))) + sum(max by (instance, reason) (rate(orders_checkout_failed_total{namespace=\"eurotransit\", app=\"orders\", reason!~\"payment_declined|seats_unavailable\"}[30m]))))"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Confirmed within 2s (30m) — SLO 95%",
+      "description": "Share of confirmed checkouts whose duration from the accepted payment to confirmation is at most 2 s (orders.checkout.e2e.duration).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 0.95 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "area" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(max by (instance) (rate(orders_checkout_e2e_duration_seconds_bucket{namespace=\"eurotransit\", app=\"orders\", outcome=\"confirmed\", le=\"2.0\"}[30m]))) / sum(max by (instance) (rate(orders_checkout_e2e_duration_seconds_count{namespace=\"eurotransit\", app=\"orders\", outcome=\"confirmed\"}[30m])))"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Checkout p95 latency (payment → confirmed) — SLO 2s",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 2 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "area" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.95, sum by (le) (max by (instance, le) (rate(orders_checkout_e2e_duration_seconds_bucket{namespace=\"eurotransit\", app=\"orders\", outcome=\"confirmed\"}[30m]))))"
         }
       ]
     },
@@ -48,7 +94,7 @@
       "type": "stat",
       "title": "Accept latency p99 (POST /api/orders) — SLO 300ms",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -66,36 +112,17 @@
       ]
     },
     {
-      "type": "stat",
-      "title": "Checkout p95 latency — SLO 2s",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 2 } ] }
-        },
-        "overrides": []
-      },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "area" },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{namespace=\"eurotransit\", app=\"orders\", uri=~\"/api/orders.*\"}[15m])))"
-        }
-      ]
-    },
-    {
       "type": "timeseries",
-      "title": "Checkout 5xx ratio (mirrors CheckoutFastBurn alert, threshold 2%)",
+      "title": "Error budget burn rate (CheckoutFastBurn 14.4×, CheckoutSlowBurn 6×)",
+      "description": "Failed / terminal checkouts divided by the 1% budget. 1 = spending the budget exactly over 30 days.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit",
+          "unit": "short",
           "min": 0,
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.02 } ] }
+          "custom": { "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 6 }, { "color": "red", "value": 14.4 } ] }
         },
         "overrides": []
       },
@@ -103,16 +130,38 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum(rate(http_server_requests_seconds_count{namespace=\"eurotransit\", app=\"orders\", uri=~\"/api/orders.*\", status=~\"5..\"}[10m])) / clamp_min(sum(rate(http_server_requests_seconds_count{namespace=\"eurotransit\", app=\"orders\", uri=~\"/api/orders.*\"}[10m])), 0.0001)",
-          "legendFormat": "5xx ratio"
+          "expr": "(sum(max by (instance, reason) (rate(orders_checkout_failed_total{namespace=\"eurotransit\", app=\"orders\", reason!~\"payment_declined|seats_unavailable\"}[1h]))) / (sum(max by (instance) (rate(orders_checkout_completed_total{namespace=\"eurotransit\", app=\"orders\", result=\"confirmed\"}[1h]))) + sum(max by (instance, reason) (rate(orders_checkout_failed_total{namespace=\"eurotransit\", app=\"orders\", reason!~\"payment_declined|seats_unavailable\"}[1h]))))) / 0.01",
+          "legendFormat": "1h"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "(sum(max by (instance, reason) (rate(orders_checkout_failed_total{namespace=\"eurotransit\", app=\"orders\", reason!~\"payment_declined|seats_unavailable\"}[6h]))) / (sum(max by (instance) (rate(orders_checkout_completed_total{namespace=\"eurotransit\", app=\"orders\", result=\"confirmed\"}[6h]))) + sum(max by (instance, reason) (rate(orders_checkout_failed_total{namespace=\"eurotransit\", app=\"orders\", reason!~\"payment_declined|seats_unavailable\"}[6h]))))) / 0.01",
+          "legendFormat": "6h"
         }
       ]
     },
     {
       "type": "timeseries",
-      "title": "Checkout pipeline duration p95 (orders.checkout.duration)",
+      "title": "Checkout failures by reason (30m)",
+      "description": "payment_declined and seats_unavailable are business refusals; they do not consume the error budget.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (reason) (max by (instance, reason) (increase(orders_checkout_failed_total{namespace=\"eurotransit\", app=\"orders\"}[30m])))",
+          "legendFormat": "{{reason}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Pipeline delivery duration (orders.checkout.duration, per Kafka delivery, diagnostic)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "targets": [
         {
@@ -133,7 +182,7 @@
       "type": "timeseries",
       "title": "Notifications events consumed (rate)",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
       "targets": [
         {
@@ -148,7 +197,7 @@
       "type": "timeseries",
       "title": "Kafka consumer lag (KafkaPipelineStalled > 100)",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
