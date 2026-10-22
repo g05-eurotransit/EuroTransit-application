@@ -9,7 +9,8 @@ These targets define the customer money path. A successful HTTP acceptance is no
 | Checkout success rate | 99.0% over 30 days | Successful confirmed checkouts / valid checkout attempts | Orders emits terminal status metrics by result. |
 | Checkout latency | 95% of successful checkouts complete within 2 seconds over 30 days | Duration from the accepted payment to confirmed/failed terminal status: `POST /api/orders/{orderId}/payment` for a customer-hold order (`payment_submitted_at`), `POST /api/orders` for a direct-flow order | `orders_checkout_e2e_duration_seconds` (same name and buckets as before) and distributed traces. |
 | Checkout acceptance latency | 99% of `POST /api/orders` and `POST /api/orders/{orderId}/payment` responses return within 300 ms | HTTP server duration at gateway and Orders | Gateway and Orders RED metrics. |
-| Notification degradation | 99.9% of successful checkout requests must not fail because Notifications is unavailable | Checkout failures attributed to Notifications / checkout attempts | Orders failure reason metric. |
+| Refund completion | 99% of accepted commercial refunds reach `REFUNDED` over 30 days | Refunds reaching `REFUNDED` / accepted refund requests | `orders_postsale_refund_completed_total` / `orders_postsale_refund_requested_total`; no dashboard panel or alert selects it yet. |
+
 
 **Why the latency SLI starts at the payment (ADR-016).** In the customer-hold flow the order is
 created when the customer presses Continue, and the seats are then held for up to ten minutes (T1)

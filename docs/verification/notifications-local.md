@@ -4,8 +4,8 @@
   load need the load runner (#123, configuration #46) and stay with the cluster half.
 - **Environment:** docker compose, `dev` at `1ab5035` plus this branch
 - **Contract under test:** ADR-004 : *"If Notifications is down, Kafka retains the event and checkout
-  remains successful"*; SLI "Notification degradation" (`slo-observability.md`): checkout failures
-  attributed to Notifications / checkout attempts, target 99.9% unaffected.
+  remains successful"*. The [SLO definitions](../design/slo.md) record this as an architectural
+  guarantee, not a monitored SLI.
 
 | Report element | Summary |
 | --- | --- |
