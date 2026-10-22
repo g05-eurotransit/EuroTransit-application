@@ -209,7 +209,7 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (consumergroup) (kafka_consumergroup_lag{namespace=\"eurotransit\"})",
+          "expr": "sum by (consumergroup) (kafka_consumergroup_lag{namespace=\"eurotransit\"}) or sum by (consumergroup) (label_replace(max by (app, topic, partition) (kafka_consumer_fetch_manager_records_lag{namespace=\"eurotransit\"}), \"consumergroup\", \"$1\", \"app\", \"(.*)\"))",
           "legendFormat": "{{consumergroup}}"
         }
       ]
